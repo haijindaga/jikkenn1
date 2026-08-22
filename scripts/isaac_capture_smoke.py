@@ -183,7 +183,7 @@ try:
     # state rather than borrowing a default pose from a separate demo.
     robot_base_position, robot_base_orientation = panda.get_world_pose()
     robot_state = RobotStateCapture(
-        joint_names=tuple(str(name) for name in panda.joint_names),
+        joint_names=tuple(str(name) for name in panda.dof_names),
         joint_positions=np.asarray(panda.get_joint_positions(), dtype=np.float64),
         T_world_robot_base=matrix_from_pose(robot_base_position, robot_base_orientation),
         prim_path="/World/Panda",
