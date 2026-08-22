@@ -21,6 +21,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-frames", type=int, default=60)
     parser.add_argument("--resolution", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"), default=(640, 480))
     parser.add_argument("--horizontal-fov", type=float, default=69.0)
+    parser.add_argument(
+        "--camera-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=(1.25, 0.0, 1.35),
+        help="Camera position in Isaac world metres",
+    )
+    parser.add_argument(
+        "--camera-target",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=(0.48, 0.0, 0.73),
+        help="World point at which the camera looks",
+    )
+    parser.add_argument(
+        "--camera-name",
+        default="camera_0",
+        help="Capture directory name; use a unique name for each viewpoint",
+    )
     parser.add_argument("--sam3-prompt", help="Optional short noun phrase, for example 'blue block'")
     parser.add_argument("--sam3-output", type=Path)
     parser.add_argument("--sam3-model-id", default="facebook/sam3")
@@ -98,12 +119,12 @@ try:
         )
     )
 
-    camera_position = np.array([1.25, 0.0, 1.35])
-    camera_target = np.array([0.48, 0.0, 0.73])
+    camera_position = np.asarray(args.camera_position, dtype=np.float64)
+    camera_target = np.asarray(args.camera_target, dtype=np.float64)
     camera_orientation = look_at_quaternion_world(camera_position, camera_target)
     width, height = args.resolution
     camera = Camera(
-        prim_path="/World/Camera0",
+        prim_path=f"/World/{args.camera_name}",
         position=camera_position,
         orientation=camera_orientation,
         frequency=30,
@@ -172,7 +193,7 @@ try:
         depth_m=depth_m,
         intrinsics=intrinsics,
         T_world_camera=T_world_camera,
-        camera_name="camera_0",
+        camera_name=args.camera_name,
         points_camera=points_camera,
         points_world=points_world,
     )
