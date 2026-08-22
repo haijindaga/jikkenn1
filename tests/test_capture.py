@@ -37,3 +37,33 @@ class CaptureTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not match"):
             invalid.validate()
+
+    def test_capture_saves_pixel_aligned_point_maps(self):
+        base = make_capture()
+        camera_points = np.zeros((2, 3, 3), dtype=np.float32)
+        camera_points[..., 2] = 1.0
+        capture = RgbdCapture(
+            rgb=base.rgb,
+            depth_m=base.depth_m,
+            intrinsics=base.intrinsics,
+            T_world_camera=base.T_world_camera,
+            points_camera=camera_points,
+            points_world=camera_points.copy(),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = capture.save(Path(temporary_directory), write_previews=False)
+            self.assertTrue(np.array_equal(np.load(output / "points_camera.npy"), camera_points))
+            metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["point_maps"]["layout"], "pixel_aligned_HxWx3")
+
+    def test_capture_rejects_point_map_with_wrong_shape(self):
+        base = make_capture()
+        invalid = RgbdCapture(
+            rgb=base.rgb,
+            depth_m=base.depth_m,
+            intrinsics=base.intrinsics,
+            T_world_camera=base.T_world_camera,
+            points_camera=np.zeros((6, 3), dtype=np.float32),
+        )
+        with self.assertRaisesRegex(ValueError, "points_camera must have shape"):
+            invalid.validate()
