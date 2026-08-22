@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Isaac Sim 5.1 smoke test: Panda scene plus one calibrated RGB-D frame.
+"""Isaac Sim 5.1 smoke test: calibrated RGB-D and optional SAM3 segmentation.
 
-Run from the repository root inside ``env_isaaclab``.  No grasping, SAM3 or
-motion planning is performed here.
+Run from the repository root inside ``env_isaaclab``.  No grasping or motion
+planning is performed here.
 """
 
 from __future__ import annotations
@@ -21,6 +21,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-frames", type=int, default=60)
     parser.add_argument("--resolution", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"), default=(640, 480))
     parser.add_argument("--horizontal-fov", type=float, default=69.0)
+    parser.add_argument("--sam3-prompt", help="Optional short noun phrase, for example 'blue block'")
+    parser.add_argument("--sam3-output", type=Path)
+    parser.add_argument("--sam3-model-id", default="facebook/sam3")
+    parser.add_argument("--sam3-score-threshold", type=float, default=0.5)
+    parser.add_argument("--sam3-mask-threshold", type=float, default=0.5)
+    parser.add_argument("--sam3-device", default="cuda")
+    parser.add_argument("--sam3-dtype", choices=("fp16", "fp32"), default="fp16")
+    parser.add_argument(
+        "--sam3-allow-download",
+        action="store_true",
+        help="Allow Hugging Face network access instead of requiring the local model cache",
+    )
     return parser.parse_args()
 
 
@@ -130,37 +142,46 @@ try:
     # right, y down) and the saved transform use the same convention.
     optical_position, optical_orientation = camera.get_world_pose(camera_axes="ros")
     T_world_camera = matrix_from_pose(optical_position, optical_orientation)
+    # Follow Isaac Sim 5.1's own Camera point-cloud implementation: use pixel
+    # centres and the built-in projection APIs.  The serialized transform is
+    # independently checked against the official world-frame result so later
+    # processes can safely consume T_world_camera.
+    valid = np.isfinite(depth_m) & (depth_m > 0.0)
+    valid_vu = np.argwhere(valid)
+    if valid_vu.size == 0:
+        raise RuntimeError("camera produced no valid metric depth")
+    valid_uv = np.column_stack(
+        (valid_vu[:, 1].astype(np.float32) + 0.5, valid_vu[:, 0].astype(np.float32) + 0.5)
+    )
+    valid_depth = depth_m[valid_vu[:, 0], valid_vu[:, 1]].astype(np.float32, copy=False)
+
+    official_camera_points_all = np.asarray(
+        camera.get_camera_points_from_image_coords(valid_uv, valid_depth), dtype=np.float64
+    )
+    official_world_points_all = np.asarray(
+        camera.get_world_points_from_image_coords(valid_uv, valid_depth), dtype=np.float64
+    )
+    points_camera = np.full((*depth_m.shape, 3), np.nan, dtype=np.float32)
+    points_world = np.full((*depth_m.shape, 3), np.nan, dtype=np.float32)
+    points_camera[valid_vu[:, 0], valid_vu[:, 1]] = official_camera_points_all
+    points_world[valid_vu[:, 0], valid_vu[:, 1]] = official_world_points_all
+
     capture = RgbdCapture(
         rgb=rgb,
         depth_m=depth_m,
         intrinsics=intrinsics,
         T_world_camera=T_world_camera,
         camera_name="camera_0",
+        points_camera=points_camera,
+        points_world=points_world,
     )
     saved = capture.save(args.output)
 
-    # Follow Isaac Sim 5.1's own Camera point-cloud implementation: use pixel
-    # centres and the built-in projection APIs.  The serialized transform is
-    # independently checked against the official world-frame result so later
-    # processes can safely consume T_world_camera.
-    valid = np.isfinite(depth_m) & (depth_m > 0.05) & (depth_m < 3.0)
-    valid_vu = np.argwhere(valid)
-    if valid_vu.size == 0:
-        raise RuntimeError("camera produced no valid metric depth")
     sample_count = min(256, valid_vu.shape[0])
     sample_indices = np.linspace(0, valid_vu.shape[0] - 1, sample_count, dtype=np.int64)
-    sampled_vu = valid_vu[sample_indices]
-    sampled_uv = np.column_stack(
-        (sampled_vu[:, 1].astype(np.float32) + 0.5, sampled_vu[:, 0].astype(np.float32) + 0.5)
-    )
-    sampled_depth = depth_m[sampled_vu[:, 0], sampled_vu[:, 1]].astype(np.float32, copy=False)
-
-    official_camera_points = np.asarray(
-        camera.get_camera_points_from_image_coords(sampled_uv, sampled_depth), dtype=np.float64
-    )
-    official_world_points = np.asarray(
-        camera.get_world_points_from_image_coords(sampled_uv, sampled_depth), dtype=np.float64
-    )
+    sampled_uv = valid_uv[sample_indices]
+    official_camera_points = official_camera_points_all[sample_indices]
+    official_world_points = official_world_points_all[sample_indices]
     reprojected_uv = np.asarray(
         camera.get_image_coords_from_world_points(official_world_points), dtype=np.float64
     )
@@ -191,9 +212,52 @@ try:
             f"pixel_error={max_pixel_error:.6g} px, world_error={max_world_error_m:.6g} m; "
             f"details saved to {saved / 'geometry_check.json'}"
         )
+    segmentation_directory = None
+    if args.sam3_prompt:
+        from panda_handover.segmentation import infer_sam3_instances, save_segmentation_artifacts
+
+        segmentation_directory = args.sam3_output or (args.output / "sam3")
+        prediction = infer_sam3_instances(
+            rgb,
+            args.sam3_prompt,
+            model_id=args.sam3_model_id,
+            device=args.sam3_device,
+            dtype=args.sam3_dtype,
+            score_threshold=args.sam3_score_threshold,
+            mask_threshold=args.sam3_mask_threshold,
+            local_files_only=not args.sam3_allow_download,
+        )
+        segmentation_report = save_segmentation_artifacts(
+            segmentation_directory,
+            rgb=rgb,
+            depth_m=depth_m,
+            points_camera=points_camera,
+            points_world=points_world,
+            prediction=prediction,
+            prompt=args.sam3_prompt,
+            model_id=args.sam3_model_id,
+            score_threshold=args.sam3_score_threshold,
+            mask_threshold=args.sam3_mask_threshold,
+        )
+        if not segmentation_report["automatic_checks_passed"]:
+            raise RuntimeError(
+                "SAM3 returned no mask with valid 3D points; inspect "
+                f"{segmentation_directory / 'segmentation_check.json'} and try a simpler noun phrase"
+            )
+
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "run_status.json").write_text(
-        json.dumps({"status": "success", "capture_directory": str(saved)}, indent=2) + "\n",
+        json.dumps(
+            {
+                "status": "success",
+                "capture_directory": str(saved),
+                "segmentation_directory": (
+                    str(segmentation_directory) if segmentation_directory is not None else None
+                ),
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"saved calibrated RGB-D capture to {saved}", flush=True)
@@ -204,6 +268,8 @@ try:
         f"camera validation max errors: {max_pixel_error:.6g} px, {max_world_error_m:.6g} m",
         flush=True,
     )
+    if segmentation_directory is not None:
+        print(f"saved SAM3 segmentation and masked point clouds to {segmentation_directory}", flush=True)
 except Exception as exc:
     failure_traceback = traceback.format_exc()
     args.output.mkdir(parents=True, exist_ok=True)
