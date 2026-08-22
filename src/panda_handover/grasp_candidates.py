@@ -52,6 +52,40 @@ def prepare_scene_point_cloud(
     return points.astype(np.float32, copy=False), instance_mask, int(instance_pixels.sum())
 
 
+def split_target_from_scene(
+    points_camera: np.ndarray,
+    union_mask: np.ndarray,
+    rgb: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Split one organized Isaac point map into target and non-target points.
+
+    This is the same caller-side contract used by GraspGenX's official scene
+    collision demo: the target pixels are removed before checking the gripper
+    mesh against the rest of the scene.  No depth reprojection is performed.
+    """
+    points = np.asarray(points_camera)
+    mask = np.asarray(union_mask, dtype=bool)
+    colors = np.asarray(rgb)
+    if points.ndim != 3 or points.shape[2] != 3:
+        raise ValueError(f"points_camera must have shape (H, W, 3), got {points.shape}")
+    if mask.shape != points.shape[:2]:
+        raise ValueError(
+            f"union_mask shape {mask.shape} does not match point map {points.shape[:2]}"
+        )
+    if colors.shape != points.shape:
+        raise ValueError(f"rgb must have shape {points.shape}, got {colors.shape}")
+
+    valid = np.all(np.isfinite(points), axis=2)
+    target = valid & mask
+    surrounding = valid & ~mask
+    return (
+        points[surrounding].astype(np.float32, copy=False),
+        colors[surrounding].astype(np.uint8, copy=False),
+        points[target].astype(np.float32, copy=False),
+        colors[target].astype(np.uint8, copy=False),
+    )
+
+
 def transform_grasp_poses(
     grasps_camera: np.ndarray, T_world_camera: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -183,6 +217,109 @@ def save_grasp_candidates(
         },
     }
     (output / "graspgenx_check.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def save_collision_filter_results(
+    output: str | Path,
+    *,
+    grasps_camera: np.ndarray,
+    scores: np.ndarray,
+    branch_tags: list[str],
+    collision_free_mask: np.ndarray,
+    T_world_camera: np.ndarray,
+    collision_scene_camera: np.ndarray,
+    scene_point_count_before_downsampling: int,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the official point-cloud collision filter's exact inputs/results."""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    grasps = np.asarray(grasps_camera, dtype=np.float32).reshape(-1, 4, 4)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    keep = np.asarray(collision_free_mask, dtype=bool).reshape(-1)
+    collision_scene = np.asarray(collision_scene_camera, dtype=np.float32)
+    if scores.shape[0] != grasps.shape[0] or keep.shape[0] != grasps.shape[0]:
+        raise ValueError("grasps, scores and collision_free_mask must have equal lengths")
+    if len(branch_tags) != grasps.shape[0]:
+        raise ValueError("branch_tags and grasps_camera have different lengths")
+    if collision_scene.ndim != 2 or collision_scene.shape[1] != 3:
+        raise ValueError(
+            f"collision_scene_camera must have shape (N, 3), got {collision_scene.shape}"
+        )
+    if not np.all(np.isfinite(collision_scene)):
+        raise ValueError("collision_scene_camera must contain only finite points")
+
+    kept_indices = np.flatnonzero(keep).astype(np.int32)
+    filtered_camera = grasps[keep]
+    filtered_scores = scores[keep]
+    filtered_tags = [tag for tag, accepted in zip(branch_tags, keep) if accepted]
+    filtered_world, filtered_panda_hand = transform_grasp_poses(
+        filtered_camera, T_world_camera
+    )
+    best_filtered_index = (
+        int(np.argmax(filtered_scores)) if filtered_scores.size else None
+    )
+    best_original_index = (
+        int(kept_indices[best_filtered_index])
+        if best_filtered_index is not None
+        else None
+    )
+
+    np.save(output / "collision_free_mask.npy", keep)
+    np.save(output / "kept_candidate_indices.npy", kept_indices)
+    np.save(output / "collision_scene_camera.npy", collision_scene)
+    np.save(output / "grasps_camera.npy", filtered_camera)
+    np.save(output / "scores.npy", filtered_scores)
+    np.save(output / "grasps_world.npy", filtered_world)
+    np.save(output / "panda_hand_world.npy", filtered_panda_hand)
+    (output / "branch_tags.json").write_text(
+        json.dumps(filtered_tags, indent=2) + "\n", encoding="utf-8"
+    )
+
+    report: dict[str, Any] = {
+        "status": "success" if kept_indices.size else "no_collision_free_candidates",
+        "reference": {
+            "implementation": "NVIDIA GraspGenX official filter_colliding_grasps",
+            "demo": "GraspGenX scripts/demo_scene_pc.py",
+            "url": "https://github.com/NVlabs/GraspGenX/blob/main/scripts/demo_scene_pc.py",
+        },
+        "frame": "opencv_optical_x_right_y_down_z_forward",
+        "parameters": _json_compatible(parameters),
+        "scene": {
+            "target_pixels_removed": True,
+            "points_before_downsampling": int(scene_point_count_before_downsampling),
+            "points_used": int(collision_scene.shape[0]),
+        },
+        "candidates": {
+            "before": int(grasps.shape[0]),
+            "collision_free": int(kept_indices.size),
+            "rejected_as_colliding": int(grasps.shape[0] - kept_indices.size),
+            "best_kept_original_index": best_original_index,
+            "best_score": (
+                float(filtered_scores[best_filtered_index])
+                if best_filtered_index is not None
+                else None
+            ),
+            "camera_pose_quality": pose_quality(filtered_camera),
+            "world_pose_quality": pose_quality(filtered_world),
+            "panda_hand_pose_quality": pose_quality(filtered_panda_hand),
+        },
+        "safety": {
+            "static_gripper_pose_vs_observed_scene_checked": True,
+            "checker": "simple point-cloud nearest-distance filter",
+            "approach_sweep_checked": False,
+            "unobserved_space_checked": False,
+            "robot_reachability_checked": False,
+            "robot_self_collision_checked": False,
+            "trajectory_planned": False,
+            "safe_to_execute": False,
+            "manual_review_required": True,
+        },
+    }
+    (output / "collision_filter_check.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return report
