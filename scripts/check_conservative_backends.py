@@ -12,6 +12,9 @@ import sys
 
 
 EXPECTED_NVBLOX_TORCH_SERIES = "0.0.10"
+EXPECTED_TORCH_VERSION = "2.9.1+cu128"
+EXPECTED_TORCHVISION_VERSION = "0.24.1+cu128"
+EXPECTED_NPP_VERSION = "12.3.3.65"
 EXPECTED_ISAAC_ROS_NVBLOX_COMMIT = "a0dbb2a06475dc8fa0dbdf5b919ec53973843d17"
 EXPECTED_NVBLOX_CORE_COMMIT = "24eee4948768682fa1ffb969b881efee4fca29c2"
 
@@ -86,38 +89,64 @@ def audit_isaac_ros_source(source: Path) -> dict:
 
 def main() -> int:
     args = parse_args()
+    torch_actual = distribution_version("torch")
+    torchvision_actual = distribution_version("torchvision")
+    npp_actual = distribution_version("nvidia-npp-cu12")
+    required_versions_match = (
+        torch_actual == EXPECTED_TORCH_VERSION
+        and torchvision_actual == EXPECTED_TORCHVISION_VERSION
+        and npp_actual == EXPECTED_NPP_VERSION
+    )
     report = {
         "python": sys.version,
         "backend_a": {
             "nvblox_torch_expected_series": EXPECTED_NVBLOX_TORCH_SERIES,
             "nvblox_torch_actual": distribution_version("nvblox-torch"),
             "scipy": distribution_version("scipy"),
-            "torch": distribution_version("torch"),
+            "torch_expected": EXPECTED_TORCH_VERSION,
+            "torch_actual": torch_actual,
+            "torchvision_expected": EXPECTED_TORCHVISION_VERSION,
+            "torchvision_actual": torchvision_actual,
+            "nvidia_npp_cu12_expected": EXPECTED_NPP_VERSION,
+            "nvidia_npp_cu12_actual": npp_actual,
+            "required_versions_match": required_versions_match,
         },
     }
-    try:
-        from nvblox_torch.mapper import Mapper, QueryType
-        from nvblox_torch.mapper_params import (
-            MapperParams,
-            ProjectiveIntegratorParams,
-            ViewCalculatorParams,
+    if not required_versions_match:
+        report["backend_a"]["required_api_available"] = False
+        report["backend_a"]["api_import_error"] = (
+            "Skipped native import because Backend A versions do not match the "
+            "official nvblox v0.0.10 x86_64/CUDA 12 build set"
         )
-        from nvblox_torch.sensor import Sensor
-
-        report["backend_a"]["required_api_available"] = all(
-            item is not None
-            for item in (
-                Mapper,
-                QueryType.TSDF,
+    else:
+        try:
+            import torch
+            from nvblox_torch.mapper import Mapper, QueryType
+            from nvblox_torch.mapper_params import (
                 MapperParams,
                 ProjectiveIntegratorParams,
                 ViewCalculatorParams,
-                Sensor,
             )
-        )
-    except Exception as error:  # The audit must report binary-load failures cleanly.
-        report["backend_a"]["required_api_available"] = False
-        report["backend_a"]["api_import_error"] = repr(error)
+            from nvblox_torch.sensor import Sensor
+
+            report["backend_a"]["torch_cuda_runtime"] = torch.version.cuda
+            report["backend_a"]["torch_cxx11_abi"] = bool(
+                torch._C._GLIBCXX_USE_CXX11_ABI
+            )
+            report["backend_a"]["required_api_available"] = all(
+                item is not None
+                for item in (
+                    Mapper,
+                    QueryType.TSDF,
+                    MapperParams,
+                    ProjectiveIntegratorParams,
+                    ViewCalculatorParams,
+                    Sensor,
+                )
+            )
+        except Exception as error:  # Report binary-load failures cleanly.
+            report["backend_a"]["required_api_available"] = False
+            report["backend_a"]["api_import_error"] = repr(error)
     if args.isaac_ros_nvblox_source is not None:
         report["backend_b"] = audit_isaac_ros_source(
             args.isaac_ros_nvblox_source.resolve()
@@ -128,7 +157,7 @@ def main() -> int:
         backend_a["nvblox_torch_actual"] is not None
         and backend_a["nvblox_torch_actual"].startswith(EXPECTED_NVBLOX_TORCH_SERIES)
         and backend_a["scipy"] is not None
-        and backend_a["torch"] is not None
+        and backend_a["required_versions_match"]
         and backend_a["required_api_available"]
     )
     if "backend_b" in report:

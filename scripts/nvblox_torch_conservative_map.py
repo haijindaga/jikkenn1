@@ -18,6 +18,7 @@ import numpy as np
 
 
 NVBLOX_VERSION_SERIES = "0.0.10"
+TORCH_VERSION = "2.9.1+cu128"
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +57,13 @@ def main() -> int:
 
     import torch
 
+    installed_torch_version = metadata.version("torch")
+    if installed_torch_version != TORCH_VERSION:
+        raise RuntimeError(
+            "backend A must run in its isolated official-compatible environment; "
+            f"expected torch {TORCH_VERSION}, found {installed_torch_version}. "
+            "Use: bash scripts/run_nvblox_a.sh scripts/nvblox_torch_conservative_map.py ..."
+        )
     if not torch.cuda.is_available():
         raise RuntimeError("nvblox_torch mapping requires CUDA")
     try:
@@ -188,6 +196,8 @@ def main() -> int:
         "reference": {
             "nvblox_torch_required_version_series": NVBLOX_VERSION_SERIES,
             "nvblox_torch_runtime_version": installed_version,
+            "torch_required_version": TORCH_VERSION,
+            "torch_runtime_version": installed_torch_version,
             "tsdf_api": "Mapper.add_depth_frame + Mapper.query_layer(QueryType.TSDF)",
             "distance_transform": "scipy.ndimage.distance_transform_edt",
         },
