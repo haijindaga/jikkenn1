@@ -19,6 +19,8 @@ class RgbdCapture:
     T_world_camera: np.ndarray
     camera_name: str = "camera_0"
     frame_convention: str = "opencv_optical_x_right_y_down_z_forward"
+    points_camera: np.ndarray | None = None
+    points_world: np.ndarray | None = None
 
     def validate(self) -> None:
         rgb = np.asarray(self.rgb)
@@ -44,6 +46,22 @@ class RgbdCapture:
             raise ValueError("T_world_camera rotation is not orthonormal")
         if not self.camera_name:
             raise ValueError("camera_name must not be empty")
+        for name, point_map in (
+            ("points_camera", self.points_camera),
+            ("points_world", self.points_world),
+        ):
+            if point_map is None:
+                continue
+            point_map = np.asarray(point_map)
+            if point_map.shape != (*depth.shape, 3):
+                raise ValueError(
+                    f"{name} must have shape {(*depth.shape, 3)}, got {point_map.shape}"
+                )
+            if not np.issubdtype(point_map.dtype, np.floating):
+                raise ValueError(f"{name} must be floating-point metres, got {point_map.dtype}")
+            valid_depth = np.isfinite(depth) & (depth > 0.0)
+            if valid_depth.any() and not np.all(np.isfinite(point_map[valid_depth])):
+                raise ValueError(f"{name} contains non-finite points for valid depth pixels")
 
     def save(self, root: str | Path, *, write_previews: bool = True) -> Path:
         """Save lossless arrays and optional human-readable PNG previews."""
@@ -54,10 +72,14 @@ class RgbdCapture:
         np.save(output / "depth_m.npy", self.depth_m.astype(np.float32, copy=False))
         np.save(output / "intrinsics.npy", self.intrinsics.astype(np.float64, copy=False))
         np.save(output / "T_world_camera.npy", self.T_world_camera.astype(np.float64, copy=False))
+        if self.points_camera is not None:
+            np.save(output / "points_camera.npy", self.points_camera.astype(np.float32, copy=False))
+        if self.points_world is not None:
+            np.save(output / "points_world.npy", self.points_world.astype(np.float32, copy=False))
 
         valid_depth = np.asarray(self.depth_m)[np.isfinite(self.depth_m) & (self.depth_m > 0)]
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "camera_name": self.camera_name,
             "frame_convention": self.frame_convention,
             "rgb_shape": list(self.rgb.shape),
@@ -66,6 +88,11 @@ class RgbdCapture:
             "valid_depth_pixels": int(valid_depth.size),
             "depth_min_m": float(valid_depth.min()) if valid_depth.size else None,
             "depth_max_m": float(valid_depth.max()) if valid_depth.size else None,
+            "point_maps": {
+                "camera": self.points_camera is not None,
+                "world": self.points_world is not None,
+                "layout": "pixel_aligned_HxWx3",
+            },
         }
         (output / "metadata.json").write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -92,4 +119,3 @@ class RgbdCapture:
         colored = cv2.applyColorMap(255 - preview, cv2.COLORMAP_TURBO)
         colored[~valid] = 0
         cv2.imwrite(str(output / "depth_preview.png"), colored)
-
