@@ -22,7 +22,6 @@ EXPECTED = {
     "cvxpy": "1.5.3",
     "osqp": "0.6.7.post3",
     "transformers": "5.13.1",
-    "warp-lang": "1.8.2",
 }
 
 
@@ -68,6 +67,12 @@ def main() -> int:
         "conda_default_env": os.environ.get("CONDA_DEFAULT_ENV"),
         "packages": packages,
         "isaac_packages": isaac_packages,
+        "kit_managed_extensions": {
+            "omni.warp.core": {
+                "expected": "1.8.2",
+                "note": "Loaded by Isaac Kit after SimulationApp starts; it is not required as an external warp-lang distribution.",
+            }
+        },
         "expected_mismatches": mismatches,
         "nvidia_smi": command_output(
             ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"]
@@ -93,4 +98,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
