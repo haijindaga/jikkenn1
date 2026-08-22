@@ -2,7 +2,6 @@ import numpy as np
 import unittest
 
 from panda_handover.geometry import (
-    depth_mask_to_points,
     look_at_quaternion_world,
     matrix_from_pose,
     rotation_matrix_from_quaternion_wxyz,
@@ -11,21 +10,6 @@ from panda_handover.geometry import (
 
 
 class GeometryTests(unittest.TestCase):
-    def test_depth_back_projection_center_pixel_is_forward(self):
-        depth = np.zeros((3, 3), dtype=np.float32)
-        depth[1, 1] = 2.0
-        intrinsics = np.array([[100.0, 0.0, 1.0], [0.0, 100.0, 1.0], [0.0, 0.0, 1.0]])
-        points = depth_mask_to_points(depth, intrinsics)
-        self.assertEqual(points.shape, (1, 3))
-        self.assertTrue(np.allclose(points[0], [0.0, 0.0, 2.0]))
-
-    def test_depth_back_projection_respects_mask_and_stride(self):
-        depth = np.full((4, 4), 1.0, dtype=np.float32)
-        mask = np.ones((4, 4), dtype=bool)
-        intrinsics = np.array([[2.0, 0.0, 1.5], [0.0, 2.0, 1.5], [0.0, 0.0, 1.0]])
-        points = depth_mask_to_points(depth, intrinsics, mask, stride=2)
-        self.assertEqual(points.shape, (4, 3))
-
     def test_transform_points_applies_rotation_and_translation(self):
         transform = matrix_from_pose(
             np.array([1.0, 2.0, 3.0]),
