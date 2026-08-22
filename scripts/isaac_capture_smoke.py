@@ -59,10 +59,11 @@ try:
         matrix_from_pose,
         transform_points,
     )
+    from panda_handover.robot_state import RobotStateCapture
 
     world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 60.0, rendering_dt=1.0 / 30.0)
     world.scene.add_default_ground_plane()
-    world.scene.add(Franka(prim_path="/World/Panda", name="panda"))
+    panda = world.scene.add(Franka(prim_path="/World/Panda", name="panda"))
 
     # The table and primitives are only geometry/camera checks.  Tool assets are
     # introduced after the RGB-D contract is verified.
@@ -177,6 +178,18 @@ try:
     )
     saved = capture.save(args.output)
 
+    # cuRobo's official RobotSegmenter requires the measured articulation state
+    # and the camera pose relative to the robot base. Save the actual Isaac
+    # state rather than borrowing a default pose from a separate demo.
+    robot_base_position, robot_base_orientation = panda.get_world_pose()
+    robot_state = RobotStateCapture(
+        joint_names=tuple(str(name) for name in panda.joint_names),
+        joint_positions=np.asarray(panda.get_joint_positions(), dtype=np.float64),
+        T_world_robot_base=matrix_from_pose(robot_base_position, robot_base_orientation),
+        prim_path="/World/Panda",
+    )
+    robot_state_path = robot_state.save(saved, T_world_camera)
+
     sample_count = min(256, valid_vu.shape[0])
     sample_indices = np.linspace(0, valid_vu.shape[0] - 1, sample_count, dtype=np.int64)
     sampled_uv = valid_uv[sample_indices]
@@ -264,6 +277,7 @@ try:
     print(f"rgb={rgb.shape} depth={depth_m.shape} valid_depth={valid.sum()}", flush=True)
     print(f"intrinsics=\n{intrinsics}", flush=True)
     print(f"T_world_camera=\n{T_world_camera}", flush=True)
+    print(f"saved Panda state to {robot_state_path}", flush=True)
     print(
         f"camera validation max errors: {max_pixel_error:.6g} px, {max_world_error_m:.6g} m",
         flush=True,
