@@ -12,6 +12,12 @@ BOOTSTRAP_PYTHON="${NVBLOX_A_BOOTSTRAP_PYTHON:-python}"
 TORCH_INDEX="https://download.pytorch.org/whl/cu128"
 NVBLOX_WHEEL="https://github.com/nvidia-isaac/nvblox/releases/download/v0.0.10/nvblox_torch-0.0.10+cu12ubuntu22-py3-none-linux_x86_64.whl"
 
+# ROS 2 Humble exports Python 3.10 packages through PYTHONPATH.  Backend A uses
+# Python 3.11 and must not inspect or import packages from that parent process.
+unset PYTHONPATH
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+
 if [[ -e "${VENV_DIR}" && ! -f "${VENV_DIR}/pyvenv.cfg" ]]; then
     echo "Refusing to use a non-venv path: ${VENV_DIR}" >&2
     exit 2

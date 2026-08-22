@@ -9,6 +9,11 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${NVBLOX_A_VENV:-${REPO_ROOT}/.venv-nvblox-a}"
 VENV_PYTHON="${VENV_DIR}/bin/python"
 
+# Keep the sidecar isolated from ROS/Isaac Python paths inherited by the shell.
+unset PYTHONPATH
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+
 if [[ ! -x "${VENV_PYTHON}" ]]; then
     echo "Backend A environment is missing: ${VENV_DIR}" >&2
     echo "Run: bash scripts/setup_nvblox_a_env.sh" >&2
