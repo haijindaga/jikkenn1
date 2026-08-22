@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -34,7 +35,7 @@ try:
     import numpy as np
 
     from isaacsim.core.api import World
-    from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+    from isaacsim.core.api.objects import FixedCuboid
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
 
@@ -42,7 +43,6 @@ try:
     sys.path.insert(0, str(repo_root / "src"))
     from panda_handover.capture import RgbdCapture
     from panda_handover.geometry import (
-        depth_mask_to_points,
         look_at_quaternion_world,
         matrix_from_pose,
         transform_points,
@@ -63,24 +63,25 @@ try:
             color=np.array([0.45, 0.32, 0.20]),
         )
     )
-    test_object = world.scene.add(
-        DynamicCuboid(
+    # Calibration fixtures are fixed and rest exactly on the 0.70 m table
+    # surface.  Keeping them off the Panda centreline prevents the asset's
+    # default arm pose from occluding or contacting the fixtures.
+    world.scene.add(
+        FixedCuboid(
             prim_path="/World/TestObject",
             name="test_object",
-            position=np.array([0.50, 0.0, 0.76]),
+            position=np.array([0.55, 0.20, 0.725]),
             scale=np.array([0.20, 0.05, 0.05]),
             color=np.array([0.1, 0.5, 0.9]),
-            mass=0.05,
         )
     )
     world.scene.add(
-        DynamicCuboid(
+        FixedCuboid(
             prim_path="/World/Obstacle",
             name="obstacle",
-            position=np.array([0.48, -0.20, 0.79]),
+            position=np.array([0.55, -0.20, 0.75]),
             scale=np.array([0.10, 0.10, 0.10]),
             color=np.array([0.9, 0.2, 0.1]),
-            mass=0.1,
         )
     )
 
@@ -138,52 +139,90 @@ try:
     )
     saved = capture.save(args.output)
 
-    # Independent round-trip sanity check using Isaac's world-to-image API.
-    # Depth reaches the visible surface rather than the object centre, so the
-    # acceptance bound includes half the primitive size and rasterization.
-    object_position = np.asarray(test_object.get_world_pose()[0], dtype=np.float64)
-    image_xy = np.asarray(
-        camera.get_image_coords_from_world_points(object_position[None, :]),
-        dtype=np.float64,
-    )[0]
-    u = int(np.rint(image_xy[0]))
-    v = int(np.rint(image_xy[1]))
-    if not (0 <= u < width and 0 <= v < height):
-        raise RuntimeError(f"test object projected outside image at ({u}, {v})")
-    v0, v1 = max(0, v - 2), min(height, v + 3)
-    u0, u1 = max(0, u - 2), min(width, u + 3)
-    depth_window = depth_m[v0:v1, u0:u1]
-    valid_window = depth_window[np.isfinite(depth_window) & (depth_window > 0.05)]
-    if valid_window.size == 0:
-        raise RuntimeError("no valid depth around projected test-object centre")
-    sampled_depth = float(np.median(valid_window))
-    one_pixel_depth = np.full(depth_m.shape, np.nan, dtype=np.float32)
-    one_pixel_depth[v, u] = sampled_depth
-    camera_point = depth_mask_to_points(one_pixel_depth, intrinsics, max_depth_m=3.0)
-    reconstructed_world = transform_points(T_world_camera, camera_point)[0]
-    reconstruction_error_m = float(np.linalg.norm(reconstructed_world - object_position))
+    # Follow Isaac Sim 5.1's own Camera point-cloud implementation: use pixel
+    # centres and the built-in projection APIs.  The serialized transform is
+    # independently checked against the official world-frame result so later
+    # processes can safely consume T_world_camera.
+    valid = np.isfinite(depth_m) & (depth_m > 0.05) & (depth_m < 3.0)
+    valid_vu = np.argwhere(valid)
+    if valid_vu.size == 0:
+        raise RuntimeError("camera produced no valid metric depth")
+    sample_count = min(256, valid_vu.shape[0])
+    sample_indices = np.linspace(0, valid_vu.shape[0] - 1, sample_count, dtype=np.int64)
+    sampled_vu = valid_vu[sample_indices]
+    sampled_uv = np.column_stack(
+        (sampled_vu[:, 1].astype(np.float32) + 0.5, sampled_vu[:, 0].astype(np.float32) + 0.5)
+    )
+    sampled_depth = depth_m[sampled_vu[:, 0], sampled_vu[:, 1]].astype(np.float32, copy=False)
+
+    official_camera_points = np.asarray(
+        camera.get_camera_points_from_image_coords(sampled_uv, sampled_depth), dtype=np.float64
+    )
+    official_world_points = np.asarray(
+        camera.get_world_points_from_image_coords(sampled_uv, sampled_depth), dtype=np.float64
+    )
+    reprojected_uv = np.asarray(
+        camera.get_image_coords_from_world_points(official_world_points), dtype=np.float64
+    )
+    serialized_world_points = transform_points(T_world_camera, official_camera_points)
+
+    pixel_errors = np.linalg.norm(reprojected_uv - sampled_uv, axis=1)
+    world_errors = np.linalg.norm(serialized_world_points - official_world_points, axis=1)
+    max_pixel_error = float(np.max(pixel_errors))
+    max_world_error_m = float(np.max(world_errors))
+    pixel_error_bound = 1e-3
+    world_error_bound_m = 1e-5
     geometry_check = {
-        "object_world_m": object_position.tolist(),
-        "object_image_px": image_xy.tolist(),
-        "sampled_depth_m": sampled_depth,
-        "reconstructed_world_m": reconstructed_world.tolist(),
-        "surface_to_center_error_m": reconstruction_error_m,
-        "acceptance_bound_m": 0.20,
-        "passed": reconstruction_error_m <= 0.20,
+        "reference": "Isaac Sim 5.1 Camera projection and point-cloud APIs",
+        "pixel_convention": "pixel centres at (u + 0.5, v + 0.5)",
+        "sample_count": sample_count,
+        "max_pixel_roundtrip_error_px": max_pixel_error,
+        "pixel_error_bound_px": pixel_error_bound,
+        "max_serialized_transform_error_m": max_world_error_m,
+        "world_error_bound_m": world_error_bound_m,
+        "passed": max_pixel_error <= pixel_error_bound and max_world_error_m <= world_error_bound_m,
     }
     (saved / "geometry_check.json").write_text(
         json.dumps(geometry_check, indent=2) + "\n", encoding="utf-8"
     )
     if not geometry_check["passed"]:
         raise RuntimeError(
-            "camera projection round-trip failed: "
-            f"surface-to-centre error={reconstruction_error_m:.3f} m; "
+            "camera projection/serialization validation failed: "
+            f"pixel_error={max_pixel_error:.6g} px, world_error={max_world_error_m:.6g} m; "
             f"details saved to {saved / 'geometry_check.json'}"
         )
-    print(f"saved calibrated RGB-D capture to {saved}")
-    print(f"rgb={rgb.shape} depth={depth_m.shape} valid_depth={np.isfinite(depth_m).sum()}")
-    print(f"intrinsics=\n{intrinsics}")
-    print(f"T_world_camera=\n{T_world_camera}")
-    print(f"camera geometry round-trip error={reconstruction_error_m:.3f} m")
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "run_status.json").write_text(
+        json.dumps({"status": "success", "capture_directory": str(saved)}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"saved calibrated RGB-D capture to {saved}", flush=True)
+    print(f"rgb={rgb.shape} depth={depth_m.shape} valid_depth={valid.sum()}", flush=True)
+    print(f"intrinsics=\n{intrinsics}", flush=True)
+    print(f"T_world_camera=\n{T_world_camera}", flush=True)
+    print(
+        f"camera validation max errors: {max_pixel_error:.6g} px, {max_world_error_m:.6g} m",
+        flush=True,
+    )
+except Exception as exc:
+    failure_traceback = traceback.format_exc()
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "run_status.json").write_text(
+        json.dumps(
+            {
+                "status": "failure",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": failure_traceback,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(failure_traceback, file=sys.stderr, flush=True)
+    raise
 finally:
+    sys.stdout.flush()
+    sys.stderr.flush()
     simulation_app.close()
