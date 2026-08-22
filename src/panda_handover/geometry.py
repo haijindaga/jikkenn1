@@ -118,51 +118,6 @@ def look_at_quaternion_world(position: np.ndarray, target: np.ndarray) -> np.nda
     return quaternion_wxyz_from_rotation_matrix(rotation)
 
 
-def depth_mask_to_points(
-    depth_m: np.ndarray,
-    intrinsics: np.ndarray,
-    mask: np.ndarray | None = None,
-    *,
-    min_depth_m: float = 0.05,
-    max_depth_m: float = 3.0,
-    stride: int = 1,
-) -> np.ndarray:
-    """Back-project registered depth into an ``(N, 3)`` optical-frame cloud."""
-    depth_m = np.asarray(depth_m, dtype=np.float32)
-    intrinsics = np.asarray(intrinsics, dtype=np.float64)
-    if depth_m.ndim != 2:
-        raise ValueError(f"depth_m must be HxW, got {depth_m.shape}")
-    if intrinsics.shape != (3, 3):
-        raise ValueError(f"intrinsics must be 3x3, got {intrinsics.shape}")
-    if stride < 1:
-        raise ValueError("stride must be >= 1")
-    if min_depth_m < 0.0 or max_depth_m <= min_depth_m:
-        raise ValueError("invalid depth range")
-
-    valid = np.isfinite(depth_m) & (depth_m >= min_depth_m) & (depth_m <= max_depth_m)
-    if mask is not None:
-        mask = np.asarray(mask, dtype=bool)
-        if mask.shape != depth_m.shape:
-            raise ValueError(f"mask shape {mask.shape} does not match depth {depth_m.shape}")
-        valid &= mask
-    if stride > 1:
-        sampled = np.zeros_like(valid)
-        sampled[::stride, ::stride] = True
-        valid &= sampled
-
-    v, u = np.nonzero(valid)
-    if len(u) == 0:
-        return np.empty((0, 3), dtype=np.float32)
-    z = depth_m[v, u]
-    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
-    if fx <= 0.0 or fy <= 0.0:
-        raise ValueError("focal lengths must be positive")
-    x = z * (u.astype(np.float32) - cx) / fx
-    y = z * (v.astype(np.float32) - cy) / fy
-    return np.column_stack((x, y, z)).astype(np.float32, copy=False)
-
-
 def transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
     """Apply a rigid homogeneous transform to an ``(N, 3)`` point cloud."""
     transform = np.asarray(transform, dtype=np.float64)
@@ -173,4 +128,3 @@ def transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
         raise ValueError(f"points must have shape (N, 3), got {points.shape}")
     result = points @ transform[:3, :3].T + transform[:3, 3]
     return result.astype(points.dtype, copy=False)
-
