@@ -1,0 +1,9 @@
+repositories:
+  isaac_ros_common:
+    type: git
+    url: https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common.git
+    version: v4.5-0
+  isaac_ros_nvblox:
+    type: git
+    url: https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_nvblox.git
+    version: a0dbb2a06475dc8fa0dbdf5b919ec53973843d17
