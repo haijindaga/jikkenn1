@@ -58,7 +58,10 @@ def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root / "src"))
-    from panda_handover.curobo_bridge import validate_mapping_inputs
+    from panda_handover.curobo_bridge import (
+        extent_covers_requested,
+        validate_mapping_inputs,
+    )
 
     depth = np.load(args.capture / "depth_m.npy").astype(np.float32, copy=False)
     rgb = np.load(args.capture / "rgb.npy").astype(np.uint8, copy=False)
@@ -146,6 +149,9 @@ def main() -> int:
         extent_meters_xyz=tuple(args.extent),
         voxel_size=args.voxel_size,
         esdf_voxel_size=args.esdf_voxel_size,
+        # cuRobo exposes a separate ESDF extent. State it explicitly so the
+        # collision grid cannot silently use a smaller default than the TSDF.
+        extent_esdf_meters_xyz=tuple(args.extent),
         grid_center=torch.tensor(args.grid_center, device=device, dtype=torch.float32),
         truncation_distance=args.voxel_size * 6.0,
         minimum_tsdf_weight=0.1,
@@ -179,6 +185,10 @@ def main() -> int:
     occupied_points = occupied.centers.detach().cpu().numpy().astype(np.float32)
     occupied_colors = occupied.colors_uint8().detach().cpu().numpy().astype(np.uint8)
     esdf = voxel_grid.feature_tensor.detach().cpu().numpy()
+    actual_esdf_extent = np.asarray(voxel_grid.dims, dtype=np.float64)
+    esdf_covers_requested_extent = extent_covers_requested(
+        actual_esdf_extent, args.extent
+    )
     np.save(output / "robot_mask.npy", robot_mask)
     np.save(output / "mapping_depth_m.npy", mapping_depth_np)
     np.save(output / "occupied_points_robot_base.npy", occupied_points)
@@ -193,6 +203,7 @@ def main() -> int:
         "mapping_depth_pixels": int((mapping_depth_np > 0.0).sum()) > 0,
         "occupied_surface_voxels": int(occupied_points.shape[0]) > 0,
         "esdf_has_finite_values": bool(finite_esdf.any()),
+        "esdf_covers_requested_extent": esdf_covers_requested_extent,
     }
     report = {
         "status": "success" if all(automatic_checks.values()) else "failed_checks",
@@ -209,6 +220,7 @@ def main() -> int:
             "voxel_size_m": args.voxel_size,
             "esdf_voxel_size_m": args.esdf_voxel_size,
             "extent_m": list(args.extent),
+            "extent_esdf_m": list(args.extent),
             "grid_center_robot_base_m": list(args.grid_center),
             "robot_distance_threshold_m": args.robot_distance_threshold,
             "robot_segmentation_ops_dtype": "float32",
@@ -224,7 +236,8 @@ def main() -> int:
         },
         "esdf": {
             "shape": list(esdf.shape),
-            "dims_m": list(voxel_grid.dims),
+            "dims_m": actual_esdf_extent.tolist(),
+            "requested_dims_m": list(args.extent),
             "pose_xyzw_or_wxyz_as_curobo": list(voxel_grid.pose),
             "voxel_size_m": float(voxel_grid.voxel_size),
             "finite_fraction": float(finite_esdf.mean()),
