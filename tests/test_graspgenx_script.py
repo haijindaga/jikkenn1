@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -55,6 +56,10 @@ class _FakeClient:
         }
 
 
+class _FakeGripper:
+    collision_mesh = object()
+
+
 class GraspGenXScriptTests(unittest.TestCase):
     def test_official_client_contract_saves_frame_explicit_results(self):
         project = Path(__file__).resolve().parents[1]
@@ -98,6 +103,93 @@ class GraspGenXScriptTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertTrue((output / "grasps_camera.npy").is_file())
             self.assertTrue((output / "panda_hand_world.npy").is_file())
+
+    def test_official_collision_filter_contract_uses_surrounding_scene(self):
+        project = Path(__file__).resolve().parents[1]
+        script_path = project / "scripts" / "graspgenx_filter_capture.py"
+        observed = {}
+
+        def fake_filter(**kwargs):
+            observed.update(kwargs)
+            return np.array([False, True], dtype=bool)
+
+        fake_trimesh = types.ModuleType("trimesh")
+        fake_trimesh.sample = types.SimpleNamespace(
+            sample_surface=lambda mesh, count: (
+                np.zeros((count, 3), dtype=np.float32),
+                np.zeros(count, dtype=np.int32),
+            )
+        )
+        fake_modules = {
+            "trimesh": fake_trimesh,
+            "graspgenx": types.ModuleType("graspgenx"),
+            "graspgenx.utils": types.ModuleType("graspgenx.utils"),
+            "graspgenx.utils.collision_filter": types.ModuleType(
+                "graspgenx.utils.collision_filter"
+            ),
+            "graspgenx.x_grippers": types.ModuleType("graspgenx.x_grippers"),
+        }
+        fake_modules[
+            "graspgenx.utils.collision_filter"
+        ].filter_colliding_grasps = fake_filter
+        fake_modules["graspgenx.x_grippers"].resolve_gripper_info = (
+            lambda name: _FakeGripper()
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / "capture"
+            segmentation = root / "segmentation"
+            candidates = root / "candidates"
+            output = root / "output"
+            capture.mkdir()
+            segmentation.mkdir()
+            candidates.mkdir()
+            points = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
+            rgb = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
+            mask = np.array([[True, False, False], [False, True, False]])
+            np.save(capture / "points_camera.npy", points)
+            np.save(capture / "rgb.npy", rgb)
+            np.save(capture / "T_world_camera.npy", np.eye(4))
+            np.save(segmentation / "union_mask.npy", mask)
+            np.save(
+                candidates / "grasps_camera.npy",
+                np.repeat(np.eye(4, dtype=np.float32)[None], 2, axis=0),
+            )
+            np.save(candidates / "scores.npy", np.array([0.9, 0.8]))
+            (candidates / "branch_tags.json").write_text('["diff", "obb"]')
+
+            argv = [
+                str(script_path),
+                "--capture", str(capture),
+                "--segmentation", str(segmentation),
+                "--candidates", str(candidates),
+                "--output", str(output),
+                "--max-scene-points", "3",
+                "--num-collision-samples", "5",
+                "--device", "cpu",
+            ]
+            with patch.dict(sys.modules, fake_modules), patch.object(sys, "argv", argv):
+                spec = importlib.util.spec_from_file_location(
+                    "graspgenx_collision_test", script_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                spec.loader.exec_module(module)
+                result = module.main()
+
+            self.assertEqual(result, 0)
+            self.assertEqual(observed["scene_pc"].shape, (3, 3))
+            self.assertEqual(observed["gripper_surface_points"].shape, (5, 3))
+            self.assertEqual(observed["collision_threshold"], 0.02)
+            self.assertEqual(observed["batch_size"], 16)
+            np.testing.assert_array_equal(
+                np.load(output / "collision_free_mask.npy"), [False, True]
+            )
+            saved = json.loads((output / "collision_filter_check.json").read_text())
+            self.assertEqual(saved["scene"]["points_before_downsampling"], 4)
+            self.assertEqual(saved["candidates"]["collision_free"], 1)
+            self.assertFalse(saved["safety"]["approach_sweep_checked"])
 
 
 if __name__ == "__main__":

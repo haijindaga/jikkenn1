@@ -9,7 +9,9 @@ from panda_handover.grasp_candidates import (
     T_GRASP_PANDA_HAND,
     pose_quality,
     prepare_scene_point_cloud,
+    save_collision_filter_results,
     save_grasp_candidates,
+    split_target_from_scene,
     transform_grasp_poses,
 )
 
@@ -32,6 +34,26 @@ class GraspCandidateTests(unittest.TestCase):
     def test_prepare_scene_rejects_shape_mismatch(self):
         with self.assertRaisesRegex(ValueError, "does not match"):
             prepare_scene_point_cloud(np.zeros((2, 3, 3)), np.zeros((2, 2)))
+
+    def test_split_target_from_scene_uses_mask_and_finite_depth(self):
+        points = np.array(
+            [
+                [[1.0, 0.0, 1.0], [2.0, 0.0, 1.0]],
+                [[3.0, 0.0, 1.0], [np.nan, np.nan, np.nan]],
+            ],
+            dtype=np.float32,
+        )
+        rgb = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
+        mask = np.array([[True, False], [False, True]])
+
+        surrounding, surrounding_rgb, target, target_rgb = split_target_from_scene(
+            points, mask, rgb
+        )
+
+        np.testing.assert_array_equal(target, points[0, 0][None])
+        np.testing.assert_array_equal(target_rgb, rgb[0, 0][None])
+        np.testing.assert_array_equal(surrounding, points.reshape(-1, 3)[1:3])
+        np.testing.assert_array_equal(surrounding_rgb, rgb.reshape(-1, 3)[1:3])
 
     def test_transform_chain_uses_official_panda_axis_offset(self):
         grasp_camera = np.eye(4, dtype=np.float32)[None]
@@ -72,6 +94,34 @@ class GraspCandidateTests(unittest.TestCase):
             saved = json.loads((Path(directory) / "graspgenx_check.json").read_text())
             self.assertEqual(saved["candidates"]["count"], 1)
             self.assertTrue((Path(directory) / "panda_hand_world.npy").is_file())
+
+    def test_save_collision_results_keeps_mask_and_best_score(self):
+        grasps = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
+        grasps[:, 0, 3] = [0.1, 0.2, 0.3]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = save_collision_filter_results(
+                output,
+                grasps_camera=grasps,
+                scores=np.array([0.5, 0.9, 0.7], dtype=np.float32),
+                branch_tags=["diff", "obb", "diff"],
+                collision_free_mask=np.array([True, False, True]),
+                T_world_camera=np.eye(4),
+                collision_scene_camera=np.ones((4, 3), dtype=np.float32),
+                scene_point_count_before_downsampling=10,
+                parameters={"collision_threshold_m": 0.02},
+            )
+
+            self.assertEqual(report["candidates"]["collision_free"], 2)
+            self.assertEqual(report["candidates"]["best_kept_original_index"], 2)
+            self.assertFalse(report["safety"]["safe_to_execute"])
+            np.testing.assert_array_equal(
+                np.load(output / "kept_candidate_indices.npy"), [0, 2]
+            )
+            self.assertEqual(
+                json.loads((output / "branch_tags.json").read_text()),
+                ["diff", "diff"],
+            )
 
 
 if __name__ == "__main__":
