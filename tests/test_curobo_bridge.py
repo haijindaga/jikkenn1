@@ -3,12 +3,21 @@ import unittest
 import numpy as np
 
 from panda_handover.curobo_bridge import (
+    extent_covers_requested,
     select_named_joint_positions,
     validate_mapping_inputs,
 )
 
 
 class CuroboBridgeTests(unittest.TestCase):
+    def test_actual_esdf_extent_must_cover_requested_extent(self):
+        self.assertTrue(extent_covers_requested([1.6, 1.61, 1.6], [1.6, 1.6, 1.6]))
+        self.assertFalse(extent_covers_requested([1.28, 1.28, 1.28], [1.6, 1.6, 1.6]))
+
+    def test_extent_validation_rejects_non_xyz_input(self):
+        with self.assertRaisesRegex(ValueError, "contain 3 values"):
+            extent_covers_requested([1.6, 1.6], [1.6, 1.6, 1.6])
+
     def test_joint_positions_are_selected_by_name_not_position(self):
         result = select_named_joint_positions(
             ["finger", "joint_2", "joint_1"],
