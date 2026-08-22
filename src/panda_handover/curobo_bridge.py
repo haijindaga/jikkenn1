@@ -7,6 +7,24 @@ from collections.abc import Sequence
 import numpy as np
 
 
+def extent_covers_requested(
+    actual_extent_m: Sequence[float],
+    requested_extent_m: Sequence[float],
+    *,
+    atol: float = 1e-5,
+) -> bool:
+    """Return whether an actual voxel grid covers every requested axis."""
+    actual = np.asarray(actual_extent_m, dtype=np.float64)
+    requested = np.asarray(requested_extent_m, dtype=np.float64)
+    if actual.shape != (3,) or requested.shape != (3,):
+        raise ValueError("actual and requested extents must each contain 3 values")
+    if not np.all(np.isfinite(actual)) or not np.all(np.isfinite(requested)):
+        raise ValueError("extents must contain only finite values")
+    if np.any(actual <= 0.0) or np.any(requested <= 0.0):
+        raise ValueError("extents must be positive")
+    return bool(np.all(actual + atol >= requested))
+
+
 def select_named_joint_positions(
     joint_names: Sequence[str],
     joint_positions: np.ndarray,
