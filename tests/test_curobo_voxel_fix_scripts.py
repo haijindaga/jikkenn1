@@ -36,9 +36,21 @@ class CuroboVoxelFixScriptTests(unittest.TestCase):
         self.assertIn("planner.plan_pose(", source)
         self.assertNotIn("planner.plan_grasp(", source)
         self.assertIn('choices=("blocked", "free")', source)
-        self.assertIn('"simulation_only": esdf.unknown_policy == "free"', source)
+        self.assertIn('"simulation_only": unknown_policy != "blocked"', source)
         self.assertIn('"final_approach_planned": False', source)
         self.assertIn('"safe_to_execute": False', source)
+
+    def test_observed_mesh_backend_is_official_and_fail_closed(self):
+        source = (PROJECT / "scripts" / "curobo_plan_pregrasp_a.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"observed_pointcloud_mesh"', source)
+        self.assertIn("Mesh.from_pointcloud(", source)
+        self.assertIn("SceneCfg(mesh=[scene_mesh])", source)
+        self.assertIn("load_singleview_observed_pointcloud(", source)
+        self.assertIn('"unknown_space_assumed_free": unknown_policy != "blocked"', source)
+        self.assertIn('"simulation_only": unknown_policy != "blocked"', source)
+        self.assertNotIn("all grasps collide", source.lower())
 
 
 if __name__ == "__main__":

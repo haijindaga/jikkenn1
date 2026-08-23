@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Plan only the collision-enabled motion to a conservative pre-grasp pose.
+"""Plan only the collision-enabled motion to a reviewed pre-grasp pose.
 
-This follows cuRobo V2's official ``MotionPlanner`` + ESDF ``VoxelGrid``
-example.  It deliberately does not enter the target region, close the
-gripper, attach an object, lift, or execute anything in Isaac Sim.
+The scene can use either cuRobo V2's dense ESDF ``VoxelGrid`` or its official
+``Mesh.from_pointcloud`` representation of observed occupied surfaces.  It
+deliberately does not enter the target region, close the gripper, attach an
+object, lift, or execute anything in Isaac Sim.
 """
 
 from __future__ import annotations
@@ -21,7 +22,17 @@ import numpy as np
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--esdf", type=Path, required=True)
+    parser.add_argument(
+        "--scene-backend",
+        choices=("backend_a_esdf", "observed_pointcloud_mesh"),
+        default="backend_a_esdf",
+    )
+    parser.add_argument("--esdf", type=Path)
+    parser.add_argument(
+        "--prepared-map",
+        type=Path,
+        help="curobo_map_capture.py output used by observed_pointcloud_mesh",
+    )
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -38,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--unknown-policy",
         choices=("blocked", "free"),
-        default="blocked",
+        default=None,
         help="must exactly match the Backend A map; free is simulation-only",
     )
     return parser.parse_args()
@@ -97,6 +108,18 @@ def main() -> int:
     args = parse_args()
     if args.max_candidates <= 0 or args.max_attempts <= 0:
         raise ValueError("--max-candidates and --max-attempts must be positive")
+    if args.scene_backend == "backend_a_esdf":
+        if args.esdf is None or args.prepared_map is not None:
+            raise ValueError("backend_a_esdf requires --esdf and forbids --prepared-map")
+    elif args.prepared_map is None or args.esdf is not None:
+        raise ValueError(
+            "observed_pointcloud_mesh requires --prepared-map and forbids --esdf"
+        )
+    elif args.unknown_policy is not None:
+        raise ValueError(
+            "observed_pointcloud_mesh fixes unobserved space as free; "
+            "do not pass --unknown-policy"
+        )
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root / "src"))
 
@@ -104,21 +127,32 @@ def main() -> int:
     from panda_handover.curobo_planning import (
         classify_pregrasp_failure,
         load_backend_a_esdf,
+        load_singleview_observed_pointcloud,
         prepare_pregrasp_goalset,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
         validate_voxel_fix_report,
     )
 
-    # Both the live source tree and its GPU regression must still match the
-    # exact reviewed Issue #699 fix before real ESDF values reach the planner.
+    # Keep both scene paths on the exact reviewed cuRobo checkout.  The voxel
+    # regression is additionally required before real ESDF values reach it.
     _verify_imported_curobo_source(project_root)
-    voxel_fix_report = validate_voxel_fix_report(args.voxel_fix_report)
-    esdf = load_backend_a_esdf(
-        args.esdf, expected_unknown_policy=args.unknown_policy
-    )
-    if not _resolved_report_view_matches(esdf.report, args.capture):
-        raise ValueError("--capture is not one of the views integrated into Backend A")
+    voxel_fix_report = None
+    esdf = None
+    observed_scene = None
+    if args.scene_backend == "backend_a_esdf":
+        voxel_fix_report = validate_voxel_fix_report(args.voxel_fix_report)
+        assert args.esdf is not None
+        esdf = load_backend_a_esdf(
+            args.esdf, expected_unknown_policy=args.unknown_policy or "blocked"
+        )
+        if not _resolved_report_view_matches(esdf.report, args.capture):
+            raise ValueError("--capture is not one of the views integrated into Backend A")
+    else:
+        assert args.prepared_map is not None
+        observed_scene = load_singleview_observed_pointcloud(
+            args.prepared_map, args.capture
+        )
 
     collision_report_path = args.candidates / "collision_filter_check.json"
     if not collision_report_path.is_file():
@@ -163,7 +197,7 @@ def main() -> int:
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("cuRobo pre-grasp planning requires CUDA")
-    from curobo._src.geom.types import SceneCfg, VoxelGrid
+    from curobo._src.geom.types import Mesh, SceneCfg, VoxelGrid
     from curobo._src.geom.collision.buffer_collision import CollisionBuffer
     from curobo._src.motion.motion_planner import MotionPlanner
     from curobo._src.motion.motion_planner_cfg import MotionPlannerCfg
@@ -173,21 +207,43 @@ def main() -> int:
     from curobo._src.types.tool_pose import GoalToolPose
 
     device_cfg = DeviceCfg(device=torch.device(args.device), dtype=torch.float32)
-    features_gpu = torch.from_numpy(esdf.features_m).to(
-        device=device_cfg.device, dtype=torch.float16
-    ).contiguous()
-    # Recompute dimensions from integer shape, rather than trusting serialized
-    # float products. The reviewed cuRobo patch still guards the GPU conversion.
-    grid_dims = [float(count) * esdf.voxel_size_m for count in esdf.shape_xyz]
-    voxel_grid = VoxelGrid(
-        name="backend_a_conservative_esdf",
-        pose=[*esdf.center_robot_base_m, 1.0, 0.0, 0.0, 0.0],
-        dims=grid_dims,
-        voxel_size=esdf.voxel_size_m,
-        feature_tensor=features_gpu,
-        feature_dtype=torch.float16,
-    )
-    scene = SceneCfg(voxel=[voxel_grid])
+    output = args.output
+    output.mkdir(parents=True, exist_ok=True)
+    scene_mesh = None
+    if args.scene_backend == "backend_a_esdf":
+        assert esdf is not None
+        features_gpu = torch.from_numpy(esdf.features_m).to(
+            device=device_cfg.device, dtype=torch.float16
+        ).contiguous()
+        # Recompute dimensions from integer shape, rather than trusting serialized
+        # float products. The reviewed cuRobo patch still guards the GPU conversion.
+        grid_dims = [float(count) * esdf.voxel_size_m for count in esdf.shape_xyz]
+        voxel_grid = VoxelGrid(
+            name="backend_a_conservative_esdf",
+            pose=[*esdf.center_robot_base_m, 1.0, 0.0, 0.0, 0.0],
+            dims=grid_dims,
+            voxel_size=esdf.voxel_size_m,
+            feature_tensor=features_gpu,
+            feature_dtype=torch.float16,
+        )
+        scene = SceneCfg(voxel=[voxel_grid])
+    else:
+        assert observed_scene is not None
+        scene_mesh = Mesh.from_pointcloud(
+            observed_scene.points_robot_base_m,
+            pitch=observed_scene.voxel_size_m,
+            name="observed_scene_without_robot_or_target",
+        )
+        vertices = np.asarray(scene_mesh.vertices)
+        faces = np.asarray(scene_mesh.faces)
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or vertices.shape[0] < 4:
+            raise RuntimeError("cuRobo pointcloud mesh has invalid vertices")
+        if faces.size < 3 or faces.size % 3 != 0:
+            raise RuntimeError("cuRobo pointcloud mesh has invalid triangle indices")
+        if np.any(faces < 0) or np.any(faces >= vertices.shape[0]):
+            raise RuntimeError("cuRobo pointcloud mesh contains out-of-range faces")
+        scene_mesh.save_as_mesh(str(output / "observed_scene_mesh.obj"))
+        scene = SceneCfg(mesh=[scene_mesh])
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
         scene_model=scene,
@@ -221,7 +277,7 @@ def main() -> int:
         quaternion=quaternions_gpu[None, None, None, :, :],
     )
 
-    # Query the same collision spheres and ESDF used by cuRobo's optimizers.
+    # Query the same collision spheres and scene used by cuRobo's optimizers.
     # Zero activation measures actual overlap; 10 mm matches the optimizer cost.
     start_kinematics = planner.compute_kinematics(current_state)
     start_spheres = start_kinematics.robot_spheres
@@ -326,8 +382,6 @@ def main() -> int:
             ),
         )
 
-    output = args.output
-    output.mkdir(parents=True, exist_ok=True)
     np.save(output / "grasp_transforms_robot_base.npy", goalset.grasp_robot_base)
     np.save(output / "pregrasp_transforms_robot_base.npy", pregrasp)
     np.save(output / "candidate_scores.npy", goalset.scores)
@@ -405,25 +459,61 @@ def main() -> int:
         planner_returned_result=result is not None,
     )
     status = "success" if planner_success else "no_safe_pregrasp_plan"
-    report = {
-        "status": status,
-        "reference": {
+    if args.scene_backend == "backend_a_esdf":
+        assert esdf is not None and voxel_fix_report is not None
+        scene_reference = {
             "implementation": "cuRobo V2 MotionPlanner.plan_pose with ESDF VoxelGrid",
-            "curobo_commit": "057a96ffb1088531535f9915154f9d0dabd62428",
             "official_test": "curobo/tests/_src/motion/test_motion_planner_esdf.py",
             "issue_699": "https://github.com/NVlabs/curobo/issues/699",
             "voxel_fix_report": str(args.voxel_fix_report),
             "voxel_fix_source_sha256": voxel_fix_report["reference"][
                 "patched_source_sha256"
             ],
-        },
-        "inputs": {
+        }
+        scene_inputs = {
             "esdf": str(args.esdf),
-            "capture": str(args.capture),
-            "candidates": str(args.candidates),
             "backend_a_input_fingerprint_sha256": esdf.report.get(
                 "input_fingerprint_sha256"
             ),
+        }
+        unknown_policy = esdf.unknown_policy
+        scene_diagnostics_key = "start_state_vs_conservative_esdf"
+        mesh_report = None
+    else:
+        assert observed_scene is not None and scene_mesh is not None
+        scene_reference = {
+            "implementation": (
+                "cuRobo V2 MotionPlanner.plan_pose with "
+                "Mesh.from_pointcloud observed surfaces"
+            ),
+            "official_api_test": "curobo/tests/_src/geom/test_types.py::test_mesh_from_pointcloud",
+            "official_scene_test": "curobo/tests/_src/motion/test_motion_planner.py::test_update_world_with_scene",
+            "precedent": "NVlabs/VoLoAgent curobo_planner.py create_mesh_scene",
+        }
+        scene_inputs = {
+            "prepared_map": str(args.prepared_map),
+            "occupied_surface_points": int(
+                observed_scene.points_robot_base_m.shape[0]
+            ),
+        }
+        unknown_policy = "free_outside_observed_mesh"
+        scene_diagnostics_key = "start_state_vs_observed_pointcloud_mesh"
+        mesh_report = {
+            "pitch_m": observed_scene.voxel_size_m,
+            "vertices": int(np.asarray(scene_mesh.vertices).shape[0]),
+            "triangles": int(np.asarray(scene_mesh.faces).size // 3),
+            "saved_obj": str(output / "observed_scene_mesh.obj"),
+        }
+    report = {
+        "status": status,
+        "reference": {
+            "curobo_commit": "057a96ffb1088531535f9915154f9d0dabd62428",
+            **scene_reference,
+        },
+        "inputs": {
+            "capture": str(args.capture),
+            "candidates": str(args.candidates),
+            **scene_inputs,
         },
         "frames": {
             "map": "panda_link0 robot base",
@@ -442,10 +532,14 @@ def main() -> int:
             "optimizer_collision_activation_distance_m": 0.01,
             "random_seed": 123,
             "use_cuda_graph": False,
-            "unknown_policy": esdf.unknown_policy,
+            "scene_backend": args.scene_backend,
+            "unknown_policy": unknown_policy,
             "planning_mode": (
-                "optimistic_sim" if esdf.unknown_policy == "free" else "conservative"
+                "conservative"
+                if unknown_policy == "blocked"
+                else "optimistic_sim"
             ),
+            "observed_mesh": mesh_report,
         },
         "result": {
             "planner_reported_success": bool(
@@ -483,7 +577,7 @@ def main() -> int:
         "diagnostics": {
             "collision_aware_ik": world_ik_summary,
             "ik_without_world_scene_control": free_world_ik_summary,
-            "start_state_vs_conservative_esdf": {
+            scene_diagnostics_key: {
                 "robot_collision_sphere_count": int(start_spheres.shape[-2]),
                 "penetrating_sphere_count_activation_0m": start_penetrating_sphere_count,
                 "active_sphere_count_activation_0_01m": start_activation_sphere_count,
@@ -495,10 +589,10 @@ def main() -> int:
         "safety": {
             "input_map_declared_safe_to_plan": False,
             "pregrasp_only_scope_gate_passed": True,
-            "unknown_space_blocked": esdf.unknown_policy == "blocked",
-            "unknown_space_assumed_free": esdf.unknown_policy == "free",
-            "target_region_blocked": esdf.unknown_policy == "blocked",
-            "simulation_only": esdf.unknown_policy == "free",
+            "unknown_space_blocked": unknown_policy == "blocked",
+            "unknown_space_assumed_free": unknown_policy != "blocked",
+            "target_region_blocked": unknown_policy == "blocked",
+            "simulation_only": unknown_policy != "blocked",
             "robot_world_collision_enabled_for_entire_saved_trajectory": True,
             "robot_self_collision_enabled": True,
             "static_graspgenx_filter_required": True,
@@ -511,7 +605,7 @@ def main() -> int:
             "manual_review_required": True,
         },
         "next_gate": (
-            "If planning failed, review diagnostics before changing the ESDF or solver. "
+            "If planning failed, review diagnostics before changing the scene or solver. "
             "If it succeeded, inspect the saved pre-grasp trajectory in Isaac Sim. "
             "Final linear contact approach requires a separately reviewed non-target "
             "collision sweep."

@@ -45,6 +45,115 @@ class PregraspGoalset:
     candidate_indices: np.ndarray
 
 
+@dataclass(frozen=True)
+class ObservedPointcloudScene:
+    """Validated robot/target-removed surface points in the robot-base frame."""
+
+    points_robot_base_m: np.ndarray
+    voxel_size_m: float
+    report: dict[str, Any]
+    view: dict[str, Any]
+
+
+def _resolved_path_matches(recorded: str, expected: Path) -> bool:
+    """Compare persisted experiment paths without accepting basename-only matches."""
+    return Path(recorded).resolve() == expected.resolve()
+
+
+def load_singleview_observed_pointcloud(
+    prepared_map: str | Path,
+    capture: str | Path,
+) -> ObservedPointcloudScene:
+    """Load cuRobo Mapper surface points only after checking their provenance.
+
+    The input is the artifact written by ``curobo_map_capture.py``.  Requiring
+    one view keeps this first comparison equivalent to the current single-view
+    experiment and ensures that the target was absent from a fresh map for the
+    entire integration.
+    """
+    root = Path(prepared_map)
+    capture_path = Path(capture)
+    report_path = root / "esdf_check.json"
+    if not report_path.is_file():
+        raise FileNotFoundError(f"missing cuRobo Mapper report: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "success":
+        raise ValueError("cuRobo Mapper report did not finish successfully")
+    checks = report.get("automatic_checks")
+    if not isinstance(checks, dict) or not checks or not all(checks.values()):
+        raise ValueError("cuRobo Mapper automatic checks are incomplete or failed")
+    if report.get("safe_to_plan") is not False:
+        raise ValueError("expected the reviewed inspection-only Mapper gate")
+
+    reference = report.get("reference", {})
+    required_apis = {"RobotSegmenter", "FilterDepth", "Mapper.compute_esdf"}
+    if not required_apis.issubset(set(reference.get("apis", ()))):
+        raise ValueError("prepared map did not use the reviewed cuRobo perception APIs")
+    if report.get("frames", {}).get("map") != "franka robot base":
+        raise ValueError("prepared pointcloud is not expressed in the Franka base frame")
+
+    parameters = report.get("parameters", {})
+    if parameters.get("input_frames") != 1:
+        raise ValueError("observed-mesh comparison currently requires exactly one view")
+    voxel_size = float(parameters.get("voxel_size_m", float("nan")))
+    extent = np.asarray(parameters.get("extent_m"), dtype=np.float64)
+    center = np.asarray(parameters.get("grid_center_robot_base_m"), dtype=np.float64)
+    if not np.isfinite(voxel_size) or voxel_size <= 0.0:
+        raise ValueError("prepared map has an invalid voxel size")
+    if extent.shape != (3,) or center.shape != (3,):
+        raise ValueError("prepared map has invalid workspace bounds")
+    if not np.all(np.isfinite(extent)) or not np.all(np.isfinite(center)):
+        raise ValueError("prepared map workspace bounds contain non-finite values")
+    if np.any(extent <= 0.0):
+        raise ValueError("prepared map workspace extent must be positive")
+
+    contract = report.get("unknown_environment_contract", {})
+    required_contract = {
+        "isaac_semantic_labels_used": False,
+        "isaac_ground_truth_obstacle_geometry_used": False,
+        "target_removed_with_sam3_mask": True,
+        "robot_removed_with_curobo_kinematics": True,
+        "unobserved_space_proven_occupied": False,
+    }
+    if any(contract.get(key) is not value for key, value in required_contract.items()):
+        raise ValueError("prepared map provenance contract is missing")
+
+    views = report.get("views")
+    if not isinstance(views, list) or len(views) != 1 or not isinstance(views[0], dict):
+        raise ValueError("prepared map must contain exactly one reported view")
+    view = views[0]
+    if not isinstance(view.get("capture"), str) or not _resolved_path_matches(
+        view["capture"], capture_path
+    ):
+        raise ValueError("--capture does not match the prepared map view")
+    if int(view.get("robot_mask_pixels", 0)) <= 0:
+        raise ValueError("prepared map did not remove any robot pixels")
+    if int(view.get("target_mask_pixels", 0)) <= 0:
+        raise ValueError("prepared map did not remove any target pixels")
+
+    points_path = root / "occupied_points_robot_base.npy"
+    points = np.load(points_path, allow_pickle=False)
+    if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] == 0:
+        raise ValueError(f"occupied surface points must be non-empty Nx3, got {points.shape}")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("occupied surface points contain non-finite values")
+    reported_count = int(report.get("counts", {}).get("occupied_surface_voxels", -1))
+    if reported_count != points.shape[0]:
+        raise ValueError("occupied surface point count does not match the Mapper report")
+
+    minimum = center - 0.5 * extent - voxel_size
+    maximum = center + 0.5 * extent + voxel_size
+    if np.any(points < minimum) or np.any(points > maximum):
+        raise ValueError("occupied surface points fall outside the reported Mapper extent")
+
+    return ObservedPointcloudScene(
+        points_robot_base_m=points.astype(np.float32, copy=False),
+        voxel_size_m=voxel_size,
+        report=report,
+        view=view,
+    )
+
+
 def summarize_ik_result_arrays(
     success: np.ndarray,
     *,

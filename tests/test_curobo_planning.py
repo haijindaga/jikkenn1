@@ -11,6 +11,7 @@ from panda_handover.curobo_planning import (
     classify_pregrasp_failure,
     load_backend_a_esdf,
     load_conservative_esdf,
+    load_singleview_observed_pointcloud,
     prepare_pregrasp_goalset,
     rotation_matrix_to_quaternion_wxyz,
     summarize_ik_result_arrays,
@@ -68,6 +69,108 @@ def _backend_a_optimistic_report(shape=(2, 3, 4), voxel=0.1):
 
 
 class CuroboPlanningTests(unittest.TestCase):
+    def test_observed_pointcloud_loader_requires_reviewed_single_view_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capture = root / "capture" / "camera_0"
+            capture.mkdir(parents=True)
+            points = np.array(
+                [[0.4, 0.0, 0.7], [0.6, 0.1, 0.71]], dtype=np.float32
+            )
+            np.save(root / "occupied_points_robot_base.npy", points)
+            report = {
+                "status": "success",
+                "reference": {
+                    "apis": [
+                        "RobotSegmenter",
+                        "FilterDepth",
+                        "Mapper.compute_esdf",
+                    ]
+                },
+                "frames": {"map": "franka robot base"},
+                "parameters": {
+                    "input_frames": 1,
+                    "voxel_size_m": 0.01,
+                    "extent_m": [1.6, 1.6, 1.6],
+                    "grid_center_robot_base_m": [0.5, 0.0, 0.75],
+                },
+                "counts": {"occupied_surface_voxels": 2},
+                "views": [
+                    {
+                        "capture": str(capture),
+                        "robot_mask_pixels": 20,
+                        "target_mask_pixels": 10,
+                    }
+                ],
+                "automatic_checks": {"all": True},
+                "safe_to_plan": False,
+                "unknown_environment_contract": {
+                    "isaac_semantic_labels_used": False,
+                    "isaac_ground_truth_obstacle_geometry_used": False,
+                    "target_removed_with_sam3_mask": True,
+                    "robot_removed_with_curobo_kinematics": True,
+                    "unobserved_space_proven_occupied": False,
+                },
+            }
+            (root / "esdf_check.json").write_text(json.dumps(report))
+
+            loaded = load_singleview_observed_pointcloud(root, capture)
+
+            np.testing.assert_array_equal(loaded.points_robot_base_m, points)
+            self.assertEqual(loaded.voxel_size_m, 0.01)
+
+            report["parameters"]["input_frames"] = 2
+            (root / "esdf_check.json").write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, "exactly one view"):
+                load_singleview_observed_pointcloud(root, capture)
+
+    def test_observed_pointcloud_loader_rejects_failed_removal_or_count_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capture = root / "capture"
+            capture.mkdir()
+            np.save(
+                root / "occupied_points_robot_base.npy",
+                np.array([[0.5, 0.0, 0.7]], dtype=np.float32),
+            )
+            report = {
+                "status": "success",
+                "reference": {
+                    "apis": ["RobotSegmenter", "FilterDepth", "Mapper.compute_esdf"]
+                },
+                "frames": {"map": "franka robot base"},
+                "parameters": {
+                    "input_frames": 1,
+                    "voxel_size_m": 0.01,
+                    "extent_m": [1.6, 1.6, 1.6],
+                    "grid_center_robot_base_m": [0.5, 0.0, 0.75],
+                },
+                "counts": {"occupied_surface_voxels": 2},
+                "views": [
+                    {
+                        "capture": str(capture),
+                        "robot_mask_pixels": 0,
+                        "target_mask_pixels": 10,
+                    }
+                ],
+                "automatic_checks": {"all": True},
+                "safe_to_plan": False,
+                "unknown_environment_contract": {
+                    "isaac_semantic_labels_used": False,
+                    "isaac_ground_truth_obstacle_geometry_used": False,
+                    "target_removed_with_sam3_mask": True,
+                    "robot_removed_with_curobo_kinematics": True,
+                    "unobserved_space_proven_occupied": False,
+                },
+            }
+            (root / "esdf_check.json").write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, "robot pixels"):
+                load_singleview_observed_pointcloud(root, capture)
+            report["views"][0]["robot_mask_pixels"] = 10
+            (root / "esdf_check.json").write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, "count"):
+                load_singleview_observed_pointcloud(root, capture)
+
     def test_optimistic_loader_requires_exact_evidence_masks(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
