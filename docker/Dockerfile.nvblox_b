@@ -1,0 +1,30 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG ISAAC_ROS_NVBLOX_REPOSITORY
+ARG ISAAC_ROS_NVBLOX_REF
+ARG ISAAC_ROS_NVBLOX_COMMIT
+
+SHELL ["/bin/bash", "-c"]
+
+LABEL org.opencontainers.image.source="${ISAAC_ROS_NVBLOX_REPOSITORY}" \
+      org.opencontainers.image.revision="${ISAAC_ROS_NVBLOX_COMMIT}"
+
+# This is the source-install dependency step from the official Isaac ROS
+# nvblox quickstart, baked into a disposable Docker layer so the Ubuntu 22.04
+# host and its Isaac Sim Python environment remain untouched.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends git git-lfs python3-numpy \
+    && rm -rf /tmp/isaac_ros_nvblox_deps \
+    && git clone --recursive --branch "${ISAAC_ROS_NVBLOX_REF}" --depth 1 \
+        "${ISAAC_ROS_NVBLOX_REPOSITORY}" /tmp/isaac_ros_nvblox_deps \
+    && test "$(git -C /tmp/isaac_ros_nvblox_deps rev-parse HEAD)" = \
+        "${ISAAC_ROS_NVBLOX_COMMIT}" \
+    && source /opt/ros/jazzy/setup.bash \
+    && rosdep update \
+    && rosdep install -i -r \
+        --from-paths /tmp/isaac_ros_nvblox_deps \
+        --rosdistro jazzy -y \
+    && rm -rf /tmp/isaac_ros_nvblox_deps \
+    && rm -rf /var/lib/apt/lists/*

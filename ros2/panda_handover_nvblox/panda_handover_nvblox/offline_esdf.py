@@ -349,8 +349,11 @@ def save_response(args: argparse.Namespace, response) -> Path:
         "status": "success" if all(checks.values()) else "failed_checks",
         "backend": "B_isaac_ros_nvblox_kOccupied",
         "reference": {
+            "isaac_ros_cli_tag": "v4.5-0",
+            "isaac_ros_cli_commit": "680c8c5f85854bee8b0074a00a17c2ba2aeab906",
             "isaac_ros_nvblox_tag": "v4.5-0",
             "isaac_ros_nvblox_commit": "a0dbb2a06475dc8fa0dbdf5b919ec53973843d17",
+            "nvblox_core_commit": "24eee4948768682fa1ffb969b881efee4fca29c2",
             "service": "nvblox_msgs/srv/EsdfAndGradients",
             "policy": "static_mapper.unobserved_esdf_policy=occupied",
         },
