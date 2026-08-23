@@ -268,6 +268,24 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertNotIn("FixedJoint", script)
         self.assertNotIn("set_joint_positions(", script)
 
+    def test_grasp_lift_replay_supports_generic_authored_usd_target(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_replay_grasp_lift.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--scene-usd"', script)
+        self.assertIn("stage_utils.open_stage(str(scene_usd))", script)
+        self.assertIn("SingleArticulation(", script)
+        self.assertIn("RigidPrim(", script)
+        self.assertIn("reset_xform_properties=False", script)
+        self.assertIn("Usd.PrimRange(target_root_prim)", script)
+        self.assertIn("prim.HasAPI(UsdPhysics.RigidBodyAPI)", script)
+        self.assertIn("compute_aabb(create_bbox_cache()", script)
+        self.assertIn("target_settled_extent[2]", script)
+        self.assertIn("replay scene does not match", script)
+        self.assertNotIn("hammer", script.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

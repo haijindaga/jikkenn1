@@ -30,6 +30,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--scene-usd",
+        type=Path,
+        help="Open the authored USD used by capture instead of the legacy block scene",
+    )
+    parser.add_argument("--panda-prim", default="/World/Panda")
+    parser.add_argument("--target-prim", default="/World/Objects/Target")
+    parser.add_argument("--camera-prim", default="/World/camera_0")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--settle-frames", type=int, default=60)
     parser.add_argument("--close-frames", type=int, default=60)
@@ -68,6 +76,36 @@ def parse_args() -> argparse.Namespace:
 
 args = parse_args()
 replay = load_grasp_lift_replay(args.capture, args.plan)
+scene_usd = None
+if args.scene_usd is not None:
+    scene_usd = args.scene_usd.expanduser().resolve()
+    if not scene_usd.is_file():
+        raise FileNotFoundError(f"authored scene USD does not exist: {scene_usd}")
+    if scene_usd.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+        raise ValueError("--scene-usd must end in .usd, .usda, or .usdc")
+
+    scene_layout_path = args.capture / "scene_layout.json"
+    if not scene_layout_path.is_file():
+        raise FileNotFoundError(
+            "authored-scene replay requires the capture scene report: "
+            f"{scene_layout_path}"
+        )
+    scene_layout_report = json.loads(scene_layout_path.read_text(encoding="utf-8"))
+    scene_source = scene_layout_report.get("scene_source", {})
+    if scene_source.get("kind") != "authored_usd_scene":
+        raise ValueError(
+            "--scene-usd was provided, but the capture was not recorded from an "
+            "authored USD scene"
+        )
+    recorded_scene_value = scene_source.get("scene_usd")
+    if not recorded_scene_value:
+        raise ValueError("capture scene report has no authored scene_usd path")
+    recorded_scene = Path(recorded_scene_value).expanduser().resolve()
+    if recorded_scene != scene_usd:
+        raise ValueError(
+            "replay scene does not match the scene recorded by capture: "
+            f"{scene_usd} != {recorded_scene}"
+        )
 
 from isaacsim import SimulationApp
 
@@ -79,68 +117,168 @@ try:
 
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+    from isaacsim.core.prims import RigidPrim, SingleArticulation
+    from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from isaacsim.core.utils.types import ArticulationAction
+    from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
+    from pxr import PhysxSchema, Usd, UsdPhysics
 
     from panda_handover.geometry import look_at_quaternion_world
 
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
+
+    target_physics_apis = None
+    target_rigid_prim_path = None
+    if scene_usd is not None:
+        stage_opened, stage = stage_utils.open_stage(str(scene_usd))
+        if not stage_opened or stage is None:
+            raise RuntimeError(f"Isaac Sim could not open authored scene: {scene_usd}")
+        required_prim_paths = (
+            args.panda_prim,
+            args.target_prim,
+            args.camera_prim,
+        )
+        missing_prims = [
+            prim_path
+            for prim_path in required_prim_paths
+            if not stage.GetPrimAtPath(prim_path).IsValid()
+        ]
+        if missing_prims:
+            raise RuntimeError(
+                "authored scene is missing required prims: " + ", ".join(missing_prims)
+            )
+
+        target_root_prim = stage.GetPrimAtPath(args.target_prim)
+        target_prims = tuple(Usd.PrimRange(target_root_prim))
+        rigid_body_prims = tuple(
+            prim for prim in target_prims if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        )
+        target_physics_apis = {
+            "rigid_body": bool(rigid_body_prims),
+            "collision": any(
+                prim.HasAPI(UsdPhysics.CollisionAPI)
+                or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
+                for prim in target_prims
+            ),
+            "mass": any(prim.HasAPI(UsdPhysics.MassAPI) for prim in target_prims),
+        }
+        if not all(target_physics_apis.values()):
+            missing_apis = [
+                name for name, present in target_physics_apis.items() if not present
+            ]
+            raise RuntimeError(
+                f"saved-scene target {args.target_prim} is not physics-ready; "
+                f"missing USD APIs: {missing_apis}"
+            )
+        if len(rigid_body_prims) != 1:
+            rigid_body_paths = [str(prim.GetPath()) for prim in rigid_body_prims]
+            raise RuntimeError(
+                "authored-scene grasp replay supports one rigid target body; "
+                f"found {len(rigid_body_prims)} under {args.target_prim}: "
+                f"{rigid_body_paths}"
+            )
+        target_rigid_prim_path = str(rigid_body_prims[0].GetPath())
+
     world = World(
         stage_units_in_meters=1.0,
         physics_dt=PHYSICS_DT_S,
         rendering_dt=1.0 / 30.0,
     )
-    world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
-    panda = world.scene.add(
-        Franka(
-            prim_path="/World/Panda",
-            name="panda",
-            position=np.asarray(LAYOUT.robot_base_position_m),
+    if scene_usd is None:
+        world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
+        panda = world.scene.add(
+            Franka(
+                prim_path=args.panda_prim,
+                name="panda",
+                position=np.asarray(LAYOUT.robot_base_position_m),
+            )
         )
-    )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Table",
-            name="table",
-            position=np.asarray(LAYOUT.table_center_m),
-            scale=np.asarray(LAYOUT.table_size_m),
-            color=np.array([0.45, 0.32, 0.20]),
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Table",
+                name="table",
+                position=np.asarray(LAYOUT.table_center_m),
+                scale=np.asarray(LAYOUT.table_size_m),
+                color=np.array([0.45, 0.32, 0.20]),
+            )
         )
-    )
-    target = world.scene.add(
-        DynamicCuboid(
-            prim_path="/World/TestObject",
-            name="test_object",
-            position=np.asarray(LAYOUT.target_center_m),
-            scale=np.asarray(LAYOUT.target_size_m),
-            color=np.array([0.1, 0.5, 0.9]),
+        target = world.scene.add(
+            DynamicCuboid(
+                prim_path="/World/TestObject",
+                name="test_object",
+                position=np.asarray(LAYOUT.target_center_m),
+                scale=np.asarray(LAYOUT.target_size_m),
+                color=np.array([0.1, 0.5, 0.9]),
+            )
         )
-    )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Obstacle",
-            name="obstacle",
-            position=np.asarray(LAYOUT.obstacle_center_m),
-            scale=np.asarray(LAYOUT.obstacle_size_m),
-            color=np.array([0.9, 0.2, 0.1]),
+        target_prim_path = "/World/TestObject"
+        target_rigid_prim_path = target_prim_path
+        target_physics_apis = {
+            "rigid_body": True,
+            "collision": True,
+            "mass": True,
+        }
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Obstacle",
+                name="obstacle",
+                position=np.asarray(LAYOUT.obstacle_center_m),
+                scale=np.asarray(LAYOUT.obstacle_size_m),
+                color=np.array([0.9, 0.2, 0.1]),
+            )
         )
-    )
+        camera_position = np.asarray(LAYOUT.camera_position_m, dtype=np.float64)
+        camera_target = np.asarray(LAYOUT.camera_target_m, dtype=np.float64)
+        camera_orientation = look_at_quaternion_world(camera_position, camera_target)
+        camera = Camera(
+            prim_path="/World/replay_camera",
+            position=camera_position,
+            orientation=camera_orientation,
+            frequency=30,
+            resolution=(640, 480),
+        )
+    else:
+        panda = world.scene.add(
+            SingleArticulation(
+                prim_path=args.panda_prim,
+                name="panda",
+            )
+        )
+        target = world.scene.add(
+            RigidPrim(
+                prim_paths_expr=target_rigid_prim_path,
+                name="target",
+                reset_xform_properties=False,
+            )
+        )
+        target_prim_path = args.target_prim
+        camera = Camera(
+            prim_path=args.camera_prim,
+            frequency=30,
+            resolution=(640, 480),
+        )
 
-    camera_position = np.asarray(LAYOUT.camera_position_m, dtype=np.float64)
-    camera_target = np.asarray(LAYOUT.camera_target_m, dtype=np.float64)
-    camera_orientation = look_at_quaternion_world(camera_position, camera_target)
-    camera = Camera(
-        prim_path="/World/replay_camera",
-        position=camera_position,
-        orientation=camera_orientation,
-        frequency=30,
-        resolution=(640, 480),
-    )
     world.reset()
     camera.initialize()
-    camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+    if scene_usd is None:
+        camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+
+    def get_target_world_pose() -> tuple[np.ndarray, np.ndarray]:
+        if scene_usd is None:
+            position, orientation = target.get_world_pose()
+            return np.asarray(position), np.asarray(orientation)
+        positions, orientations = target.get_world_poses()
+        positions = np.asarray(positions)
+        orientations = np.asarray(orientations)
+        if positions.shape != (1, 3) or orientations.shape != (1, 4):
+            raise RuntimeError(
+                "authored target RigidPrim returned unexpected pose shapes: "
+                f"{positions.shape}, {orientations.shape}"
+            )
+        return positions[0], orientations[0]
 
     def save_rgb(label: str) -> str | None:
         frame = camera.get_current_frame()
@@ -161,8 +299,21 @@ try:
 
     for _ in range(args.settle_frames):
         world.step(render=True)
-    target_settled_position, target_settled_orientation = target.get_world_pose()
+    target_settled_position, target_settled_orientation = get_target_world_pose()
     target_settled_position = np.asarray(target_settled_position, dtype=np.float64)
+    target_settled_aabb = np.asarray(
+        compute_aabb(create_bbox_cache(), target_prim_path, include_children=True),
+        dtype=np.float64,
+    )
+    target_settled_extent = target_settled_aabb[3:] - target_settled_aabb[:3]
+    if (
+        target_settled_aabb.shape != (6,)
+        or not np.all(np.isfinite(target_settled_aabb))
+        or not np.all(target_settled_extent > 1e-4)
+    ):
+        raise RuntimeError(
+            f"invalid target AABB after settling: {target_settled_aabb}"
+        )
     saved_frames: list[str] = []
     first_frame = save_rgb("00_settled")
     if first_frame:
@@ -259,10 +410,10 @@ try:
     if frame_path:
         saved_frames.append(frame_path)
 
-    target_before_lift_position, target_before_lift_orientation = target.get_world_pose()
+    target_before_lift_position, target_before_lift_orientation = get_target_world_pose()
     target_before_lift_position = np.asarray(target_before_lift_position, dtype=np.float64)
     execute_phase("lift", closed_finger_target)
-    target_after_lift_position, target_after_lift_orientation = target.get_world_pose()
+    target_after_lift_position, target_after_lift_orientation = get_target_world_pose()
     target_after_lift_position = np.asarray(target_after_lift_position, dtype=np.float64)
 
     transport_executed = "transport" in replay.phase_positions
@@ -270,7 +421,7 @@ try:
     if transport_executed:
         execute_phase("transport", closed_finger_target)
         target_after_transport_position, target_after_transport_orientation = (
-            target.get_world_pose()
+            get_target_world_pose()
         )
         target_after_transport_position = np.asarray(
             target_after_transport_position, dtype=np.float64
@@ -286,7 +437,7 @@ try:
             )
         )
         world.step(render=True)
-    target_held_position, target_held_orientation = target.get_world_pose()
+    target_held_position, target_held_orientation = get_target_world_pose()
     target_held_position = np.asarray(target_held_position, dtype=np.float64)
     measured_fingers_held = np.asarray(panda.get_joint_positions(), dtype=np.float64)[
         finger_indices
@@ -319,7 +470,7 @@ try:
         if target_after_transport_position is not None
         else None
     )
-    minimum_clear_lift_m = float(LAYOUT.target_size_m[2])
+    minimum_clear_lift_m = float(target_settled_extent[2])
     phase_max_errors = {
         phase: float(np.max(np.abs(measurements[phase] - commands[phase])))
         for phase in commands
@@ -332,7 +483,14 @@ try:
         "status": "success" if physical_pick_observed else "physical_pick_not_observed",
         "reference": {
             "controller": "Isaac Sim 5.1 ArticulationAction position targets",
-            "dynamic_target": "Isaac Sim DynamicCuboid with default physical properties",
+            "dynamic_target": (
+                "Existing physics-ready authored USD rigid body via RigidPrim"
+                if scene_usd is not None
+                else "Isaac Sim DynamicCuboid with default physical properties"
+            ),
+            "target_bounds": (
+                "Isaac Sim compute_aabb with include_children=True"
+            ),
             "finger_close": (
                 "Isaac Sim 5.1 articulation controller example: finger joints 7 and 8 to 0"
             ),
@@ -342,6 +500,16 @@ try:
         "inputs": {
             "capture": str(args.capture),
             "plan": str(args.plan),
+            "scene_usd": str(scene_usd) if scene_usd is not None else None,
+            "scene_kind": (
+                "authored_usd_scene" if scene_usd is not None else "legacy_block_scene"
+            ),
+            "panda_prim": args.panda_prim,
+            "target_prim": target_prim_path,
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "camera_prim": (
+                args.camera_prim if scene_usd is not None else "/World/replay_camera"
+            ),
         },
         "replay": {
             "physics_dt_s": PHYSICS_DT_S,
@@ -363,6 +531,9 @@ try:
             "saved_review_frames": saved_frames,
         },
         "physical_object": {
+            "physics_apis": target_physics_apis,
+            "settled_aabb_world_m": target_settled_aabb.tolist(),
+            "settled_aabb_extent_m": target_settled_extent.tolist(),
             "settled_position_world_m": target_settled_position.tolist(),
             "before_lift_position_world_m": target_before_lift_position.tolist(),
             "after_lift_position_world_m": target_after_lift_position.tolist(),
@@ -379,6 +550,10 @@ try:
             "physical_pick_observed": physical_pick_observed,
         },
         "automatic_checks": {
+            "replay_scene_matches_capture": True,
+            "target_is_physics_ready": bool(
+                scene_usd is None or all(target_physics_apis.values())
+            ),
             "capture_start_state_reproduced": bool(np.all(start_error <= 2e-3)),
             "all_arm_commands_finite": bool(
                 all(np.isfinite(value).all() for value in commands.values())
