@@ -7,6 +7,8 @@ import numpy as np
 from panda_handover.segmentation import (
     InstanceSegmentation,
     point_statistics,
+    prompt_slug,
+    save_prompt_overlap_report,
     save_segmentation_artifacts,
     select_masked_points,
     write_ascii_ply,
@@ -92,6 +94,34 @@ class SegmentationTests(unittest.TestCase):
             self.assertTrue(np.array_equal(np.load(output / "points_camera.npy"), camera[0, 1][None]))
             self.assertTrue((output / "overlay.png").is_file())
             self.assertTrue((output / "points_world.ply").is_file())
+
+    def test_prompt_overlap_report_preserves_raw_overlapping_masks(self):
+        knife = InstanceSegmentation(
+            masks=np.array([[[True, True, True], [False, False, False]]]),
+            boxes_xyxy=np.zeros((1, 4), dtype=np.float32),
+            scores=np.ones(1, dtype=np.float32),
+        )
+        blade = InstanceSegmentation(
+            masks=np.array([[[True, True, False], [False, False, False]]]),
+            boxes_xyxy=np.zeros((1, 4), dtype=np.float32),
+            scores=np.ones(1, dtype=np.float32),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report = save_prompt_overlap_report(
+                temporary_directory,
+                {"knife": knife, "blade of knife": blade},
+                (2, 3),
+            )
+            self.assertTrue(report["automatic_checks_passed"])
+            self.assertFalse(report["part_masks_forced_disjoint"])
+            self.assertEqual(report["prompts"]["blade of knife"]["slug"], "blade_of_knife")
+            self.assertEqual(report["pairwise_overlaps"][0]["intersection_pixels"], 2)
+            self.assertTrue(Path(temporary_directory, "prompt_overlap_check.json").is_file())
+
+    def test_prompt_slug_rejects_unusable_prompt(self):
+        self.assertEqual(prompt_slug("Handle of knife"), "handle_of_knife")
+        with self.assertRaisesRegex(ValueError, "directory-safe"):
+            prompt_slug("刃")
 
 
 if __name__ == "__main__":

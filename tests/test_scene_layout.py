@@ -43,6 +43,14 @@ class SceneLayoutTests(unittest.TestCase):
         )
         self.assertLess(script.index(path_registration), script.index(layout_import))
 
+    def test_capture_script_uses_official_physics_ready_ycb_knife(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "scripts" / "isaac_capture_smoke.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("/Isaac/Props/YCB/Axis_Aligned_Physics/032_knife.usd", script)
+        self.assertIn("get_assets_root_path()", script)
+        self.assertIn("include_children=True", script)
+
 
 if __name__ == "__main__":
     unittest.main()

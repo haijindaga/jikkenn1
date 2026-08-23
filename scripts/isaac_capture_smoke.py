@@ -20,6 +20,7 @@ from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
+YCB_KNIFE_PHYSICS_ASSET = "/Isaac/Props/YCB/Axis_Aligned_Physics/032_knife.usd"
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,7 +51,19 @@ def parse_args() -> argparse.Namespace:
         default="camera_0",
         help="Capture directory name; use a unique name for each viewpoint",
     )
+    parser.add_argument(
+        "--scene-target",
+        choices=("block", "ycb_knife"),
+        default="block",
+        help="Use the original block or NVIDIA's physics-ready YCB 032 knife asset",
+    )
     parser.add_argument("--sam3-prompt", help="Optional short noun phrase, for example 'blue block'")
+    parser.add_argument(
+        "--sam3-part-prompt",
+        action="append",
+        default=[],
+        help="Additional part phrase; repeat for blade/handle and keep --sam3-prompt as the whole object",
+    )
     parser.add_argument("--sam3-output", type=Path)
     parser.add_argument("--sam3-model-id", default="facebook/sam3")
     parser.add_argument("--sam3-score-threshold", type=float, default=0.5)
@@ -77,8 +90,11 @@ try:
 
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import FixedCuboid
+    from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
+    from isaacsim.core.utils.prims import create_prim
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
+    from isaacsim.storage.native import get_assets_root_path
 
     from panda_handover.capture import RgbdCapture
     from panda_handover.geometry import (
@@ -110,15 +126,49 @@ try:
             color=np.array([0.45, 0.32, 0.20]),
         )
     )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/TestObject",
-            name="test_object",
-            position=np.asarray(LAYOUT.target_center_m),
-            scale=np.asarray(LAYOUT.target_size_m),
-            color=np.array([0.1, 0.5, 0.9]),
+    if args.scene_target == "block":
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/TestObject",
+                name="test_object",
+                position=np.asarray(LAYOUT.target_center_m),
+                scale=np.asarray(LAYOUT.target_size_m),
+                color=np.array([0.1, 0.5, 0.9]),
+            )
         )
-    )
+        target_asset = {
+            "kind": "fixed_cuboid",
+            "source": "Isaac Sim FixedCuboid",
+            "usd_path": None,
+            "physics_ready": False,
+        }
+    else:
+        assets_root_path = get_assets_root_path()
+        if assets_root_path is None:
+            raise RuntimeError("Isaac Sim asset root is unavailable; cannot load the official YCB knife")
+        knife_usd_path = assets_root_path.rstrip("/") + YCB_KNIFE_PHYSICS_ASSET
+        # Axis_Aligned_Physics assets already carry RigidBodyAPI and collision.
+        # Spawn above the table and let PhysX establish the resting pose.
+        knife_spawn_position = (
+            LAYOUT.target_center_m[0],
+            LAYOUT.target_center_m[1],
+            LAYOUT.table_top_z_m + 0.08,
+        )
+        create_prim(
+            prim_path="/World/TestObject",
+            usd_path=knife_usd_path,
+            translation=knife_spawn_position,
+            orientation=(1.0, 0.0, 0.0, 0.0),
+        )
+        target_asset = {
+            "kind": "ycb_knife",
+            "source": "NVIDIA Isaac Sim YCB Axis_Aligned_Physics",
+            "usd_path": knife_usd_path,
+            "relative_asset_path": YCB_KNIFE_PHYSICS_ASSET,
+            "physics_ready": True,
+            "spawn_position_m": list(knife_spawn_position),
+            "settled_by_physics": True,
+        }
     world.scene.add(
         FixedCuboid(
             prim_path="/World/Obstacle",
@@ -152,6 +202,32 @@ try:
 
     for _ in range(args.warmup_frames):
         world.step(render=True)
+
+    target_aabb = np.asarray(
+        compute_aabb(create_bbox_cache(), "/World/TestObject", include_children=True),
+        dtype=np.float64,
+    )
+    if target_aabb.shape != (6,) or not np.all(np.isfinite(target_aabb)):
+        raise RuntimeError(f"invalid target AABB after settling: {target_aabb}")
+    table_min = np.asarray(LAYOUT.table_center_m) - 0.5 * np.asarray(LAYOUT.table_size_m)
+    table_max = np.asarray(LAYOUT.table_center_m) + 0.5 * np.asarray(LAYOUT.table_size_m)
+    target_extent = target_aabb[3:] - target_aabb[:3]
+    runtime_target_checks = {
+        "aabb_extent_is_positive": bool(np.all(target_extent > 1e-4)),
+        "footprint_is_on_table": bool(
+            target_aabb[0] >= table_min[0]
+            and target_aabb[3] <= table_max[0]
+            and target_aabb[1] >= table_min[1]
+            and target_aabb[4] <= table_max[1]
+        ),
+        "bottom_is_not_below_table": bool(target_aabb[2] >= LAYOUT.table_top_z_m - 0.01),
+        "bottom_is_near_table_after_settling": bool(
+            target_aabb[2] <= LAYOUT.table_top_z_m + 0.03
+        ),
+    }
+    target_asset["settled_aabb_world_m"] = target_aabb.astype(float).tolist()
+    target_asset["settled_extent_m"] = target_extent.astype(float).tolist()
+    target_asset["automatic_checks"] = runtime_target_checks
 
     frame = camera.get_current_frame()
     rgba = frame.get("rgba")
@@ -210,6 +286,13 @@ try:
     saved = capture.save(args.output)
 
     scene_layout_report = LAYOUT.validation_report()
+    scene_layout_report["runtime_target"] = target_asset
+    scene_layout_report["automatic_checks"]["runtime_target_is_valid"] = bool(
+        all(runtime_target_checks.values())
+    )
+    scene_layout_report["status"] = (
+        "success" if all(scene_layout_report["automatic_checks"].values()) else "failure"
+    )
     scene_layout_path = saved / "scene_layout.json"
     scene_layout_path.write_text(
         json.dumps(scene_layout_report, indent=2) + "\n", encoding="utf-8"
@@ -265,13 +348,22 @@ try:
             f"details saved to {saved / 'geometry_check.json'}"
         )
     segmentation_directory = None
+    if args.sam3_part_prompt and not args.sam3_prompt:
+        raise ValueError("--sam3-part-prompt requires --sam3-prompt for the whole object")
+    segmentation_prompt_directories = None
     if args.sam3_prompt:
-        from panda_handover.segmentation import infer_sam3_instances, save_segmentation_artifacts
+        from panda_handover.segmentation import (
+            infer_sam3_prompts,
+            prompt_slug,
+            save_prompt_overlap_report,
+            save_segmentation_artifacts,
+        )
 
         segmentation_directory = args.sam3_output or (args.output / "sam3")
-        prediction = infer_sam3_instances(
+        prompts = [args.sam3_prompt, *args.sam3_part_prompt]
+        predictions = infer_sam3_prompts(
             rgb,
-            args.sam3_prompt,
+            prompts,
             model_id=args.sam3_model_id,
             device=args.sam3_device,
             dtype=args.sam3_dtype,
@@ -279,23 +371,41 @@ try:
             mask_threshold=args.sam3_mask_threshold,
             local_files_only=not args.sam3_allow_download,
         )
-        segmentation_report = save_segmentation_artifacts(
-            segmentation_directory,
-            rgb=rgb,
-            depth_m=depth_m,
-            points_camera=points_camera,
-            points_world=points_world,
-            prediction=prediction,
-            prompt=args.sam3_prompt,
-            model_id=args.sam3_model_id,
-            score_threshold=args.sam3_score_threshold,
-            mask_threshold=args.sam3_mask_threshold,
-        )
-        if not segmentation_report["automatic_checks_passed"]:
-            raise RuntimeError(
-                "SAM3 returned no mask with valid 3D points; inspect "
-                f"{segmentation_directory / 'segmentation_check.json'} and try a simpler noun phrase"
+        segmentation_prompt_directories = {}
+        segmentation_reports = {}
+        for index, prompt in enumerate(prompts):
+            prompt_directory = (
+                segmentation_directory
+                if index == 0
+                else segmentation_directory / "parts" / prompt_slug(prompt)
             )
+            segmentation_prompt_directories[prompt] = str(prompt_directory)
+            segmentation_reports[prompt] = save_segmentation_artifacts(
+                prompt_directory,
+                rgb=rgb,
+                depth_m=depth_m,
+                points_camera=points_camera,
+                points_world=points_world,
+                prediction=predictions[prompt],
+                prompt=prompt,
+                model_id=args.sam3_model_id,
+                score_threshold=args.sam3_score_threshold,
+                mask_threshold=args.sam3_mask_threshold,
+            )
+        overlap_report = save_prompt_overlap_report(
+            segmentation_directory,
+            predictions,
+            tuple(rgb.shape[:2]),
+        )
+        if not all(
+            report["automatic_checks_passed"] for report in segmentation_reports.values()
+        ):
+            raise RuntimeError(
+                "SAM3 returned no mask with valid 3D points for at least one prompt; inspect "
+                f"{segmentation_directory} before changing prompts or thresholds"
+            )
+        if len(prompts) > 1 and not overlap_report["automatic_checks_passed"]:
+            raise RuntimeError(f"SAM3 multi-prompt gate failed; inspect {segmentation_directory}")
 
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "run_status.json").write_text(
@@ -307,6 +417,7 @@ try:
                 "segmentation_directory": (
                     str(segmentation_directory) if segmentation_directory is not None else None
                 ),
+                "segmentation_prompt_directories": segmentation_prompt_directories,
             },
             indent=2,
         )
