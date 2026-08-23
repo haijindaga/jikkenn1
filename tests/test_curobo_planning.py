@@ -294,6 +294,38 @@ class CuroboPlanningTests(unittest.TestCase):
             goalset.pregrasp_robot_base[0, :3, 3], [0.0, 0.1, 0.0], atol=1e-7
         )
 
+    def test_pregrasp_excludes_failed_source_candidate_before_score_ordering(self):
+        poses = np.repeat(np.eye(4)[None], 3, axis=0)
+        poses[:, 0, 3] = [0.1, 0.2, 0.3]
+        goalset = prepare_pregrasp_goalset(
+            poses,
+            np.array([0.2, 0.9, 0.5]),
+            np.eye(4),
+            candidate_indices=np.array([10, 11, 12]),
+            excluded_candidate_indices=np.array([11]),
+        )
+        np.testing.assert_array_equal(goalset.candidate_indices, [12, 10])
+        np.testing.assert_allclose(goalset.scores, [0.5, 0.2])
+
+    def test_pregrasp_rejects_absent_or_all_candidate_exclusions(self):
+        poses = np.repeat(np.eye(4)[None], 2, axis=0)
+        with self.assertRaisesRegex(ValueError, "absent from the input"):
+            prepare_pregrasp_goalset(
+                poses,
+                np.array([0.2, 0.9]),
+                np.eye(4),
+                candidate_indices=np.array([10, 11]),
+                excluded_candidate_indices=np.array([99]),
+            )
+        with self.assertRaisesRegex(ValueError, "removed every candidate"):
+            prepare_pregrasp_goalset(
+                poses,
+                np.array([0.2, 0.9]),
+                np.eye(4),
+                candidate_indices=np.array([10, 11]),
+                excluded_candidate_indices=np.array([10, 11]),
+            )
+
     def test_rotation_conversion_uses_wxyz(self):
         rotations = np.stack(
             [

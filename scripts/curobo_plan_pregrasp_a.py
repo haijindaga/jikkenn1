@@ -45,6 +45,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--approach-offset", type=float, default=0.15)
     parser.add_argument("--max-candidates", type=int, default=10)
+    parser.add_argument(
+        "--exclude-source-candidate-index",
+        type=int,
+        action="append",
+        default=[],
+        help=(
+            "Exclude a previously failed GraspGenX source candidate index; "
+            "repeat the option to exclude more than one"
+        ),
+    )
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument(
         "--unknown-policy",
@@ -221,6 +231,9 @@ def main() -> int:
         approach_offset_m=args.approach_offset,
         max_candidates=args.max_candidates,
         candidate_indices=kept_indices,
+        excluded_candidate_indices=np.asarray(
+            args.exclude_source_candidate_index, dtype=np.int64
+        ),
     )
 
     robot_report = json.loads(
@@ -566,6 +579,9 @@ def main() -> int:
             "approach_axis": "negative panda_hand Z",
             "approach_offset_m": args.approach_offset,
             "candidate_count": len(goalset.scores),
+            "excluded_source_candidate_indices": sorted(
+                args.exclude_source_candidate_index
+            ),
             "num_ik_seeds": 16,
             "num_trajopt_seeds": 2,
             "max_attempts": args.max_attempts,

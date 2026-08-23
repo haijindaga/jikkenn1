@@ -390,6 +390,7 @@ def prepare_pregrasp_goalset(
     approach_offset_m: float = 0.15,
     max_candidates: int = 10,
     candidate_indices: np.ndarray | None = None,
+    excluded_candidate_indices: np.ndarray | None = None,
 ) -> PregraspGoalset:
     """Transform and score-order grasps, then offset along negative tool Z."""
     poses = np.asarray(panda_hand_world, dtype=np.float64)
@@ -418,6 +419,27 @@ def prepare_pregrasp_goalset(
             raise ValueError("candidate_indices length does not match candidates")
         if np.any(source_indices < 0) or len(np.unique(source_indices)) != len(source_indices):
             raise ValueError("candidate_indices must be unique non-negative integers")
+
+    excluded = np.asarray(
+        [] if excluded_candidate_indices is None else excluded_candidate_indices,
+        dtype=np.int64,
+    ).reshape(-1)
+    if np.any(excluded < 0) or len(np.unique(excluded)) != len(excluded):
+        raise ValueError(
+            "excluded_candidate_indices must be unique non-negative integers"
+        )
+    missing_exclusions = np.setdiff1d(excluded, source_indices)
+    if missing_exclusions.size:
+        raise ValueError(
+            "excluded candidate indices are absent from the input: "
+            f"{missing_exclusions.tolist()}"
+        )
+    keep = ~np.isin(source_indices, excluded)
+    if not np.any(keep):
+        raise ValueError("excluded_candidate_indices removed every candidate")
+    poses = poses[keep]
+    values = values[keep]
+    source_indices = source_indices[keep]
 
     order = np.argsort(-values, kind="stable")[: min(max_candidates, len(values))]
     base_from_world = np.linalg.inv(world_from_base)
