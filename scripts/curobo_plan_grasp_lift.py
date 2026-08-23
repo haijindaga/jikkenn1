@@ -730,7 +730,10 @@ def main() -> int:
         }
         transport_report = {
             "planner": "MotionPlanner.plan_pose",
-            "planner_status": str(transport_result.status),
+            "result_type": type(transport_result).__name__,
+            "planner_reported_success": bool(transport_result.success.any().item()),
+            "curobo_total_time_s": float(transport_result.total_time),
+            "curobo_solve_time_s": float(transport_result.solve_time),
             "wall_time_s": transport_elapsed_s,
             "waypoints": transport_values["waypoints"],
             "full_joint_names": transport_values["full_joint_names"],

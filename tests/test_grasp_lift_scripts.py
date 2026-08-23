@@ -75,6 +75,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("transport_all_waypoints_clear_of_observed_scene", source)
         self.assertIn('"human_or_receiver_collision_model_present": False', source)
         self.assertIn('"handover_release_planned": False', source)
+        self.assertNotIn("transport_result.status", source)
+        self.assertIn('"result_type": type(transport_result).__name__', source)
 
     def test_first_lift_limitation_is_explicit_and_fail_visible(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
