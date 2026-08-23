@@ -1,11 +1,38 @@
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+
+import numpy as np
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+PREGRASP_SCRIPT = PROJECT / "scripts" / "curobo_plan_pregrasp_a.py"
+SPEC = importlib.util.spec_from_file_location("curobo_plan_pregrasp_test", PREGRASP_SCRIPT)
+PREGRASP_MODULE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(PREGRASP_MODULE)
 
 
 class CuroboVoxelFixScriptTests(unittest.TestCase):
+    def test_trajectory_field_selects_only_single_official_batch_and_seed(self):
+        trajectory = SimpleNamespace(
+            position=np.zeros((1, 1, 41, 9), dtype=np.float32)
+        )
+        result = PREGRASP_MODULE._trajectory_field(
+            trajectory, "position", required=True
+        )
+        self.assertEqual(result.shape, (41, 9))
+
+    def test_trajectory_field_rejects_multiple_results(self):
+        trajectory = SimpleNamespace(
+            position=np.zeros((1, 2, 41, 9), dtype=np.float32)
+        )
+        with self.assertRaisesRegex(RuntimeError, "multiple batch/seed"):
+            PREGRASP_MODULE._trajectory_field(
+                trajectory, "position", required=True
+            )
+
     def test_patch_is_exactly_the_six_issue_699_rounding_changes(self):
         patch = (
             PROJECT / "patches" / "curobo" / "057a96f-voxel-grid-round.patch"

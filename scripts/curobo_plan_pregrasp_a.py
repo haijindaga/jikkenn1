@@ -79,8 +79,16 @@ def _trajectory_field(trajectory: Any, name: str, *, required: bool) -> np.ndarr
             raise RuntimeError(f"planned trajectory has no {name}")
         return None
     array = _cpu_numpy(value)
-    if array.ndim == 3 and array.shape[0] == 1:
-        array = array[0]
+    # cuRobo V2 TrajOptSolverResult documents trajectory tensors as
+    # (batch, return_seeds, horizon, dof).  plan_pose currently returns one
+    # batch and one selected seed, but keep this fail-closed if either becomes
+    # ambiguous instead of silently flattening multiple trajectories.
+    if array.ndim > 2:
+        if any(size != 1 for size in array.shape[:-2]):
+            raise RuntimeError(
+                f"trajectory {name} has multiple batch/seed entries: {array.shape}"
+            )
+        array = array.reshape(array.shape[-2:])
     if array.ndim != 2:
         raise RuntimeError(f"trajectory {name} must be HxD, got {array.shape}")
     return array.astype(np.float32, copy=False)
