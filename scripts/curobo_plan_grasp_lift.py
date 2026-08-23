@@ -474,9 +474,9 @@ def main() -> int:
     if not 0 <= selected_rank < len(grasp_transforms):
         raise RuntimeError("cuRobo returned an invalid grasp goalset index")
 
-    # Prepare the target attachment only after the official lift.  During the
-    # first tabletop lift, the object starts in intentional contact with its
-    # support surface; cuRobo has no per-pair allowed-collision matrix here.
+    # Prepare the target attachment only after the official lift plan. During
+    # the first tabletop lift, the object starts in intentional contact with
+    # its support surface; cuRobo has no per-pair allowed-collision matrix here.
     target_mesh = Mesh.from_pointcloud(
         target_robot_base,
         pitch=observed_scene.voxel_size_m,
@@ -490,6 +490,12 @@ def main() -> int:
         target_mesh.vertices, target_mesh.faces
     )
     target_mesh.faces = target_triangle_faces.tolist()
+    grasp_end = JointState.from_position(
+        torch.from_numpy(phase_reports["grasp"]["end"])
+        .to(device_cfg.device)
+        .unsqueeze(0),
+        joint_names=planner.joint_names,
+    )
     lift_end = JointState.from_position(
         torch.from_numpy(phase_reports["lift"]["end"])
         .to(device_cfg.device)
@@ -505,7 +511,10 @@ def main() -> int:
     # official path here without modifying the vendored checkout.
     attachment_manager = planner.trajopt_solver.core.attachment_manager
     attachment_manager.attach(
-        joint_states=lift_end,
+        # Official API contract: joint_states is the grasp configuration that
+        # defines the fixed object-to-hand transform. Evaluation below uses
+        # lift_end after that transform has been established.
+        joint_states=grasp_end,
         obstacles=[target_mesh],
         link_name="attached_object",
         num_spheres=4,
@@ -516,6 +525,12 @@ def main() -> int:
             "attached_object"
         )
     )
+    attached_indices_np = _cpu_numpy(attached_indices).astype(np.int64).reshape(-1)
+    if attached_indices_np.size != 4:
+        raise RuntimeError(
+            f"franka.yml must expose 4 attached-object spheres, got {attached_indices_np.size}"
+        )
+    np.save(output / "attached_object_sphere_indices.npy", attached_indices_np)
     attached_local_spheres = _cpu_numpy(
         attachment_manager.kinematics_params.link_spheres[
             0, attached_indices, :
@@ -526,6 +541,16 @@ def main() -> int:
     lifted_kinematics = planner.compute_kinematics(lift_end)
     if lifted_kinematics.robot_spheres is None:
         raise RuntimeError("cuRobo returned no lifted robot collision spheres")
+    lifted_robot_spheres_np = _cpu_numpy(lifted_kinematics.robot_spheres).astype(
+        np.float32, copy=False
+    ).reshape(-1, 4)
+    if int(attached_indices_np.max()) >= len(lifted_robot_spheres_np):
+        raise RuntimeError("attached sphere index exceeds lifted robot sphere array")
+    np.save(output / "lift_end_robot_spheres_world.npy", lifted_robot_spheres_np)
+    np.save(
+        output / "lift_end_attached_object_spheres_world.npy",
+        lifted_robot_spheres_np[attached_indices_np],
+    )
     collision_buffer = CollisionBuffer.from_shape(
         lifted_kinematics.robot_spheres.shape, device_cfg
     )
@@ -596,6 +621,7 @@ def main() -> int:
             "target_absent_from_observed_scene": True,
             "attachment_sphere_count": 4,
             "attachment_mesh_triangle_count": int(len(target_triangle_faces)),
+            "attachment_transform_configuration": "grasp phase end",
         },
         "result": {
             "planner_reported_success": True,
@@ -645,6 +671,7 @@ def main() -> int:
                 "this cuRobo API has no per-pair allowed-collision matrix"
             ),
             "attachment_prepared_and_checked_at_lift_end": True,
+            "attachment_transform_defined_at_grasp_end": True,
             "trajectory_executed": False,
             "manual_review_required": True,
             "safe_for_real_robot_execution": False,

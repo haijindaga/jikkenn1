@@ -41,6 +41,8 @@ class GraspLiftScriptTests(unittest.TestCase):
             source,
         )
         self.assertIn("attachment_manager.attach(", source)
+        self.assertIn("joint_states=grasp_end", source)
+        self.assertNotIn("joint_states=lift_end,\n        obstacles=[target_mesh]", source)
         self.assertIn("Mesh.from_pointcloud(", source)
         self.assertIn("_restore_triangle_faces(", source)
         self.assertIn("load_singleview_observed_pointcloud(", source)
@@ -65,6 +67,7 @@ class GraspLiftScriptTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"held_object_collision_checked_during_first_lift": False', source)
+        self.assertIn('"attachment_transform_defined_at_grasp_end": True', source)
         self.assertIn('"safe_for_real_robot_execution": False', source)
         self.assertIn('"manual_review_required": True', source)
 
