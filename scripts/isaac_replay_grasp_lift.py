@@ -21,6 +21,8 @@ from panda_handover.trajectory_replay import (
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
 PHYSICS_DT_S = 1.0 / 60.0
+PANDA_OPEN_FINGER_JOINT_M = 0.04
+PANDA_CLOSED_FINGER_JOINT_M = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +35,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--close-frames", type=int, default=60)
     parser.add_argument("--hold-frames", type=int, default=180)
     parser.add_argument(
+        "--open-finger-position-m",
+        type=float,
+        default=PANDA_OPEN_FINGER_JOINT_M,
+    )
+    parser.add_argument(
+        "--closed-finger-position-m",
+        type=float,
+        default=PANDA_CLOSED_FINGER_JOINT_M,
+    )
+    parser.add_argument(
         "--simulation-only",
         action="store_true",
         help="Required acknowledgement: this command controls only an Isaac Sim robot",
@@ -42,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--simulation-only is required")
     if min(args.settle_frames, args.close_frames, args.hold_frames) < 0:
         parser.error("frame counts must be non-negative")
+    if not (
+        0.0
+        <= args.closed_finger_position_m
+        <= args.open_finger_position_m
+        <= PANDA_OPEN_FINGER_JOINT_M
+    ):
+        parser.error(
+            "finger positions must satisfy 0 <= closed <= open <= 0.04 metres"
+        )
     return args
 
 
@@ -168,9 +189,10 @@ try:
     expected_start = np.asarray(
         [capture_by_name[name] for name in replay.joint_names], dtype=np.float64
     )
-    open_fingers = np.asarray(
+    captured_fingers = np.asarray(
         [capture_by_name[name] for name in finger_names], dtype=np.float64
     )
+    open_fingers = np.full(2, args.open_finger_position_m, dtype=np.float64)
     actual_start = np.asarray(panda.get_joint_positions(), dtype=np.float64)[arm_indices]
     start_error = np.abs(actual_start - expected_start)
     if not np.all(start_error <= 2e-3):
@@ -213,10 +235,15 @@ try:
 
     execute_phase("approach", open_fingers)
     execute_phase("grasp", open_fingers)
+    measured_fingers_before_close = np.asarray(
+        panda.get_joint_positions(), dtype=np.float64
+    )[finger_indices]
 
     grasp_arm_target = commands["grasp"][-1]
     all_indices = np.concatenate((arm_indices, finger_indices))
-    closed_finger_target = np.zeros(2, dtype=np.float64)
+    closed_finger_target = np.full(
+        2, args.closed_finger_position_m, dtype=np.float64
+    )
     for _ in range(args.close_frames):
         panda.apply_action(
             ArticulationAction(
@@ -287,6 +314,7 @@ try:
             "finger_close": (
                 "Isaac Sim 5.1 articulation controller example: finger joints 7 and 8 to 0"
             ),
+            "finger_open": "cuRobo franka.yml locked finger joints at 0.04 metres",
             "source_plan": str(args.plan / "grasp_lift_plan_check.json"),
         },
         "inputs": {
@@ -302,9 +330,12 @@ try:
             "phase_maximum_tracking_error_rad": phase_max_errors,
             "close_frames": args.close_frames,
             "hold_frames": args.hold_frames,
-            "open_finger_targets_rad": open_fingers.tolist(),
-            "measured_fingers_after_close_rad": measured_fingers_after_close.tolist(),
-            "measured_fingers_held_rad": measured_fingers_held.tolist(),
+            "captured_finger_positions_m": captured_fingers.tolist(),
+            "open_finger_targets_m": open_fingers.tolist(),
+            "measured_fingers_before_close_m": measured_fingers_before_close.tolist(),
+            "closed_finger_targets_m": closed_finger_target.tolist(),
+            "measured_fingers_after_close_m": measured_fingers_after_close.tolist(),
+            "measured_fingers_held_m": measured_fingers_held.tolist(),
             "saved_review_frames": saved_frames,
         },
         "physical_object": {
@@ -326,7 +357,8 @@ try:
                 all(np.isfinite(value).all() for value in measurements.values())
             ),
             "finger_measurements_finite": bool(
-                np.isfinite(measured_fingers_after_close).all()
+                np.isfinite(measured_fingers_before_close).all()
+                and np.isfinite(measured_fingers_after_close).all()
                 and np.isfinite(measured_fingers_held).all()
             ),
             "object_lifted_by_at_least_one_object_height": physical_pick_observed,
