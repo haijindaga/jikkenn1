@@ -34,6 +34,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument(
+        "--handover-goal-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Optional fixed panda_hand transport goal in panda_link0 metres. "
+            "Omitting this keeps the existing grasp/lift-only scope."
+        ),
+    )
+    parser.add_argument(
+        "--handover-goal-quaternion-wxyz",
+        type=float,
+        nargs=4,
+        metavar=("W", "X", "Y", "Z"),
+        help="Optional handover orientation; omitted preserves the grasp orientation",
+    )
     return parser.parse_args()
 
 
@@ -145,6 +162,19 @@ def _goalset_index(result: Any) -> int | None:
     return int(flat[0]) if flat.size else None
 
 
+def _normalized_quaternion(value: Any) -> np.ndarray:
+    quaternion = np.asarray(value, dtype=np.float64)
+    if quaternion.shape != (4,) or not np.isfinite(quaternion).all():
+        raise ValueError("handover quaternion must contain four finite wxyz values")
+    norm = float(np.linalg.norm(quaternion))
+    if norm < 1e-8:
+        raise ValueError("handover quaternion norm is zero")
+    quaternion /= norm
+    if quaternion[0] < 0.0:
+        quaternion *= -1.0
+    return quaternion.astype(np.float32)
+
+
 def _load_reviewed_pregrasp(directory: Path) -> tuple[dict[str, Any], np.ndarray]:
     report_path = directory / "pregrasp_plan_check.json"
     if not report_path.is_file():
@@ -175,6 +205,18 @@ def main() -> int:
         raise ValueError("--lift-offset must be positive and finite")
     if args.max_attempts <= 0:
         raise ValueError("--max-attempts must be positive")
+    if (
+        args.handover_goal_quaternion_wxyz is not None
+        and args.handover_goal_position_robot_base_m is None
+    ):
+        raise ValueError("a handover quaternion requires a handover goal position")
+    handover_goal_position = None
+    if args.handover_goal_position_robot_base_m is not None:
+        handover_goal_position = np.asarray(
+            args.handover_goal_position_robot_base_m, dtype=np.float32
+        )
+        if not np.isfinite(handover_goal_position).all():
+            raise ValueError("handover goal position must contain finite values")
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root / "src"))
 
@@ -565,6 +607,142 @@ def main() -> int:
     lifted_cost_np = _cpu_numpy(lifted_cost).astype(np.float32, copy=False)
     np.save(output / "lift_end_attached_penetration_cost.npy", lifted_cost_np)
 
+    # Optional fourth phase: keep the fitted object spheres attached and use
+    # cuRobo's official pose planner from the lift endpoint. The position must
+    # be supplied by the experiment configuration; it is not guessed here.
+    transport_report = None
+    transport_checks: dict[str, bool] = {}
+    transport_cost_np = None
+    if handover_goal_position is not None:
+        if args.handover_goal_quaternion_wxyz is None:
+            handover_goal_quaternion = rotation_matrix_to_quaternion_wxyz(
+                grasp_transforms[selected_rank, :3, :3]
+            )
+            handover_orientation_policy = "preserve_selected_grasp_orientation"
+        else:
+            handover_goal_quaternion = _normalized_quaternion(
+                args.handover_goal_quaternion_wxyz
+            )
+            handover_orientation_policy = "explicit_quaternion_wxyz"
+        handover_goal = GoalToolPose(
+            tool_frames=planner.tool_frames,
+            position=torch.from_numpy(handover_goal_position).to(device_cfg.device)[
+                None, None, None, None, :
+            ],
+            quaternion=torch.from_numpy(handover_goal_quaternion).to(device_cfg.device)[
+                None, None, None, None, :
+            ],
+        )
+        planner.reset_seed()
+        transport_started = time.monotonic()
+        transport_result = planner.plan_pose(
+            current_state=lift_end,
+            goal_tool_poses=handover_goal,
+            max_attempts=args.max_attempts,
+        )
+        transport_elapsed_s = time.monotonic() - transport_started
+        transport_success = bool(
+            transport_result is not None
+            and transport_result.success is not None
+            and transport_result.success.any().item()
+        )
+        if not transport_success:
+            failure_report = {
+                "status": "handover_transport_planning_failed",
+                "reference": {
+                    "curobo_commit": CUROBO_COMMIT,
+                    "planner": "MotionPlanner.plan_pose after AttachmentManager.attach",
+                },
+                "goal": {
+                    "frame": "panda_link0 robot base",
+                    "tool_frame": "panda_hand",
+                    "position_m": handover_goal_position.tolist(),
+                    "quaternion_wxyz": handover_goal_quaternion.tolist(),
+                    "orientation_policy": handover_orientation_policy,
+                },
+                "planner_status": str(
+                    getattr(transport_result, "status", "plan_pose returned no result")
+                ),
+                "next_gate": (
+                    "Review the fixed goal and diagnostics before changing solver "
+                    "parameters."
+                ),
+            }
+            failure_path = output / "handover_transport_failure.json"
+            failure_path.write_text(
+                json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+            )
+            planner.destroy()
+            print(json.dumps(failure_report, indent=2))
+            print(f"saved: {failure_path}")
+            return 2
+
+        transport_values = _save_phase(
+            output,
+            "transport",
+            planner,
+            transport_result.get_interpolated_plan(),
+        )
+        transport_state = JointState.from_position(
+            torch.from_numpy(transport_values["position"]).to(device_cfg.device),
+            joint_names=planner.joint_names,
+        )
+        transport_kinematics = planner.compute_kinematics(transport_state)
+        if transport_kinematics.robot_spheres is None:
+            raise RuntimeError("cuRobo returned no transport collision spheres")
+        transport_buffer = CollisionBuffer.from_shape(
+            transport_kinematics.robot_spheres.shape, device_cfg
+        )
+        transport_buffer.zero_()
+        transport_cost = planner.scene_collision_checker.get_sphere_collision(
+            transport_kinematics,
+            transport_buffer,
+            torch.tensor([1.0], device=device_cfg.device, dtype=torch.float32),
+            torch.tensor([0.0], device=device_cfg.device, dtype=torch.float32),
+        )
+        torch.cuda.synchronize(device_cfg.device)
+        transport_cost_np = _cpu_numpy(transport_cost).astype(np.float32, copy=False)
+        transport_spheres_np = _cpu_numpy(
+            transport_kinematics.robot_spheres
+        ).astype(np.float32, copy=False)
+        transport_attached_spheres = transport_spheres_np[..., attached_indices_np, :]
+        np.save(output / "transport_full_robot_penetration_cost.npy", transport_cost_np)
+        np.save(
+            output / "transport_attached_object_spheres_world.npy",
+            transport_attached_spheres,
+        )
+        transport_checks = {
+            "transport_starts_at_lift_end": bool(
+                np.allclose(
+                    transport_values["start"],
+                    phase_reports["lift"]["end"],
+                    atol=2e-3,
+                    rtol=0.0,
+                )
+            ),
+            "transport_attached_spheres_are_positive_and_finite": bool(
+                np.isfinite(transport_attached_spheres).all()
+                and np.all(transport_attached_spheres[..., 3] > 0.0)
+            ),
+            "transport_all_waypoints_clear_of_observed_scene": bool(
+                not np.any(transport_cost_np > 0.0)
+            ),
+        }
+        transport_report = {
+            "planner": "MotionPlanner.plan_pose",
+            "planner_status": str(transport_result.status),
+            "wall_time_s": transport_elapsed_s,
+            "waypoints": transport_values["waypoints"],
+            "full_joint_names": transport_values["full_joint_names"],
+            "goal": {
+                "frame": "panda_link0 robot base",
+                "tool_frame": "panda_hand",
+                "position_m": handover_goal_position.tolist(),
+                "quaternion_wxyz": handover_goal_quaternion.tolist(),
+                "orientation_policy": handover_orientation_policy,
+            },
+        }
+
     source_indices = np.load(
         args.pregrasp_plan / "source_candidate_indices.npy", allow_pickle=False
     )
@@ -575,7 +753,7 @@ def main() -> int:
         "status": "success",
         "reference": {
             "curobo_commit": CUROBO_COMMIT,
-            "planner": "MotionPlanner.plan_grasp",
+            "planner": "MotionPlanner.plan_grasp with optional attached plan_pose",
             "planner_source": (
                 "curobo/_src/motion/motion_planner.py::MotionPlanner.plan_grasp"
             ),
@@ -591,6 +769,9 @@ def main() -> int:
                 "official trim_joint_state_trajectory using interpolated_last_tstep"
             ),
             "attachment": "AttachmentManager.attach with Mesh.from_pointcloud",
+            "attached_transport": (
+                "MotionPlanner.plan_pose after AttachmentManager.attach"
+            ),
             "attachment_face_contract": (
                 "cuRobo Mesh.from_pointcloud flat triangle indices restored to the "
                 "Nx3 contract required by trimesh"
@@ -639,6 +820,7 @@ def main() -> int:
                 }
                 for name, values in phase_reports.items()
             },
+            "transport": transport_report,
         },
         "automatic_checks": {
             "issue_663_preflight_succeeded": preflight_success,
@@ -653,6 +835,7 @@ def main() -> int:
             "lift_end_attached_object_not_penetrating_observed_scene": bool(
                 not np.any(lifted_cost_np > 0.0)
             ),
+            **transport_checks,
         },
         "safety": {
             "simulation_only": True,
@@ -672,13 +855,25 @@ def main() -> int:
             ),
             "attachment_prepared_and_checked_at_lift_end": True,
             "attachment_transform_defined_at_grasp_end": True,
+            "handover_transport_planned": transport_report is not None,
+            "held_object_collision_checked_during_transport": (
+                transport_report is not None and transport_cost_np is not None
+            ),
+            "human_or_receiver_collision_model_present": False,
+            "handover_release_planned": False,
             "trajectory_executed": False,
             "manual_review_required": True,
             "safe_for_real_robot_execution": False,
         },
         "next_gate": (
-            "Replay all three phases in Isaac Sim with a DynamicCuboid target, close "
-            "the physical Franka gripper at the grasp boundary, and measure target lift."
+            "Replay approach, grasp, lift, and attached transport in Isaac Sim while "
+            "holding the physical gripper closed."
+            if transport_report is not None
+            else (
+                "Replay all three phases in Isaac Sim with a DynamicCuboid target, "
+                "close the physical Franka gripper at the grasp boundary, and measure "
+                "target lift."
+            )
         ),
     }
     if not all(report["automatic_checks"].values()):

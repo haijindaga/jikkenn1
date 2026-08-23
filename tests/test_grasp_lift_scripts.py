@@ -62,6 +62,20 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("https://github.com/NVlabs/curobo/issues/692", source)
         self.assertIn("trim_joint_state_trajectory(", source)
 
+    def test_optional_handover_transport_uses_attached_official_pose_planner(self):
+        source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
+            encoding="utf-8"
+        )
+        attach_at = source.index("attachment_manager.attach(")
+        transport_at = source.index("transport_result = planner.plan_pose(")
+        self.assertLess(attach_at, transport_at)
+        self.assertIn('"--handover-goal-position-robot-base-m"', source)
+        self.assertIn("current_state=lift_end", source)
+        self.assertIn("preserve_selected_grasp_orientation", source)
+        self.assertIn("transport_all_waypoints_clear_of_observed_scene", source)
+        self.assertIn('"human_or_receiver_collision_model_present": False', source)
+        self.assertIn('"handover_release_planned": False', source)
+
     def test_first_lift_limitation_is_explicit_and_fail_visible(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
             encoding="utf-8"
