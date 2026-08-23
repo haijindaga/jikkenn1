@@ -279,7 +279,6 @@ def main() -> int:
             raise RuntimeError("cuRobo pointcloud mesh has invalid triangle indices")
         if np.any(faces < 0) or np.any(faces >= vertices.shape[0]):
             raise RuntimeError("cuRobo pointcloud mesh contains out-of-range faces")
-        scene_mesh.save_as_mesh(str(output / "observed_scene_mesh.obj"))
         scene = SceneCfg(mesh=[scene_mesh])
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -543,7 +542,7 @@ def main() -> int:
             "pitch_m": observed_scene.voxel_size_m,
             "vertices": int(np.asarray(scene_mesh.vertices).shape[0]),
             "triangles": int(np.asarray(scene_mesh.faces).size // 3),
-            "saved_obj": str(output / "observed_scene_mesh.obj"),
+            "serialization_used_by_planner": False,
         }
     report = {
         "status": status,

@@ -140,7 +140,10 @@ def main() -> int:
     sys.path.insert(0, str(project_root / "src"))
 
     from panda_handover.curobo_bridge import select_named_joint_positions
-    from panda_handover.curobo_planning import rotation_matrix_to_quaternion_wxyz
+    from panda_handover.curobo_planning import (
+        load_singleview_observed_pointcloud,
+        rotation_matrix_to_quaternion_wxyz,
+    )
     from panda_handover.geometry import transform_points
 
     subprocess.run(
@@ -152,9 +155,11 @@ def main() -> int:
         check=True,
     )
     pregrasp_report, grasp_transforms = _load_reviewed_pregrasp(args.pregrasp_plan)
-    mesh_path = args.pregrasp_plan / "observed_scene_mesh.obj"
-    if not mesh_path.is_file():
-        raise FileNotFoundError(mesh_path)
+    prepared_map_value = pregrasp_report.get("inputs", {}).get("prepared_map")
+    if not isinstance(prepared_map_value, str) or not prepared_map_value:
+        raise ValueError("source pre-grasp report has no prepared_map provenance")
+    prepared_map = Path(prepared_map_value)
+    observed_scene = load_singleview_observed_pointcloud(prepared_map, args.capture)
 
     segmentation_report_path = args.segmentation / "segmentation_check.json"
     segmentation_report = json.loads(segmentation_report_path.read_text(encoding="utf-8"))
@@ -201,9 +206,13 @@ def main() -> int:
     device_cfg = DeviceCfg(device=torch.device(args.device), dtype=torch.float32)
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
-    scene_mesh = Mesh(
+    # Recreate the exact in-memory representation used by the successful
+    # pre-grasp planner.  Do not round-trip Mesh.from_pointcloud through OBJ:
+    # that adds a trimesh parser/exporter boundary that cuRobo does not need.
+    scene_mesh = Mesh.from_pointcloud(
+        observed_scene.points_robot_base_m,
+        pitch=observed_scene.voxel_size_m,
         name="observed_scene_without_robot_or_target",
-        file_path=str(mesh_path.resolve()),
     )
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -356,10 +365,9 @@ def main() -> int:
     # support surface; cuRobo has no per-pair allowed-collision matrix here.
     target_mesh = Mesh.from_pointcloud(
         target_robot_base,
-        pitch=float(pregrasp_report["parameters"]["observed_mesh"]["pitch_m"]),
+        pitch=observed_scene.voxel_size_m,
         name="sam3_target_for_attachment",
     )
-    target_mesh.save_as_mesh(str(output / "sam3_target_attachment_mesh.obj"))
     lift_end = JointState.from_position(
         torch.from_numpy(phase_reports["lift"]["end"])
         .to(device_cfg.device)
@@ -431,6 +439,10 @@ def main() -> int:
             "capture": str(args.capture),
             "segmentation": str(args.segmentation),
             "pregrasp_plan": str(args.pregrasp_plan),
+            "prepared_map": str(prepared_map),
+            "observed_surface_point_count": int(
+                observed_scene.points_robot_base_m.shape[0]
+            ),
             "target_point_count": int(len(target_robot_base)),
         },
         "parameters": {
