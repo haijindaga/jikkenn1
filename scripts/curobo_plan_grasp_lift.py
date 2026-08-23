@@ -112,6 +112,14 @@ def _success_any(result: Any) -> bool:
     return bool(success is not None and success.any().item())
 
 
+def _goalset_index(result: Any) -> int | None:
+    value = getattr(result, "goalset_index", None)
+    if value is None:
+        return None
+    flat = _cpu_numpy(value).reshape(-1)
+    return int(flat[0]) if flat.size else None
+
+
 def _load_reviewed_pregrasp(directory: Path) -> tuple[dict[str, Any], np.ndarray]:
     report_path = directory / "pregrasp_plan_check.json"
     if not report_path.is_file():
@@ -224,11 +232,6 @@ def main() -> int:
         robot=args.robot,
         scene_model=SceneCfg(mesh=[scene_mesh]),
         device_cfg=device_cfg,
-        num_ik_seeds=16,
-        num_trajopt_seeds=2,
-        optimizer_collision_activation_distance=0.01,
-        use_cuda_graph=False,
-        random_seed=123,
         max_goalset=len(grasp_transforms),
     )
     planner = MotionPlanner(planner_cfg)
@@ -239,7 +242,11 @@ def main() -> int:
     )
     if not contact_collision_links:
         raise RuntimeError("reviewed Franka config has no grasp_contact_link_names")
-    planner.warmup(enable_graph=True, num_warmup_iterations=2)
+    # Match GraspGenX's official end-to-end planner initialization.  Its
+    # public-cuRobo compatibility note explicitly warns that overriding the
+    # default seeds/tolerances and use_cuda_graph=False makes approach/grasp
+    # TrajOpt fail with "Planning to grasp pose failed".
+    planner.warmup(enable_graph=False, num_warmup_iterations=1)
 
     start_positions = select_named_joint_positions(
         captured_names, captured_positions, planner.joint_names
@@ -311,8 +318,12 @@ def main() -> int:
                 "official_source": (
                     "curobo/_src/motion/motion_planner.py::MotionPlanner.plan_grasp"
                 ),
+                "graspgenx_end2end": (
+                    "GraspGenX/end2end/e2e_grasp_demo.py::init_planner"
+                ),
             },
             "planner_status": status_text,
+            "selected_goalset_rank": _goalset_index(result),
             "stage_success": {
                 "issue_663_preflight": preflight_success,
                 "goalset": _success_any(getattr(result, "goalset_result", None)),
@@ -321,6 +332,7 @@ def main() -> int:
                 "lift": _success_any(getattr(result, "lift_result", None)),
             },
             "parameters": {
+                "planner_config_policy": "GraspGenX end2end official defaults",
                 "official_grasp_contact_link_names": contact_collision_links,
                 "approach_offset_m": float(
                     pregrasp_report["parameters"]["approach_offset_m"]
@@ -504,6 +516,9 @@ def main() -> int:
             "planner_source": (
                 "curobo/_src/motion/motion_planner.py::MotionPlanner.plan_grasp"
             ),
+            "graspgenx_end2end_planner_config": (
+                "GraspGenX/end2end/e2e_grasp_demo.py::init_planner"
+            ),
             "official_grasp_contact_handling": (
                 "robot franka.yml grasp_contact_link_names"
             ),
@@ -528,6 +543,7 @@ def main() -> int:
         "parameters": {
             "robot": args.robot,
             "device": args.device,
+            "planner_config_policy": "GraspGenX end2end official defaults",
             "approach_axis": "panda_hand +Z with negative offset",
             "approach_offset_m": float(
                 pregrasp_report["parameters"]["approach_offset_m"]
