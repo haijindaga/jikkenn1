@@ -94,55 +94,96 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertAlmostEqual(time[-1], 0.3)
         self.assertTrue(np.all(np.diff(time) > 0.0))
 
+    def _write_grasp_lift_inputs(
+        self, root: Path, *, include_transport: bool = False
+    ) -> tuple[Path, Path]:
+        capture = root / "capture"
+        plan = root / "plan"
+        capture.mkdir()
+        plan.mkdir()
+        names = [
+            "panda_joint1",
+            "panda_joint2",
+            "panda_finger_joint1",
+            "panda_finger_joint2",
+        ]
+        (capture / "robot_state.json").write_text(
+            json.dumps({"joint_names": names}), encoding="utf-8"
+        )
+        np.save(
+            capture / "panda_joint_positions.npy",
+            np.array([0.1, -0.2, 0.04, 0.04]),
+        )
+        result = {
+            "planner_reported_success": True,
+            "trajectory_active_joint_names": names[:2],
+            "transport": (
+                {"planner_reported_success": True} if include_transport else None
+            ),
+        }
+        safety = {
+            "simulation_only": True,
+            "final_approach_planned": True,
+            "lift_planned": True,
+            "trajectory_executed": False,
+            "handover_transport_planned": include_transport,
+            "held_object_collision_checked_during_transport": include_transport,
+        }
+        (plan / "grasp_lift_plan_check.json").write_text(
+            json.dumps(
+                {
+                    "status": "success",
+                    "result": result,
+                    "automatic_checks": {"all": True},
+                    "safety": safety,
+                }
+            ),
+            encoding="utf-8",
+        )
+        phases = {
+            "approach": np.array([[0.1, -0.2], [0.2, -0.1]]),
+            "grasp": np.array([[0.2, -0.1], [0.3, 0.0]]),
+            "lift": np.array([[0.3, 0.0], [0.4, 0.1]]),
+        }
+        if include_transport:
+            phases["transport"] = np.array([[0.4, 0.1], [0.5, 0.2]])
+        for phase, positions in phases.items():
+            np.save(plan / f"{phase}_trajectory_position.npy", positions)
+            np.save(plan / f"{phase}_trajectory_dt_s.npy", np.array(0.02))
+        return capture, plan
+
     def test_loads_continuous_simulation_only_grasp_lift_phases(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            capture = root / "capture"
-            plan = root / "plan"
-            capture.mkdir()
-            plan.mkdir()
-            names = [
-                "panda_joint1",
-                "panda_joint2",
-                "panda_finger_joint1",
-                "panda_finger_joint2",
-            ]
-            (capture / "robot_state.json").write_text(
-                json.dumps({"joint_names": names}), encoding="utf-8"
-            )
-            np.save(
-                capture / "panda_joint_positions.npy",
-                np.array([0.1, -0.2, 0.04, 0.04]),
-            )
-            report = {
-                "status": "success",
-                "result": {
-                    "planner_reported_success": True,
-                    "trajectory_active_joint_names": names[:2],
-                },
-                "automatic_checks": {"all": True},
-                "safety": {
-                    "simulation_only": True,
-                    "final_approach_planned": True,
-                    "lift_planned": True,
-                    "trajectory_executed": False,
-                },
-            }
-            (plan / "grasp_lift_plan_check.json").write_text(
-                json.dumps(report), encoding="utf-8"
-            )
-            phases = {
-                "approach": np.array([[0.1, -0.2], [0.2, -0.1]]),
-                "grasp": np.array([[0.2, -0.1], [0.3, 0.0]]),
-                "lift": np.array([[0.3, 0.0], [0.4, 0.1]]),
-            }
-            for phase, positions in phases.items():
-                np.save(plan / f"{phase}_trajectory_position.npy", positions)
-                np.save(plan / f"{phase}_trajectory_dt_s.npy", np.array(0.02))
-
+            capture, plan = self._write_grasp_lift_inputs(root)
             loaded = load_grasp_lift_replay(capture, plan)
             self.assertEqual(tuple(loaded.phase_positions), ("approach", "grasp", "lift"))
             np.testing.assert_allclose(loaded.phase_segment_dt_s["lift"], [0.02])
+
+    def test_loads_optional_attached_transport_phase(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, plan = self._write_grasp_lift_inputs(root, include_transport=True)
+            loaded = load_grasp_lift_replay(capture, plan)
+            self.assertEqual(
+                tuple(loaded.phase_positions),
+                ("approach", "grasp", "lift", "transport"),
+            )
+            np.testing.assert_allclose(
+                loaded.phase_positions["transport"][0],
+                loaded.phase_positions["lift"][-1],
+            )
+
+    def test_rejects_transport_without_attached_collision_gate(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, plan = self._write_grasp_lift_inputs(root, include_transport=True)
+            report_path = plan / "grasp_lift_plan_check.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["safety"]["held_object_collision_checked_during_transport"] = False
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "collision-check"):
+                load_grasp_lift_replay(capture, plan)
 
     def test_rejects_discontinuous_grasp_lift_phases(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -206,6 +247,9 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("PANDA_OPEN_FINGER_JOINT_M = 0.04", script)
         self.assertIn("open_fingers = np.full(2, args.open_finger_position_m", script)
         self.assertIn("args.closed_finger_position_m", script)
+        self.assertIn('execute_phase("transport", closed_finger_target)', script)
+        self.assertIn('final_phase = "transport" if transport_executed else "lift"', script)
+        self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
         self.assertNotIn("FixedJoint", script)

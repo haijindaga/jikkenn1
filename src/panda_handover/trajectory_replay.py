@@ -24,7 +24,7 @@ class PregraspReplay:
 
 @dataclass(frozen=True)
 class GraspLiftReplay:
-    """Validated cuRobo approach, grasp, and lift trajectories for Isaac Sim."""
+    """Validated grasp/lift trajectories and optional attached transport."""
 
     joint_names: tuple[str, ...]
     phase_positions: dict[str, np.ndarray]
@@ -152,7 +152,7 @@ def load_grasp_lift_replay(
     *,
     continuity_tolerance: float = 2e-3,
 ) -> GraspLiftReplay:
-    """Load three planned phases without authorizing non-simulation execution."""
+    """Load grasp/lift and optional transport without authorizing real execution."""
 
     capture = Path(capture_directory)
     plan = Path(plan_directory)
@@ -171,13 +171,27 @@ def load_grasp_lift_replay(
         raise ValueError("grasp/lift plan is missing required phases")
     if safety.get("trajectory_executed") is not False:
         raise ValueError("source plan unexpectedly claims prior execution")
+    transport_planned = safety.get("handover_transport_planned") is True
+    transport_result = result.get("transport")
+    if transport_planned != (transport_result is not None):
+        raise ValueError("transport result and safety declaration disagree")
+    if transport_planned:
+        if safety.get("held_object_collision_checked_during_transport") is not True:
+            raise ValueError("transport did not collision-check the attached object")
+        if not isinstance(transport_result, dict) or not transport_result.get(
+            "planner_reported_success"
+        ):
+            raise ValueError("transport result does not report planner success")
 
     joint_names = tuple(str(name) for name in result.get("trajectory_active_joint_names", ()))
     if not joint_names or len(set(joint_names)) != len(joint_names):
         raise ValueError("trajectory active joint names must be non-empty and unique")
     phase_positions: dict[str, np.ndarray] = {}
     phase_dt: dict[str, np.ndarray] = {}
-    for phase in ("approach", "grasp", "lift"):
+    phases = ("approach", "grasp", "lift") + (
+        ("transport",) if transport_planned else ()
+    )
+    for phase in phases:
         positions = np.load(plan / f"{phase}_trajectory_position.npy").astype(
             np.float64, copy=False
         )
@@ -222,6 +236,13 @@ def load_grasp_lift_replay(
         rtol=0.0,
     ):
         raise ValueError("lift trajectory is discontinuous from grasp")
+    if transport_planned and not np.allclose(
+        phase_positions["transport"][0],
+        phase_positions["lift"][-1],
+        atol=continuity_tolerance,
+        rtol=0.0,
+    ):
+        raise ValueError("transport trajectory is discontinuous from lift")
 
     return GraspLiftReplay(
         joint_names=joint_names,

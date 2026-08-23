@@ -265,11 +265,23 @@ try:
     target_after_lift_position, target_after_lift_orientation = target.get_world_pose()
     target_after_lift_position = np.asarray(target_after_lift_position, dtype=np.float64)
 
-    lift_arm_target = commands["lift"][-1]
+    transport_executed = "transport" in replay.phase_positions
+    target_after_transport_position = None
+    if transport_executed:
+        execute_phase("transport", closed_finger_target)
+        target_after_transport_position, target_after_transport_orientation = (
+            target.get_world_pose()
+        )
+        target_after_transport_position = np.asarray(
+            target_after_transport_position, dtype=np.float64
+        )
+
+    final_phase = "transport" if transport_executed else "lift"
+    final_arm_target = commands[final_phase][-1]
     for _ in range(args.hold_frames):
         panda.apply_action(
             ArticulationAction(
-                joint_positions=np.concatenate((lift_arm_target, closed_finger_target)),
+                joint_positions=np.concatenate((final_arm_target, closed_finger_target)),
                 joint_indices=all_indices,
             )
         )
@@ -279,11 +291,11 @@ try:
     measured_fingers_held = np.asarray(panda.get_joint_positions(), dtype=np.float64)[
         finger_indices
     ]
-    frame_path = save_rgb("05_lift_held")
+    frame_path = save_rgb(f"{len(saved_frames):02d}_{final_phase}_held")
     if frame_path:
         saved_frames.append(frame_path)
 
-    for phase in ("approach", "grasp", "lift"):
+    for phase in commands:
         np.save(output / f"{phase}_commanded_joint_positions.npy", commands[phase])
         np.save(output / f"{phase}_measured_joint_positions.npy", measurements[phase])
         np.save(
@@ -293,10 +305,20 @@ try:
     np.save(output / "target_settled_position_world.npy", target_settled_position)
     np.save(output / "target_before_lift_position_world.npy", target_before_lift_position)
     np.save(output / "target_after_lift_position_world.npy", target_after_lift_position)
+    if target_after_transport_position is not None:
+        np.save(
+            output / "target_after_transport_position_world.npy",
+            target_after_transport_position,
+        )
     np.save(output / "target_held_position_world.npy", target_held_position)
 
     object_lift_m = float(target_after_lift_position[2] - target_before_lift_position[2])
     held_object_lift_m = float(target_held_position[2] - target_before_lift_position[2])
+    transport_displacement_m = (
+        float(np.linalg.norm(target_after_transport_position - target_after_lift_position))
+        if target_after_transport_position is not None
+        else None
+    )
     minimum_clear_lift_m = float(LAYOUT.target_size_m[2])
     phase_max_errors = {
         phase: float(np.max(np.abs(measurements[phase] - commands[phase])))
@@ -330,6 +352,8 @@ try:
             "phase_maximum_tracking_error_rad": phase_max_errors,
             "close_frames": args.close_frames,
             "hold_frames": args.hold_frames,
+            "transport_executed": transport_executed,
+            "final_hold_phase": final_phase,
             "captured_finger_positions_m": captured_fingers.tolist(),
             "open_finger_targets_m": open_fingers.tolist(),
             "measured_fingers_before_close_m": measured_fingers_before_close.tolist(),
@@ -342,9 +366,15 @@ try:
             "settled_position_world_m": target_settled_position.tolist(),
             "before_lift_position_world_m": target_before_lift_position.tolist(),
             "after_lift_position_world_m": target_after_lift_position.tolist(),
+            "after_transport_position_world_m": (
+                target_after_transport_position.tolist()
+                if target_after_transport_position is not None
+                else None
+            ),
             "held_position_world_m": target_held_position.tolist(),
             "lift_during_motion_m": object_lift_m,
             "lift_after_hold_m": held_object_lift_m,
+            "transport_displacement_m": transport_displacement_m,
             "minimum_clear_lift_evidence_m": minimum_clear_lift_m,
             "physical_pick_observed": physical_pick_observed,
         },
@@ -362,6 +392,10 @@ try:
                 and np.isfinite(measured_fingers_held).all()
             ),
             "object_lifted_by_at_least_one_object_height": physical_pick_observed,
+            "object_remained_lifted_after_transport": bool(
+                not transport_executed
+                or held_object_lift_m >= minimum_clear_lift_m
+            ),
         },
         "safety": {
             "simulation_only": True,
@@ -370,6 +404,16 @@ try:
             "physical_gripper_close_commanded": True,
             "physical_contact_monitoring_automated": False,
             "first_lift_held_object_collision_checked_by_curobo": False,
+            "attached_transport_planned_and_collision_checked": bool(
+                transport_executed
+                and replay.plan_report.get("safety", {}).get(
+                    "held_object_collision_checked_during_transport"
+                )
+                is True
+            ),
+            "transport_executed_with_closed_gripper": transport_executed,
+            "human_or_receiver_collision_model_present": False,
+            "handover_release_executed": False,
             "manual_review_required": True,
             "safe_for_real_robot_execution": False,
         },
