@@ -1,11 +1,36 @@
 from pathlib import Path
+import runpy
 import unittest
+
+import numpy as np
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 
 
 class GraspLiftScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift.py"),
+            run_name="curobo_plan_grasp_lift_test",
+        )
+        cls.restore_triangle_faces = staticmethod(namespace["_restore_triangle_faces"])
+
+    def test_flat_curobo_faces_are_restored_without_geometry_changes(self):
+        vertices = np.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
+        )
+        restored = self.restore_triangle_faces(vertices, [0, 1, 2, 0, 2, 3])
+        np.testing.assert_array_equal(restored, [[0, 1, 2], [0, 2, 3]])
+
+    def test_malformed_curobo_faces_fail_instead_of_being_repaired(self):
+        vertices = np.zeros((3, 3), dtype=np.float32)
+        with self.assertRaises(RuntimeError):
+            self.restore_triangle_faces(vertices, [0, 1])
+        with self.assertRaises(RuntimeError):
+            self.restore_triangle_faces(vertices, [0, 1, 3])
+
     def test_planner_uses_reviewed_official_grasp_and_attachment_apis(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
             encoding="utf-8"
@@ -17,6 +42,7 @@ class GraspLiftScriptTests(unittest.TestCase):
         )
         self.assertIn("attachment_manager.attach(", source)
         self.assertIn("Mesh.from_pointcloud(", source)
+        self.assertIn("_restore_triangle_faces(", source)
         self.assertIn("load_singleview_observed_pointcloud(", source)
         self.assertNotIn("file_path=str(mesh_path", source)
         self.assertNotIn("observed_scene_mesh.obj", source)

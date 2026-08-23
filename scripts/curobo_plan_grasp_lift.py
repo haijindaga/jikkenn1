@@ -43,6 +43,31 @@ def _cpu_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
+def _restore_triangle_faces(vertices: Any, faces: Any) -> np.ndarray:
+    """Restore cuRobo's flattened point-cloud faces for trimesh consumption."""
+    vertex_array = np.asarray(vertices)
+    face_array = np.asarray(faces)
+    if vertex_array.ndim != 2 or vertex_array.shape[1] != 3 or len(vertex_array) == 0:
+        raise RuntimeError(
+            f"attachment mesh vertices must be non-empty Nx3, got {vertex_array.shape}"
+        )
+    if not np.issubdtype(face_array.dtype, np.integer):
+        raise RuntimeError(f"attachment mesh faces must be integer, got {face_array.dtype}")
+    if face_array.ndim == 1:
+        if face_array.size == 0 or face_array.size % 3 != 0:
+            raise RuntimeError(
+                "flattened attachment mesh faces must be non-empty and divisible by 3"
+            )
+        face_array = face_array.reshape(-1, 3)
+    elif face_array.ndim != 2 or face_array.shape[1] != 3 or len(face_array) == 0:
+        raise RuntimeError(
+            f"attachment mesh faces must be non-empty Nx3, got {face_array.shape}"
+        )
+    if int(face_array.min()) < 0 or int(face_array.max()) >= len(vertex_array):
+        raise RuntimeError("attachment mesh face index is outside the vertex array")
+    return face_array.astype(np.int64, copy=False)
+
+
 def _trajectory_field(trajectory: Any, name: str, *, required: bool) -> np.ndarray | None:
     value = getattr(trajectory, name, None)
     if value is None:
@@ -457,6 +482,14 @@ def main() -> int:
         pitch=observed_scene.voxel_size_m,
         name="sam3_target_for_attachment",
     )
+    # Mesh.from_pointcloud stores triangle indices as a flat list for cuRobo's
+    # Warp mesh loader. AttachmentManager converts the same object to trimesh,
+    # whose faces contract is Nx3. Restore only that shape; vertices and face
+    # membership remain unchanged.
+    target_triangle_faces = _restore_triangle_faces(
+        target_mesh.vertices, target_mesh.faces
+    )
+    target_mesh.faces = target_triangle_faces.tolist()
     lift_end = JointState.from_position(
         torch.from_numpy(phase_reports["lift"]["end"])
         .to(device_cfg.device)
@@ -533,6 +566,10 @@ def main() -> int:
                 "official trim_joint_state_trajectory using interpolated_last_tstep"
             ),
             "attachment": "AttachmentManager.attach with Mesh.from_pointcloud",
+            "attachment_face_contract": (
+                "cuRobo Mesh.from_pointcloud flat triangle indices restored to the "
+                "Nx3 contract required by trimesh"
+            ),
             "isaac_execution_precedent": "Isaac Sim 5.1 Franka Pick and Place",
         },
         "inputs": {
@@ -558,6 +595,7 @@ def main() -> int:
             "temporarily_disabled_grasp_contact_links": contact_collision_links,
             "target_absent_from_observed_scene": True,
             "attachment_sphere_count": 4,
+            "attachment_mesh_triangle_count": int(len(target_triangle_faces)),
         },
         "result": {
             "planner_reported_success": True,
