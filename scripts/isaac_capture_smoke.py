@@ -13,6 +13,9 @@ import sys
 import traceback
 from pathlib import Path
 
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
+
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
 
@@ -77,8 +80,6 @@ try:
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
 
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root / "src"))
     from panda_handover.capture import RgbdCapture
     from panda_handover.geometry import (
         look_at_quaternion_world,

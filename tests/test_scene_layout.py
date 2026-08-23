@@ -33,6 +33,16 @@ class SceneLayoutTests(unittest.TestCase):
             "add_default_ground_plane(z_position=LAYOUT.ground_z_m)", script
         )
 
+    def test_capture_script_registers_src_before_package_import(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "scripts" / "isaac_capture_smoke.py"
+        ).read_text(encoding="utf-8")
+        path_registration = 'sys.path.insert(0, str(repo_root / "src"))'
+        layout_import = (
+            "from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT"
+        )
+        self.assertLess(script.index(path_registration), script.index(layout_import))
+
 
 if __name__ == "__main__":
     unittest.main()
