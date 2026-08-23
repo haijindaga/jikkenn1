@@ -32,6 +32,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--scene-usd",
+        type=Path,
+        help="Open the authored USD used by capture instead of the legacy block scene",
+    )
+    parser.add_argument("--panda-prim", default="/World/Panda")
+    parser.add_argument("--target-prim", default="/World/Objects/Target")
+    parser.add_argument("--camera-prim", default="/World/camera_0")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--settle-frames", type=int, default=60)
     parser.add_argument("--hold-frames", type=int, default=300)
@@ -50,6 +58,36 @@ def parse_args() -> argparse.Namespace:
 
 args = parse_args()
 replay = load_pregrasp_replay(args.capture, args.plan)
+scene_usd = None
+if args.scene_usd is not None:
+    scene_usd = args.scene_usd.expanduser().resolve()
+    if not scene_usd.is_file():
+        raise FileNotFoundError(f"authored scene USD does not exist: {scene_usd}")
+    if scene_usd.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+        raise ValueError("--scene-usd must end in .usd, .usda, or .usdc")
+
+    scene_layout_path = args.capture / "scene_layout.json"
+    if not scene_layout_path.is_file():
+        raise FileNotFoundError(
+            "authored-scene replay requires the capture scene report: "
+            f"{scene_layout_path}"
+        )
+    scene_layout_report = json.loads(scene_layout_path.read_text(encoding="utf-8"))
+    scene_source = scene_layout_report.get("scene_source", {})
+    if scene_source.get("kind") != "authored_usd_scene":
+        raise ValueError(
+            "--scene-usd was provided, but the capture was not recorded from an "
+            "authored USD scene"
+        )
+    recorded_scene_value = scene_source.get("scene_usd")
+    if not recorded_scene_value:
+        raise ValueError("capture scene report has no authored scene_usd path")
+    recorded_scene = Path(recorded_scene_value).expanduser().resolve()
+    if recorded_scene != scene_usd:
+        raise ValueError(
+            "replay scene does not match the scene recorded by capture: "
+            f"{scene_usd} != {recorded_scene}"
+        )
 
 # Isaac requires SimulationApp construction before importing other Isaac modules.
 from isaacsim import SimulationApp
@@ -62,7 +100,9 @@ try:
 
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import FixedCuboid
+    from isaacsim.core.prims import SingleArticulation
     from isaacsim.core.utils.types import ArticulationAction
+    from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
 
@@ -70,61 +110,94 @@ try:
 
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
+
+    if scene_usd is not None:
+        stage_opened, stage = stage_utils.open_stage(str(scene_usd))
+        if not stage_opened or stage is None:
+            raise RuntimeError(f"Isaac Sim could not open authored scene: {scene_usd}")
+        required_prim_paths = (
+            args.panda_prim,
+            args.target_prim,
+            args.camera_prim,
+        )
+        missing_prims = [
+            prim_path
+            for prim_path in required_prim_paths
+            if not stage.GetPrimAtPath(prim_path).IsValid()
+        ]
+        if missing_prims:
+            raise RuntimeError(
+                "authored scene is missing required prims: " + ", ".join(missing_prims)
+            )
+
     world = World(
         stage_units_in_meters=1.0,
         physics_dt=PHYSICS_DT_S,
         rendering_dt=1.0 / 30.0,
     )
-    world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
-    panda = world.scene.add(
-        Franka(
-            prim_path="/World/Panda",
-            name="panda",
-            position=np.asarray(LAYOUT.robot_base_position_m),
+    if scene_usd is None:
+        world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
+        panda = world.scene.add(
+            Franka(
+                prim_path=args.panda_prim,
+                name="panda",
+                position=np.asarray(LAYOUT.robot_base_position_m),
+            )
         )
-    )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Table",
-            name="table",
-            position=np.asarray(LAYOUT.table_center_m),
-            scale=np.asarray(LAYOUT.table_size_m),
-            color=np.array([0.45, 0.32, 0.20]),
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Table",
+                name="table",
+                position=np.asarray(LAYOUT.table_center_m),
+                scale=np.asarray(LAYOUT.table_size_m),
+                color=np.array([0.45, 0.32, 0.20]),
+            )
         )
-    )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/TestObject",
-            name="test_object",
-            position=np.asarray(LAYOUT.target_center_m),
-            scale=np.asarray(LAYOUT.target_size_m),
-            color=np.array([0.1, 0.5, 0.9]),
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/TestObject",
+                name="test_object",
+                position=np.asarray(LAYOUT.target_center_m),
+                scale=np.asarray(LAYOUT.target_size_m),
+                color=np.array([0.1, 0.5, 0.9]),
+            )
         )
-    )
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Obstacle",
-            name="obstacle",
-            position=np.asarray(LAYOUT.obstacle_center_m),
-            scale=np.asarray(LAYOUT.obstacle_size_m),
-            color=np.array([0.9, 0.2, 0.1]),
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Obstacle",
+                name="obstacle",
+                position=np.asarray(LAYOUT.obstacle_center_m),
+                scale=np.asarray(LAYOUT.obstacle_size_m),
+                color=np.array([0.9, 0.2, 0.1]),
+            )
         )
-    )
-
-    camera_position = np.asarray(LAYOUT.camera_position_m, dtype=np.float64)
-    camera_target = np.asarray(LAYOUT.camera_target_m, dtype=np.float64)
-    camera_orientation = look_at_quaternion_world(camera_position, camera_target)
-    camera = Camera(
-        prim_path="/World/replay_camera",
-        position=camera_position,
-        orientation=camera_orientation,
-        frequency=30,
-        resolution=(640, 480),
-    )
+        camera_position = np.asarray(LAYOUT.camera_position_m, dtype=np.float64)
+        camera_target = np.asarray(LAYOUT.camera_target_m, dtype=np.float64)
+        camera_orientation = look_at_quaternion_world(camera_position, camera_target)
+        camera = Camera(
+            prim_path="/World/replay_camera",
+            position=camera_position,
+            orientation=camera_orientation,
+            frequency=30,
+            resolution=(640, 480),
+        )
+    else:
+        panda = world.scene.add(
+            SingleArticulation(
+                prim_path=args.panda_prim,
+                name="panda",
+            )
+        )
+        camera = Camera(
+            prim_path=args.camera_prim,
+            frequency=30,
+            resolution=(640, 480),
+        )
 
     world.reset()
     camera.initialize()
-    camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+    if scene_usd is None:
+        camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
     def save_camera_rgb(path: Path) -> bool:
         frame = camera.get_current_frame()
@@ -230,6 +303,13 @@ try:
         "inputs": {
             "capture": str(args.capture),
             "plan": str(args.plan),
+            "scene_usd": str(scene_usd) if scene_usd is not None else None,
+            "scene_kind": (
+                "authored_usd_scene" if scene_usd is not None else "legacy_block_scene"
+            ),
+            "panda_prim": args.panda_prim,
+            "target_prim": args.target_prim if scene_usd is not None else "/World/TestObject",
+            "camera_prim": args.camera_prim if scene_usd is not None else "/World/replay_camera",
             "source_waypoints": int(replay.positions.shape[0]),
         },
         "replay": {
@@ -249,6 +329,7 @@ try:
             "saved_review_frames": saved_frames,
         },
         "automatic_checks": {
+            "replay_scene_matches_capture": True,
             "capture_start_state_reproduced": bool(np.all(start_error <= 2e-3)),
             "all_commands_finite": bool(np.isfinite(commanded).all()),
             "all_measurements_finite": bool(np.isfinite(measured).all()),

@@ -236,6 +236,19 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("panda.apply_action(", script)
         self.assertNotIn("set_joint_positions(", script)
 
+    def test_isaac_pregrasp_replay_supports_matching_authored_scene(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_replay_pregrasp.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--scene-usd"', script)
+        self.assertIn("stage_utils.open_stage(str(scene_usd))", script)
+        self.assertIn("SingleArticulation(", script)
+        self.assertIn("replay scene does not match", script)
+        self.assertIn('"replay_scene_matches_capture": True', script)
+        self.assertIn("if scene_usd is None:", script)
+
     def test_grasp_lift_replay_uses_dynamic_target_and_physical_fingers(self):
         script = (
             Path(__file__).resolve().parents[1]
