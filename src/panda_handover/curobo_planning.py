@@ -1,0 +1,259 @@
+"""Fail-closed preparation helpers for cuRobo pre-grasp planning.
+
+The GPU planner stays in NVIDIA's pinned cuRobo checkout.  This module only
+validates persisted experiment artifacts and performs explicit frame/pose
+conversions that can be unit tested without CUDA.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+
+CUROBO_COMMIT = "057a96ffb1088531535f9915154f9d0dabd62428"
+CUROBO_VOXEL_PATCH_SHA256 = (
+    "bab10d99e555fe722f2c3d893425ea9126978238ee43b9f6c0e250875c10e004"
+)
+
+
+@dataclass(frozen=True)
+class ConservativeEsdf:
+    """Validated dense ESDF and its serialized grid contract."""
+
+    features_m: np.ndarray
+    known_free: np.ndarray
+    shape_xyz: tuple[int, int, int]
+    voxel_size_m: float
+    extent_m: tuple[float, float, float]
+    center_robot_base_m: tuple[float, float, float]
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PregraspGoalset:
+    """Score-ordered Panda hand goals in the robot-base frame."""
+
+    grasp_robot_base: np.ndarray
+    pregrasp_robot_base: np.ndarray
+    scores: np.ndarray
+    candidate_indices: np.ndarray
+
+
+def _require_rigid_transform(transform: np.ndarray, *, label: str) -> np.ndarray:
+    value = np.asarray(transform, dtype=np.float64)
+    if value.shape != (4, 4):
+        raise ValueError(f"{label} must be 4x4, got {value.shape}")
+    if not np.all(np.isfinite(value)):
+        raise ValueError(f"{label} contains non-finite values")
+    if not np.allclose(value[3], [0.0, 0.0, 0.0, 1.0], atol=1e-6):
+        raise ValueError(f"{label} has an invalid homogeneous row")
+    rotation = value[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=2e-3):
+        raise ValueError(f"{label} rotation is not orthonormal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=2e-3):
+        raise ValueError(f"{label} rotation determinant is not +1")
+    return value
+
+
+def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
+    """Load Backend A only when every conservative-map invariant is present."""
+    root = Path(directory)
+    report_path = root / "esdf_check.json"
+    if not report_path.is_file():
+        raise FileNotFoundError(f"missing conservative ESDF report: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "success":
+        raise ValueError("conservative ESDF report did not finish successfully")
+    if report.get("backend") != "A_nvblox_torch_dense_edt":
+        raise ValueError("pre-grasp A planner requires Backend A output")
+    checks = report.get("automatic_checks")
+    if not isinstance(checks, dict) or not checks or not all(checks.values()):
+        raise ValueError("conservative ESDF automatic checks are incomplete or failed")
+    if report.get("safe_to_plan") is not False:
+        raise ValueError("expected the reviewed pre-target-clear Backend A gate")
+
+    parameters = report.get("parameters", {})
+    unknown = report.get("unknown_environment_contract", {})
+    required_contract = {
+        "only_sensor_observed_space_can_be_free": True,
+        "unobserved_space_is_blocked": True,
+        "distance_to_unknown_boundary_recomputed": True,
+        "target_is_currently_blocked": True,
+    }
+    if parameters.get("target_clear_applied") is not False:
+        raise ValueError("unexpected target-clear mutation in Backend A map")
+    if any(unknown.get(key) is not expected for key, expected in required_contract.items()):
+        raise ValueError("Backend A unknown-space safety contract is missing")
+
+    grid = report.get("grid", {})
+    if grid.get("index_order") != "x_slowest_z_fastest":
+        raise ValueError("unsupported ESDF index order")
+    if grid.get("sdf_sign") != "positive_free_negative_blocked":
+        raise ValueError("unsupported ESDF sign convention")
+    shape = tuple(int(value) for value in grid.get("shape_xyz", ()))
+    if len(shape) != 3 or any(value <= 0 for value in shape):
+        raise ValueError("invalid ESDF shape metadata")
+    voxel_size = float(grid.get("voxel_size_m", float("nan")))
+    if not np.isfinite(voxel_size) or voxel_size <= 0.0:
+        raise ValueError("invalid ESDF voxel size")
+    extent = np.asarray(grid.get("extent_m"), dtype=np.float64)
+    center = np.asarray(grid.get("center_robot_base_m"), dtype=np.float64)
+    minimum = np.asarray(grid.get("min_corner_robot_base_m"), dtype=np.float64)
+    if extent.shape != (3,) or center.shape != (3,) or minimum.shape != (3,):
+        raise ValueError("invalid ESDF grid vectors")
+    expected_extent = np.asarray(shape, dtype=np.float64) * voxel_size
+    if not np.allclose(extent, expected_extent, atol=1e-7, rtol=0.0):
+        raise ValueError("ESDF extent does not equal shape times voxel size")
+    if not np.allclose(minimum, center - 0.5 * extent, atol=1e-7, rtol=0.0):
+        raise ValueError("ESDF minimum corner is inconsistent with center and extent")
+
+    features = np.load(root / "esdf_features.npy", allow_pickle=False)
+    known_free = np.load(root / "known_free_mask.npy", allow_pickle=False).astype(
+        bool, copy=False
+    )
+    if features.shape != shape or known_free.shape != shape:
+        raise ValueError("ESDF arrays do not match reported shape")
+    if not np.all(np.isfinite(features)):
+        raise ValueError("ESDF contains non-finite values")
+    if not np.all(features[known_free] > 0.0):
+        raise ValueError("known-free voxels must have positive distance")
+    if not np.all(features[~known_free] <= 0.0):
+        raise ValueError("blocked voxels must have non-positive distance")
+
+    return ConservativeEsdf(
+        features_m=features.astype(np.float32, copy=False),
+        known_free=known_free,
+        shape_xyz=shape,
+        voxel_size_m=voxel_size,
+        extent_m=tuple(float(value) for value in extent),
+        center_robot_base_m=tuple(float(value) for value in center),
+        report=report,
+    )
+
+
+def validate_voxel_fix_report(path: str | Path) -> dict[str, Any]:
+    """Require the GPU regression for the exact reviewed cuRobo source."""
+    report_path = Path(path)
+    if not report_path.is_file():
+        raise FileNotFoundError(f"missing cuRobo voxel-fix regression: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    reference = report.get("reference", {})
+    checks = report.get("automatic_checks")
+    if report.get("status") != "success":
+        raise ValueError("cuRobo voxel-fix regression did not succeed")
+    if reference.get("curobo_commit") != CUROBO_COMMIT:
+        raise ValueError("cuRobo voxel-fix regression used a different commit")
+    if reference.get("patched_source_sha256") != CUROBO_VOXEL_PATCH_SHA256:
+        raise ValueError("cuRobo voxel-fix regression used an unreviewed source file")
+    if not isinstance(checks, dict) or not checks or not all(checks.values()):
+        raise ValueError("cuRobo voxel-fix regression checks are incomplete or failed")
+    if report.get("safe_to_load_real_esdf") is not True:
+        raise ValueError("cuRobo voxel-fix regression did not open its safety gate")
+    return report
+
+
+def prepare_pregrasp_goalset(
+    panda_hand_world: np.ndarray,
+    scores: np.ndarray,
+    T_world_robot_base: np.ndarray,
+    *,
+    approach_offset_m: float = 0.15,
+    max_candidates: int = 10,
+    candidate_indices: np.ndarray | None = None,
+) -> PregraspGoalset:
+    """Transform and score-order grasps, then offset along negative tool Z."""
+    poses = np.asarray(panda_hand_world, dtype=np.float64)
+    values = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if poses.ndim != 3 or poses.shape[1:] != (4, 4):
+        raise ValueError(f"panda_hand_world must have shape (N,4,4), got {poses.shape}")
+    if poses.shape[0] == 0 or values.shape != (poses.shape[0],):
+        raise ValueError("candidate poses and scores must have one non-empty shared length")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("candidate scores contain non-finite values")
+    if not np.isfinite(approach_offset_m) or approach_offset_m <= 0.0:
+        raise ValueError("approach_offset_m must be positive and finite")
+    if max_candidates <= 0:
+        raise ValueError("max_candidates must be positive")
+    for index, pose in enumerate(poses):
+        _require_rigid_transform(pose, label=f"panda_hand_world[{index}]")
+    world_from_base = _require_rigid_transform(
+        T_world_robot_base, label="T_world_robot_base"
+    )
+
+    if candidate_indices is None:
+        source_indices = np.arange(poses.shape[0], dtype=np.int64)
+    else:
+        source_indices = np.asarray(candidate_indices, dtype=np.int64).reshape(-1)
+        if source_indices.shape != values.shape:
+            raise ValueError("candidate_indices length does not match candidates")
+        if np.any(source_indices < 0) or len(np.unique(source_indices)) != len(source_indices):
+            raise ValueError("candidate_indices must be unique non-negative integers")
+
+    order = np.argsort(-values, kind="stable")[: min(max_candidates, len(values))]
+    base_from_world = np.linalg.inv(world_from_base)
+    grasp_base = np.einsum("ij,njk->nik", base_from_world, poses[order])
+    pregrasp_base = grasp_base.copy()
+    offset_tool = np.array([0.0, 0.0, -approach_offset_m], dtype=np.float64)
+    pregrasp_base[:, :3, 3] += np.einsum(
+        "nij,j->ni", grasp_base[:, :3, :3], offset_tool
+    )
+    return PregraspGoalset(
+        grasp_robot_base=grasp_base.astype(np.float32),
+        pregrasp_robot_base=pregrasp_base.astype(np.float32),
+        scores=values[order].astype(np.float32),
+        candidate_indices=source_indices[order].astype(np.int32),
+    )
+
+
+def rotation_matrix_to_quaternion_wxyz(rotations: np.ndarray) -> np.ndarray:
+    """Convert one or more proper rotation matrices to normalized wxyz quaternions."""
+    values = np.asarray(rotations, dtype=np.float64)
+    if values.shape[-2:] != (3, 3):
+        raise ValueError("rotations must end in shape (3,3)")
+    flat = values.reshape(-1, 3, 3)
+    output = np.empty((flat.shape[0], 4), dtype=np.float64)
+    for index, matrix in enumerate(flat):
+        transform = np.eye(4)
+        transform[:3, :3] = matrix
+        _require_rigid_transform(transform, label=f"rotation[{index}]")
+        trace = float(np.trace(matrix))
+        if trace > 0.0:
+            scale = np.sqrt(trace + 1.0) * 2.0
+            quaternion = np.array(
+                [0.25 * scale, (matrix[2, 1] - matrix[1, 2]) / scale,
+                 (matrix[0, 2] - matrix[2, 0]) / scale,
+                 (matrix[1, 0] - matrix[0, 1]) / scale]
+            )
+        else:
+            axis = int(np.argmax(np.diag(matrix)))
+            if axis == 0:
+                scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+                quaternion = np.array(
+                    [(matrix[2, 1] - matrix[1, 2]) / scale, 0.25 * scale,
+                     (matrix[0, 1] + matrix[1, 0]) / scale,
+                     (matrix[0, 2] + matrix[2, 0]) / scale]
+                )
+            elif axis == 1:
+                scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+                quaternion = np.array(
+                    [(matrix[0, 2] - matrix[2, 0]) / scale,
+                     (matrix[0, 1] + matrix[1, 0]) / scale, 0.25 * scale,
+                     (matrix[1, 2] + matrix[2, 1]) / scale]
+                )
+            else:
+                scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+                quaternion = np.array(
+                    [(matrix[1, 0] - matrix[0, 1]) / scale,
+                     (matrix[0, 2] + matrix[2, 0]) / scale,
+                     (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale]
+                )
+        quaternion /= np.linalg.norm(quaternion)
+        if quaternion[0] < 0.0:
+            quaternion *= -1.0
+        output[index] = quaternion
+    return output.reshape(*values.shape[:-2], 4).astype(np.float32)

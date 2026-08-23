@@ -1,0 +1,20 @@
+diff --git a/curobo/_src/geom/data/data_voxel.py b/curobo/_src/geom/data/data_voxel.py
+index b84ab1f..d4a81ce 100644
+--- a/curobo/_src/geom/data/data_voxel.py
++++ b/curobo/_src/geom/data/data_voxel.py
+@@ -1148,4 +1148,4 @@ def compute_local_sdf(
+-    dims_x = wp.int32(obs_set.params[flat_idx, 0])
+-    dims_y = wp.int32(obs_set.params[flat_idx, 1])
+-    dims_z = wp.int32(obs_set.params[flat_idx, 2])
++    dims_x = wp.int32(wp.round(obs_set.params[flat_idx, 0]))
++    dims_y = wp.int32(wp.round(obs_set.params[flat_idx, 1]))
++    dims_z = wp.int32(wp.round(obs_set.params[flat_idx, 2]))
+     voxel_size = obs_set.params[flat_idx, 3]
+@@ -1190,4 +1190,4 @@ def compute_local_sdf_with_grad(
+-    dims_x = wp.int32(obs_set.params[flat_idx, 0])
+-    dims_y = wp.int32(obs_set.params[flat_idx, 1])
+-    dims_z = wp.int32(obs_set.params[flat_idx, 2])
++    dims_x = wp.int32(wp.round(obs_set.params[flat_idx, 0]))
++    dims_y = wp.int32(wp.round(obs_set.params[flat_idx, 1]))
++    dims_z = wp.int32(wp.round(obs_set.params[flat_idx, 2]))
+     voxel_size = obs_set.params[flat_idx, 3]
