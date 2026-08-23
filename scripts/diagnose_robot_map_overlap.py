@@ -59,13 +59,26 @@ def main() -> int:
     threshold = float(
         prepared_report["parameters"]["robot_distance_threshold_m"]
     )
+    # cuRobo reserves padded sphere slots by assigning a negative radius. Its
+    # official collision kernels immediately skip those entries. Mirror that
+    # contract here instead of interpreting disabled slots as geometry.
+    active_sphere_mask = spheres[:, 3] >= 0.0
+    disabled_sphere_has_cost = bool(
+        np.any(costs[~active_sphere_mask] > 0.0)
+    )
+    if not active_sphere_mask.any():
+        raise ValueError("start state contains no active cuRobo collision spheres")
+    active_sphere_indices = np.flatnonzero(active_sphere_mask)
+    active_spheres = spheres[active_sphere_mask]
+    active_costs = costs[active_sphere_mask]
+
     points, pixels_vu = backproject_depth_to_frame(
         mapping_depth, intrinsics, transform
     )
     distances, clearances, nearest_indices = nearest_point_to_spheres(
-        points, spheres, point_batch_size=args.point_batch_size
+        points, active_spheres, point_batch_size=args.point_batch_size
     )
-    hit = costs > 0.0
+    hit = active_costs > 0.0
     hit_clearance = clearances[hit]
     tolerance = 1e-4
     inside_sphere = hit_clearance < -tolerance
@@ -90,19 +103,20 @@ def main() -> int:
     else:
         diagnosis = "filtered_depth_does_not_explain_esdf_start_collision"
 
-    colliding_indices = np.flatnonzero(hit)
+    colliding_active_indices = np.flatnonzero(hit)
     hit_rows = []
-    for local_index, sphere_index in enumerate(colliding_indices):
-        point_index = int(nearest_indices[sphere_index])
+    for local_index, active_index in enumerate(colliding_active_indices):
+        sphere_index = int(active_sphere_indices[active_index])
+        point_index = int(nearest_indices[active_index])
         hit_rows.append(
             {
-                "sphere_index": int(sphere_index),
+                "sphere_index": sphere_index,
                 "collision_cost_m": float(costs[sphere_index]),
                 "sphere_xyzr_robot_base_m": spheres[sphere_index].tolist(),
                 "nearest_mapping_point_robot_base_m": nearest_points[
-                    sphere_index
+                    active_index
                 ].tolist(),
-                "nearest_pixel_vu": nearest_pixels[sphere_index].tolist(),
+                "nearest_pixel_vu": nearest_pixels[active_index].tolist(),
                 "nearest_point_index": point_index,
                 "centre_distance_m": float(distances[sphere_index]),
                 "surface_clearance_m": float(hit_clearance[local_index]),
@@ -120,6 +134,7 @@ def main() -> int:
         "nearest_mapping_pixels_are_not_robot_masked": bool(
             np.all(~nearest_mask_values)
         ),
+        "disabled_spheres_have_zero_collision_cost": not disabled_sphere_has_cost,
         "pointcloud_is_finite": bool(np.isfinite(points).all()),
         "at_least_one_start_sphere_is_reported_colliding": bool(hit.any()),
     }
@@ -149,6 +164,8 @@ def main() -> int:
                 depth_nonzero_under_robot_mask
             ),
             "robot_spheres": int(len(spheres)),
+            "active_robot_spheres": int(active_sphere_mask.sum()),
+            "disabled_robot_spheres": int((~active_sphere_mask).sum()),
             "colliding_robot_spheres": int(hit.sum()),
             "colliding_spheres_with_mapping_point_inside_sphere": int(
                 inside_sphere.sum()

@@ -33,6 +33,13 @@ class MapDiagnosticsTests(unittest.TestCase):
         np.testing.assert_allclose(clearance, [0.75, -0.3], atol=1e-6)
         np.testing.assert_array_equal(indices, [0, 1])
 
+    def test_negative_radius_is_rejected_by_geometry_helper(self):
+        with self.assertRaisesRegex(ValueError, "radii must be non-negative"):
+            nearest_point_to_spheres(
+                np.array([[0.0, 0.0, 0.0]]),
+                np.array([[0.0, 0.0, 0.0, -1.0]]),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
