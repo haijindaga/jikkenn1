@@ -286,6 +286,23 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("replay scene does not match", script)
         self.assertNotIn("hammer", script.lower())
 
+    def test_grasp_lift_replay_records_read_only_retention_diagnostics(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_replay_grasp_lift.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("target.get_masses()", script)
+        self.assertIn('UsdPhysics.DriveAPI.Get(joint_prim, "linear")', script)
+        self.assertIn("ComputeBoundMaterial(", script)
+        self.assertIn('Tf.Token("physics")', script)
+        self.assertIn('record_physics_sample("close")', script)
+        self.assertIn('record_physics_sample("hold")', script)
+        self.assertIn('output / "retention_finger_gap_m.npy"', script)
+        self.assertIn('"peak_object_lift_m": peak_object_lift_m', script)
+        self.assertNotIn("GetMaxForceAttr().Set", script)
+        self.assertNotIn("GetStaticFrictionAttr().Set", script)
+
 
 if __name__ == "__main__":
     unittest.main()

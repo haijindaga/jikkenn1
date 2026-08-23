@@ -123,7 +123,7 @@ try:
     from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from pxr import PhysxSchema, Usd, UsdPhysics
+    from pxr import PhysxSchema, Tf, Usd, UsdPhysics, UsdShade
 
     from panda_handover.geometry import look_at_quaternion_world
 
@@ -266,6 +266,109 @@ try:
     if scene_usd is None:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
+    stage = stage_utils.get_current_stage()
+
+    def usd_attribute_value(attribute):
+        if not attribute:
+            return None
+        value = attribute.Get()
+        if value is None:
+            return None
+        if isinstance(value, (bool, int, str)):
+            return value
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return scalar if np.isfinite(scalar) else str(scalar)
+
+    def collision_materials_below(root_prim_path: str) -> list[dict]:
+        root_prim = stage.GetPrimAtPath(root_prim_path)
+        if not root_prim.IsValid():
+            return []
+        records = []
+        for prim in Usd.PrimRange(root_prim):
+            if not (
+                prim.HasAPI(UsdPhysics.CollisionAPI)
+                or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
+            ):
+                continue
+            material, binding_relationship = (
+                UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
+                    Tf.Token("physics")
+                )
+            )
+            material_prim = material.GetPrim() if material else None
+            material_api = (
+                UsdPhysics.MaterialAPI(material_prim)
+                if material_prim
+                and material_prim.HasAPI(UsdPhysics.MaterialAPI)
+                else None
+            )
+            records.append(
+                {
+                    "collision_prim": str(prim.GetPath()),
+                    "physics_material": (
+                        str(material_prim.GetPath()) if material_prim else None
+                    ),
+                    "binding_relationship": (
+                        str(binding_relationship.GetPath())
+                        if binding_relationship
+                        else None
+                    ),
+                    "static_friction": (
+                        usd_attribute_value(material_api.GetStaticFrictionAttr())
+                        if material_api
+                        else None
+                    ),
+                    "dynamic_friction": (
+                        usd_attribute_value(material_api.GetDynamicFrictionAttr())
+                        if material_api
+                        else None
+                    ),
+                    "restitution": (
+                        usd_attribute_value(material_api.GetRestitutionAttr())
+                        if material_api
+                        else None
+                    ),
+                }
+            )
+        return records
+
+    def finger_drive_configuration(joint_name: str) -> dict:
+        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        matching_prims = [
+            prim
+            for prim in Usd.PrimRange(panda_root)
+            if prim.GetName() == joint_name
+        ]
+        if len(matching_prims) != 1:
+            return {
+                "joint_name": joint_name,
+                "found": False,
+                "matching_prim_paths": [str(prim.GetPath()) for prim in matching_prims],
+            }
+        joint_prim = matching_prims[0]
+        drive = UsdPhysics.DriveAPI.Get(joint_prim, "linear")
+        if not drive:
+            return {
+                "joint_name": joint_name,
+                "joint_prim": str(joint_prim.GetPath()),
+                "found": False,
+                "reason": "linear DriveAPI is absent",
+            }
+        return {
+            "joint_name": joint_name,
+            "joint_prim": str(joint_prim.GetPath()),
+            "found": True,
+            "drive_type": usd_attribute_value(drive.GetTypeAttr()),
+            "max_force": usd_attribute_value(drive.GetMaxForceAttr()),
+            "stiffness": usd_attribute_value(drive.GetStiffnessAttr()),
+            "damping": usd_attribute_value(drive.GetDampingAttr()),
+            "target_position": usd_attribute_value(drive.GetTargetPositionAttr()),
+            "target_velocity": usd_attribute_value(drive.GetTargetVelocityAttr()),
+        }
+
     def get_target_world_pose() -> tuple[np.ndarray, np.ndarray]:
         if scene_usd is None:
             position, orientation = target.get_world_pose()
@@ -352,9 +455,74 @@ try:
             f"maximum error={float(start_error.max()):.6g}"
         )
 
+    if scene_usd is None:
+        target_mass_kg = float(target.get_mass())
+        target_density_kg_m3 = None
+        target_inertia = None
+    else:
+        target_masses = np.asarray(target.get_masses(), dtype=np.float64).reshape(-1)
+        target_densities = np.asarray(
+            target.get_densities(), dtype=np.float64
+        ).reshape(-1)
+        target_inertias = np.asarray(target.get_inertias(), dtype=np.float64)
+        if target_masses.shape != (1,) or target_densities.shape != (1,):
+            raise RuntimeError(
+                "authored target returned unexpected mass or density shapes: "
+                f"{target_masses.shape}, {target_densities.shape}"
+            )
+        target_mass_kg = float(target_masses[0])
+        target_density_kg_m3 = float(target_densities[0])
+        target_inertia = target_inertias.reshape(1, -1)[0].tolist()
+    if not np.isfinite(target_mass_kg) or target_mass_kg <= 0.0:
+        raise RuntimeError(f"target effective mass must be positive: {target_mass_kg}")
+
+    finger_drive_report = [
+        finger_drive_configuration(joint_name) for joint_name in finger_names
+    ]
+    target_collision_materials = collision_materials_below(target_prim_path)
+    finger_collision_materials = []
+    for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
+        finger_link_prims = [
+            prim
+            for prim in Usd.PrimRange(stage.GetPrimAtPath(args.panda_prim))
+            if prim.GetName() == finger_link_name
+        ]
+        for finger_link_prim in finger_link_prims:
+            for material_record in collision_materials_below(
+                str(finger_link_prim.GetPath())
+            ):
+                material_record["finger_link"] = finger_link_name
+                finger_collision_materials.append(material_record)
+
     measurements: dict[str, np.ndarray] = {}
     commands: dict[str, np.ndarray] = {}
     durations: dict[str, float] = {}
+    diagnostic_phases: list[str] = []
+    diagnostic_target_positions: list[np.ndarray] = []
+    diagnostic_target_orientations: list[np.ndarray] = []
+    diagnostic_finger_positions: list[np.ndarray] = []
+
+    def record_physics_sample(phase: str) -> None:
+        target_position, target_orientation = get_target_world_pose()
+        finger_position = np.asarray(
+            panda.get_joint_positions(), dtype=np.float64
+        )[finger_indices]
+        if not (
+            np.isfinite(target_position).all()
+            and np.isfinite(target_orientation).all()
+            and np.isfinite(finger_position).all()
+        ):
+            raise RuntimeError(f"non-finite retention diagnostic during {phase}")
+        diagnostic_phases.append(phase)
+        diagnostic_target_positions.append(
+            np.asarray(target_position, dtype=np.float64).copy()
+        )
+        diagnostic_target_orientations.append(
+            np.asarray(target_orientation, dtype=np.float64).copy()
+        )
+        diagnostic_finger_positions.append(finger_position.copy())
+
+    record_physics_sample("settled")
 
     def execute_phase(phase: str, finger_target: np.ndarray) -> None:
         phase_time, phase_commands = sample_positions_at_physics_rate(
@@ -372,6 +540,7 @@ try:
                 )
             )
             world.step(render=True)
+            record_physics_sample(phase)
             phase_measured[index] = np.asarray(
                 panda.get_joint_positions(), dtype=np.float64
             )[arm_indices]
@@ -403,6 +572,7 @@ try:
             )
         )
         world.step(render=True)
+        record_physics_sample("close")
     measured_fingers_after_close = np.asarray(
         panda.get_joint_positions(), dtype=np.float64
     )[finger_indices]
@@ -412,6 +582,7 @@ try:
 
     target_before_lift_position, target_before_lift_orientation = get_target_world_pose()
     target_before_lift_position = np.asarray(target_before_lift_position, dtype=np.float64)
+    lift_diagnostic_start_index = len(diagnostic_phases)
     execute_phase("lift", closed_finger_target)
     target_after_lift_position, target_after_lift_orientation = get_target_world_pose()
     target_after_lift_position = np.asarray(target_after_lift_position, dtype=np.float64)
@@ -437,6 +608,7 @@ try:
             )
         )
         world.step(render=True)
+        record_physics_sample("hold")
     target_held_position, target_held_orientation = get_target_world_pose()
     target_held_position = np.asarray(target_held_position, dtype=np.float64)
     measured_fingers_held = np.asarray(panda.get_joint_positions(), dtype=np.float64)[
@@ -463,6 +635,28 @@ try:
         )
     np.save(output / "target_held_position_world.npy", target_held_position)
 
+    diagnostic_time_s = np.arange(len(diagnostic_phases), dtype=np.float64) * PHYSICS_DT_S
+    diagnostic_phase_array = np.asarray(diagnostic_phases, dtype="U16")
+    diagnostic_target_position_array = np.stack(diagnostic_target_positions)
+    diagnostic_target_orientation_array = np.stack(diagnostic_target_orientations)
+    diagnostic_finger_position_array = np.stack(diagnostic_finger_positions)
+    diagnostic_finger_gap_array = np.sum(diagnostic_finger_position_array, axis=1)
+    np.save(output / "retention_time_s.npy", diagnostic_time_s)
+    np.save(output / "retention_phase.npy", diagnostic_phase_array)
+    np.save(
+        output / "retention_target_position_world_m.npy",
+        diagnostic_target_position_array,
+    )
+    np.save(
+        output / "retention_target_orientation_world_wxyz.npy",
+        diagnostic_target_orientation_array,
+    )
+    np.save(
+        output / "retention_finger_positions_m.npy",
+        diagnostic_finger_position_array,
+    )
+    np.save(output / "retention_finger_gap_m.npy", diagnostic_finger_gap_array)
+
     object_lift_m = float(target_after_lift_position[2] - target_before_lift_position[2])
     held_object_lift_m = float(target_held_position[2] - target_before_lift_position[2])
     transport_displacement_m = (
@@ -471,6 +665,17 @@ try:
         else None
     )
     minimum_clear_lift_m = float(target_settled_extent[2])
+    post_close_target_positions = diagnostic_target_position_array[
+        lift_diagnostic_start_index:
+    ]
+    post_close_finger_gaps = diagnostic_finger_gap_array[lift_diagnostic_start_index:]
+    post_close_lift_m = post_close_target_positions[:, 2] - target_before_lift_position[2]
+    peak_lift_local_index = int(np.argmax(post_close_lift_m))
+    peak_lift_index = lift_diagnostic_start_index + peak_lift_local_index
+    peak_object_lift_m = float(post_close_lift_m[peak_lift_local_index])
+    lift_lost_from_peak_to_final_m = float(
+        peak_object_lift_m - post_close_lift_m[-1]
+    )
     phase_max_errors = {
         phase: float(np.max(np.abs(measurements[phase] - commands[phase])))
         for phase in commands
@@ -496,6 +701,9 @@ try:
             ),
             "finger_open": "cuRobo franka.yml locked finger joints at 0.04 metres",
             "source_plan": str(args.plan / "grasp_lift_plan_check.json"),
+            "physics_diagnostics": (
+                "Isaac Sim RigidPrim runtime mass and OpenUSD DriveAPI/MaterialAPI"
+            ),
         },
         "inputs": {
             "capture": str(args.capture),
@@ -549,6 +757,43 @@ try:
             "minimum_clear_lift_evidence_m": minimum_clear_lift_m,
             "physical_pick_observed": physical_pick_observed,
         },
+        "physical_parameters": {
+            "target_effective_mass_kg": target_mass_kg,
+            "target_effective_density_kg_m3": target_density_kg_m3,
+            "target_inertia_flat": target_inertia,
+            "finger_joint_drives": finger_drive_report,
+            "target_collision_materials": target_collision_materials,
+            "finger_collision_materials": finger_collision_materials,
+            "null_material_coefficients_mean_no_explicit_bound_physics_material": True,
+        },
+        "retention_diagnostics": {
+            "sample_count": int(diagnostic_time_s.size),
+            "sample_period_s": PHYSICS_DT_S,
+            "trace_files": {
+                "time_s": str(output / "retention_time_s.npy"),
+                "phase": str(output / "retention_phase.npy"),
+                "target_position_world_m": str(
+                    output / "retention_target_position_world_m.npy"
+                ),
+                "target_orientation_world_wxyz": str(
+                    output / "retention_target_orientation_world_wxyz.npy"
+                ),
+                "finger_positions_m": str(
+                    output / "retention_finger_positions_m.npy"
+                ),
+                "finger_gap_m": str(output / "retention_finger_gap_m.npy"),
+            },
+            "peak_object_lift_m": peak_object_lift_m,
+            "peak_sample_index": peak_lift_index,
+            "peak_time_s": float(diagnostic_time_s[peak_lift_index]),
+            "peak_phase": str(diagnostic_phase_array[peak_lift_index]),
+            "finger_gap_at_lift_start_m": float(post_close_finger_gaps[0]),
+            "finger_gap_at_peak_lift_m": float(
+                post_close_finger_gaps[peak_lift_local_index]
+            ),
+            "finger_gap_at_final_hold_m": float(post_close_finger_gaps[-1]),
+            "lift_lost_from_peak_to_final_m": lift_lost_from_peak_to_final_m,
+        },
         "automatic_checks": {
             "replay_scene_matches_capture": True,
             "target_is_physics_ready": bool(
@@ -565,6 +810,11 @@ try:
                 np.isfinite(measured_fingers_before_close).all()
                 and np.isfinite(measured_fingers_after_close).all()
                 and np.isfinite(measured_fingers_held).all()
+            ),
+            "retention_trace_is_finite": bool(
+                np.isfinite(diagnostic_target_position_array).all()
+                and np.isfinite(diagnostic_target_orientation_array).all()
+                and np.isfinite(diagnostic_finger_position_array).all()
             ),
             "object_lifted_by_at_least_one_object_height": physical_pick_observed,
             "object_remained_lifted_after_transport": bool(
