@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Replay a validated cuRobo pre-grasp trajectory in the matching Isaac scene.
+
+This is a simulation-only visual review gate.  It does not plan or execute the
+final contact approach, close the gripper, attach the object, or lift it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+import traceback
+
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
+
+from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.trajectory_replay import (
+    load_pregrasp_replay,
+    sample_positions_at_physics_rate,
+)
+
+
+LAYOUT = DEFAULT_TABLETOP_LAYOUT
+PHYSICS_DT_S = 1.0 / 60.0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--capture", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--settle-frames", type=int, default=60)
+    parser.add_argument("--hold-frames", type=int, default=300)
+    parser.add_argument(
+        "--simulation-only",
+        action="store_true",
+        help="Required acknowledgement: this command controls only an Isaac Sim robot",
+    )
+    args = parser.parse_args()
+    if not args.simulation_only:
+        parser.error("--simulation-only is required")
+    if args.settle_frames < 0 or args.hold_frames < 0:
+        parser.error("frame counts must be non-negative")
+    return args
+
+
+args = parse_args()
+replay = load_pregrasp_replay(args.capture, args.plan)
+
+# Isaac requires SimulationApp construction before importing other Isaac modules.
+from isaacsim import SimulationApp
+
+simulation_app = SimulationApp({"headless": args.headless})
+
+try:
+    import numpy as np
+    from PIL import Image
+
+    from isaacsim.core.api import World
+    from isaacsim.core.api.objects import FixedCuboid
+    from isaacsim.core.utils.types import ArticulationAction
+    from isaacsim.robot.manipulators.examples.franka import Franka
+    from isaacsim.sensors.camera import Camera
+
+    from panda_handover.geometry import look_at_quaternion_world
+
+    output = args.output
+    output.mkdir(parents=True, exist_ok=True)
+    world = World(
+        stage_units_in_meters=1.0,
+        physics_dt=PHYSICS_DT_S,
+        rendering_dt=1.0 / 30.0,
+    )
+    world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
+    panda = world.scene.add(
+        Franka(
+            prim_path="/World/Panda",
+            name="panda",
+            position=np.asarray(LAYOUT.robot_base_position_m),
+        )
+    )
+    world.scene.add(
+        FixedCuboid(
+            prim_path="/World/Table",
+            name="table",
+            position=np.asarray(LAYOUT.table_center_m),
+            scale=np.asarray(LAYOUT.table_size_m),
+            color=np.array([0.45, 0.32, 0.20]),
+        )
+    )
+    world.scene.add(
+        FixedCuboid(
+            prim_path="/World/TestObject",
+            name="test_object",
+            position=np.asarray(LAYOUT.target_center_m),
+            scale=np.asarray(LAYOUT.target_size_m),
+            color=np.array([0.1, 0.5, 0.9]),
+        )
+    )
+    world.scene.add(
+        FixedCuboid(
+            prim_path="/World/Obstacle",
+            name="obstacle",
+            position=np.asarray(LAYOUT.obstacle_center_m),
+            scale=np.asarray(LAYOUT.obstacle_size_m),
+            color=np.array([0.9, 0.2, 0.1]),
+        )
+    )
+
+    camera_position = np.asarray(LAYOUT.camera_position_m, dtype=np.float64)
+    camera_target = np.asarray(LAYOUT.camera_target_m, dtype=np.float64)
+    camera_orientation = look_at_quaternion_world(camera_position, camera_target)
+    camera = Camera(
+        prim_path="/World/replay_camera",
+        position=camera_position,
+        orientation=camera_orientation,
+        frequency=30,
+        resolution=(640, 480),
+    )
+
+    world.reset()
+    camera.initialize()
+    camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+    for _ in range(args.settle_frames):
+        world.step(render=True)
+
+    isaac_names = tuple(str(name) for name in panda.dof_names)
+    if len(set(isaac_names)) != len(isaac_names):
+        raise RuntimeError("Isaac Panda DOF names are not unique")
+    name_to_isaac_index = {name: index for index, name in enumerate(isaac_names)}
+    missing = [name for name in replay.joint_names if name not in name_to_isaac_index]
+    if missing:
+        raise RuntimeError(f"planned joints are missing from Isaac Panda: {missing}")
+    active_indices = np.asarray(
+        [name_to_isaac_index[name] for name in replay.joint_names], dtype=np.int64
+    )
+    capture_by_name = {
+        name: replay.capture_joint_positions[index]
+        for index, name in enumerate(replay.capture_joint_names)
+    }
+    expected_start = np.asarray(
+        [capture_by_name[name] for name in replay.joint_names], dtype=np.float64
+    )
+    actual_start = np.asarray(panda.get_joint_positions(), dtype=np.float64)[active_indices]
+    start_error = np.abs(actual_start - expected_start)
+    if not np.all(start_error <= 2e-3):
+        raise RuntimeError(
+            "Isaac Panda did not reproduce the captured start state; "
+            f"maximum error={float(start_error.max()):.6g}"
+        )
+
+    replay_time, commanded = sample_positions_at_physics_rate(
+        replay.positions, replay.segment_dt_s, PHYSICS_DT_S
+    )
+    measured = np.empty_like(commanded)
+    frame_indices = set(
+        np.linspace(0, commanded.shape[0] - 1, 5, dtype=np.int64).tolist()
+    )
+    saved_frames: list[str] = []
+    for index, target in enumerate(commanded):
+        panda.apply_action(
+            ArticulationAction(
+                joint_positions=target,
+                joint_indices=active_indices,
+            )
+        )
+        world.step(render=True)
+        measured[index] = np.asarray(panda.get_joint_positions(), dtype=np.float64)[
+            active_indices
+        ]
+        if not np.all(np.isfinite(measured[index])):
+            raise RuntimeError(f"Isaac returned a non-finite joint state at command {index}")
+        if index in frame_indices:
+            frame = camera.get_current_frame()
+            rgba = frame.get("rgba")
+            if rgba is None or np.asarray(rgba).size <= 1:
+                rgba = frame.get("rgb")
+            if rgba is not None and np.asarray(rgba).size > 1:
+                rgb = np.asarray(rgba)[..., :3]
+                if np.issubdtype(rgb.dtype, np.floating):
+                    scale = 255.0 if float(np.nanmax(rgb)) <= 1.0 else 1.0
+                    rgb = np.clip(rgb * scale, 0, 255).astype(np.uint8)
+                else:
+                    rgb = rgb.astype(np.uint8, copy=False)
+                frame_path = output / f"replay_{index:04d}.png"
+                Image.fromarray(rgb, mode="RGB").save(frame_path)
+                saved_frames.append(str(frame_path))
+
+    final_target = commanded[-1]
+    for _ in range(args.hold_frames):
+        panda.apply_action(
+            ArticulationAction(
+                joint_positions=final_target,
+                joint_indices=active_indices,
+            )
+        )
+        world.step(render=True)
+
+    tracking_error = measured - commanded
+    np.save(output / "replay_time_s.npy", replay_time)
+    np.save(output / "commanded_joint_positions.npy", commanded)
+    np.save(output / "measured_joint_positions.npy", measured)
+    np.save(output / "tracking_error_rad.npy", tracking_error)
+    report = {
+        "status": "success",
+        "reference": {
+            "controller": "Isaac Sim 5.1 ArticulationAction position targets",
+            "source_plan": str(args.plan / "pregrasp_plan_check.json"),
+        },
+        "inputs": {
+            "capture": str(args.capture),
+            "plan": str(args.plan),
+            "source_waypoints": int(replay.positions.shape[0]),
+        },
+        "replay": {
+            "physics_dt_s": PHYSICS_DT_S,
+            "duration_s": float(replay_time[-1]),
+            "command_count": int(commanded.shape[0]),
+            "joint_names": list(replay.joint_names),
+            "isaac_joint_indices": active_indices.tolist(),
+            "maximum_start_state_error": float(start_error.max(initial=0.0)),
+            "maximum_tracking_error": float(np.max(np.abs(tracking_error))),
+            "rms_tracking_error": float(np.sqrt(np.mean(np.square(tracking_error)))),
+            "saved_review_frames": saved_frames,
+        },
+        "automatic_checks": {
+            "capture_start_state_reproduced": bool(np.all(start_error <= 2e-3)),
+            "all_commands_finite": bool(np.isfinite(commanded).all()),
+            "all_measurements_finite": bool(np.isfinite(measured).all()),
+            "final_command_matches_saved_plan": bool(
+                np.allclose(commanded[-1], replay.positions[-1], atol=1e-12, rtol=0.0)
+            ),
+        },
+        "safety": {
+            "simulation_only": True,
+            "position_targets_applied_without_waypoint_teleportation": True,
+            "final_approach_executed": False,
+            "gripper_closed": False,
+            "object_attached": False,
+            "physical_contact_monitoring_automated": False,
+            "manual_review_required": True,
+            "safe_for_real_robot_execution": False,
+        },
+    }
+    report_path = output / "replay_check.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"replayed {commanded.shape[0]} position targets over {replay_time[-1]:.3f} s")
+    print(f"maximum tracking error: {report['replay']['maximum_tracking_error']:.6g}")
+    print(f"saved: {report_path}")
+except Exception as exc:
+    failure_traceback = traceback.format_exc()
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "replay_check.json").write_text(
+        json.dumps(
+            {
+                "status": "failure",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": failure_traceback,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(failure_traceback, file=sys.stderr, flush=True)
+    raise
+finally:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    simulation_app.close()
