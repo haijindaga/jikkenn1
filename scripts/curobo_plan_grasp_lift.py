@@ -101,9 +101,15 @@ def _save_phase(output: Path, phase: str, planner: Any, trajectory: Any) -> dict
         "waypoints": int(position.shape[0]),
         "active_joint_names": list(planner.joint_names),
         "full_joint_names": full_names,
+        "position": position,
         "start": position[0],
         "end": position[-1],
     }
+
+
+def _success_any(result: Any) -> bool:
+    success = getattr(result, "success", None)
+    return bool(success is not None and success.any().item())
 
 
 def _load_reviewed_pregrasp(directory: Path) -> tuple[dict[str, Any], np.ndarray]:
@@ -228,6 +234,11 @@ def main() -> int:
     planner = MotionPlanner(planner_cfg)
     if planner.tool_frames != ["panda_hand"]:
         raise RuntimeError(f"reviewed Franka tool frame changed: {planner.tool_frames}")
+    contact_collision_links = list(
+        planner.kinematics.config.kinematics_config.grasp_contact_link_names or ()
+    )
+    if not contact_collision_links:
+        raise RuntimeError("reviewed Franka config has no grasp_contact_link_names")
     planner.warmup(enable_graph=True, num_warmup_iterations=2)
 
     start_positions = select_named_joint_positions(
@@ -280,9 +291,9 @@ def main() -> int:
         grasp_lift_in_tool_frame=False,
         plan_approach_to_grasp=True,
         plan_grasp_to_lift=True,
-        # Target geometry was removed from the observed scene.  Keep Panda hand
-        # and finger collisions active against the table and red obstacle.
-        disable_collision_links=[],
+        # Use cuRobo's documented default grasp-contact handling.  The Franka
+        # contact links are re-enabled and every returned waypoint is checked
+        # against the same observed scene before this artifact can pass.
     )
     elapsed_s = time.monotonic() - started
     success = bool(
@@ -292,7 +303,44 @@ def main() -> int:
     )
     if not success:
         status_text = str(getattr(result, "status", "plan_grasp returned no result"))
-        raise RuntimeError(f"cuRobo plan_grasp failed: {status_text}")
+        failure_report = {
+            "status": "planning_failed",
+            "reference": {
+                "curobo_commit": CUROBO_COMMIT,
+                "planner": "MotionPlanner.plan_grasp",
+                "official_source": (
+                    "curobo/_src/motion/motion_planner.py::MotionPlanner.plan_grasp"
+                ),
+            },
+            "planner_status": status_text,
+            "stage_success": {
+                "issue_663_preflight": preflight_success,
+                "goalset": _success_any(getattr(result, "goalset_result", None)),
+                "approach": _success_any(getattr(result, "approach_result", None)),
+                "grasp": _success_any(getattr(result, "grasp_result", None)),
+                "lift": _success_any(getattr(result, "lift_result", None)),
+            },
+            "parameters": {
+                "official_grasp_contact_link_names": contact_collision_links,
+                "approach_offset_m": float(
+                    pregrasp_report["parameters"]["approach_offset_m"]
+                ),
+                "lift_offset_m": args.lift_offset,
+                "candidate_count": int(len(grasp_transforms)),
+            },
+            "next_gate": (
+                "Do not tune solver parameters from this status alone; inspect the "
+                "recorded failing stage first."
+            ),
+        }
+        failure_path = output / "grasp_lift_failure.json"
+        failure_path.write_text(
+            json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+        )
+        planner.destroy()
+        print(json.dumps(failure_report, indent=2))
+        print(f"saved: {failure_path}")
+        return 2
 
     raw_phase_sources = {
         "approach": (
@@ -355,6 +403,35 @@ def main() -> int:
     }
     if not all(continuity_checks.values()):
         raise RuntimeError(f"plan_grasp phase continuity failed: {continuity_checks}")
+
+    # cuRobo intentionally disables configured grasp-contact links while it
+    # plans contact motion.  Re-enable them and fail closed if any full-robot
+    # collision sphere penetrates the observed table or surrounding geometry
+    # at any returned waypoint.  The SAM3 target is absent by construction.
+    planner.enable_link_collision(contact_collision_links)
+    phase_penetration_costs = {}
+    for phase_name, values in phase_reports.items():
+        phase_state = JointState.from_position(
+            torch.from_numpy(values["position"]).to(device_cfg.device),
+            joint_names=planner.joint_names,
+        )
+        phase_kinematics = planner.compute_kinematics(phase_state)
+        if phase_kinematics.robot_spheres is None:
+            raise RuntimeError(f"cuRobo returned no {phase_name} collision spheres")
+        phase_buffer = CollisionBuffer.from_shape(
+            phase_kinematics.robot_spheres.shape, device_cfg
+        )
+        phase_buffer.zero_()
+        phase_cost = planner.scene_collision_checker.get_sphere_collision(
+            phase_kinematics,
+            phase_buffer,
+            torch.tensor([1.0], device=device_cfg.device, dtype=torch.float32),
+            torch.tensor([0.0], device=device_cfg.device, dtype=torch.float32),
+        )
+        torch.cuda.synchronize(device_cfg.device)
+        phase_cost_np = _cpu_numpy(phase_cost).astype(np.float32, copy=False)
+        np.save(output / f"{phase_name}_full_robot_penetration_cost.npy", phase_cost_np)
+        phase_penetration_costs[phase_name] = phase_cost_np
 
     selected_rank = int(_cpu_numpy(result.goalset_index).reshape(-1)[0])
     if not 0 <= selected_rank < len(grasp_transforms):
@@ -427,6 +504,9 @@ def main() -> int:
             "planner_source": (
                 "curobo/_src/motion/motion_planner.py::MotionPlanner.plan_grasp"
             ),
+            "official_grasp_contact_handling": (
+                "robot franka.yml grasp_contact_link_names"
+            ),
             "issue_663_preflight": "https://github.com/NVlabs/curobo/issues/663",
             "issue_692_padding": "https://github.com/NVlabs/curobo/issues/692",
             "padding_trim": (
@@ -454,7 +534,7 @@ def main() -> int:
             ),
             "lift_axis": "robot-base/world +Z",
             "lift_offset_m": args.lift_offset,
-            "disable_collision_links": [],
+            "temporarily_disabled_grasp_contact_links": contact_collision_links,
             "target_absent_from_observed_scene": True,
             "attachment_sphere_count": 4,
         },
@@ -479,6 +559,9 @@ def main() -> int:
             "issue_663_preflight_succeeded": preflight_success,
             "planner_reported_success": True,
             **continuity_checks,
+            "all_returned_waypoints_clear_with_all_robot_links_enabled": bool(
+                all(not np.any(cost > 0.0) for cost in phase_penetration_costs.values())
+            ),
             "lift_end_attached_spheres_are_finite": bool(
                 np.isfinite(attached_local_spheres).all()
             ),
@@ -489,7 +572,9 @@ def main() -> int:
         "safety": {
             "simulation_only": True,
             "unknown_space_assumed_free": True,
-            "robot_world_collision_enabled_during_all_planned_phases": True,
+            "non_contact_links_world_collision_enabled_during_planning": True,
+            "grasp_contact_links_temporarily_disabled_by_official_planner": True,
+            "all_robot_links_postvalidated_at_every_returned_waypoint": True,
             "robot_self_collision_enabled": True,
             "target_removed_from_world_collision_scene": True,
             "final_approach_planned": True,
