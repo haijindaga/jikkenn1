@@ -12,12 +12,42 @@ from panda_handover.conservative_esdf import (
     fingerprint_files,
     iter_voxel_centers,
     make_dense_grid_spec,
+    optimistic_sim_esdf_checks,
+    planning_free_from_unknown_policy,
     signed_distance_from_known_free,
     validate_prepared_view_order,
 )
 
 
 class ConservativeEsdfTests(unittest.TestCase):
+    def test_optimistic_policy_frees_only_unknown(self):
+        observed = np.array([[[False, True, True]]])
+        sensor_free = np.array([[[False, True, False]]])
+        planning_free = planning_free_from_unknown_policy(
+            observed, sensor_free, unknown_policy="free"
+        )
+        np.testing.assert_array_equal(planning_free, [[[True, True, False]]])
+
+    def test_optimistic_checks_reject_observed_obstacle_removal(self):
+        observed = np.array([[[False, True, True]]])
+        sensor_free = np.array([[[False, True, False]]])
+        planning_free = np.array([[[True, True, False]]])
+        esdf = np.array([[[0.05, 0.05, -0.05]]])
+        self.assertTrue(
+            all(
+                optimistic_sim_esdf_checks(
+                    observed, sensor_free, planning_free, esdf
+                ).values()
+            )
+        )
+        planning_free[0, 0, 2] = True
+        esdf[0, 0, 2] = 0.05
+        self.assertFalse(
+            optimistic_sim_esdf_checks(
+                observed, sensor_free, planning_free, esdf
+            )["observed_blocked_remains_blocked"]
+        )
+
     def test_grid_order_matches_x_slowest_z_fastest(self):
         spec = make_dense_grid_spec((0.2, 0.2, 0.2), (0.0, 0.0, 0.0), 0.1)
         centers = np.concatenate(

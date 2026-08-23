@@ -1,9 +1,9 @@
-"""Dense conservative ESDF helpers shared by mapping backends.
+"""Dense ESDF helpers shared by mapping backends.
 
-The contract is deliberately simple: only voxels proven free by sensor
-integration are free.  Occupied and unobserved voxels are both blocked.
-Distances follow the conventional SDF sign used by cuRobo: positive in free
-space and negative in blocked space.
+The default conservative contract only frees voxels proven free by sensor
+integration. An explicit simulation-only policy can instead assume unobserved
+voxels are free while preserving observed obstacles. Distances follow the
+cuRobo sign convention: positive free and negative blocked.
 """
 
 from __future__ import annotations
@@ -159,6 +159,31 @@ def classify_known_free(
     return observed, known_free
 
 
+def planning_free_from_unknown_policy(
+    observed: np.ndarray,
+    sensor_known_free: np.ndarray,
+    *,
+    unknown_policy: str,
+) -> np.ndarray:
+    """Create the planner free mask without changing observed obstacles.
+
+    ``blocked`` is the conservative contract used for real-world safety work.
+    ``free`` mirrors nvblox's optimistic unobserved-space policy and is allowed
+    only for explicitly labelled simulation experiments.
+    """
+    observed_array = np.asarray(observed, dtype=bool)
+    sensor_free_array = np.asarray(sensor_known_free, dtype=bool)
+    if observed_array.shape != sensor_free_array.shape:
+        raise ValueError("observed and sensor_known_free shapes must match")
+    if np.any(sensor_free_array & ~observed_array):
+        raise ValueError("sensor_known_free contains unobserved voxels")
+    if unknown_policy == "blocked":
+        return sensor_free_array.copy()
+    if unknown_policy == "free":
+        return sensor_free_array | ~observed_array
+    raise ValueError("unknown_policy must be 'blocked' or 'free'")
+
+
 def signed_distance_from_known_free(
     known_free: np.ndarray,
     *,
@@ -222,4 +247,44 @@ def conservative_esdf_checks(
         "unknown_has_nonpositive_distance": bool(np.all(esdf[unknown] <= 0.0)),
         "grid_has_known_free": bool(free_array.any()),
         "grid_has_unknown": bool(unknown.any()),
+    }
+
+
+def optimistic_sim_esdf_checks(
+    observed: np.ndarray,
+    sensor_known_free: np.ndarray,
+    planning_free: np.ndarray,
+    esdf_m: np.ndarray,
+) -> dict[str, bool]:
+    """Check the explicit simulation-only unknown-as-free contract."""
+    observed_array = np.asarray(observed, dtype=bool)
+    sensor_free_array = np.asarray(sensor_known_free, dtype=bool)
+    planning_free_array = np.asarray(planning_free, dtype=bool)
+    esdf = np.asarray(esdf_m)
+    if not (
+        observed_array.shape
+        == sensor_free_array.shape
+        == planning_free_array.shape
+        == esdf.shape
+    ):
+        raise ValueError("all optimistic ESDF arrays must have the same shape")
+    unknown = ~observed_array
+    observed_blocked = observed_array & ~sensor_free_array
+    return {
+        "esdf_is_finite": bool(np.isfinite(esdf).all()),
+        "sensor_known_free_is_observed": bool(
+            np.all(~sensor_free_array | observed_array)
+        ),
+        "all_unknown_is_planning_free": bool(np.all(planning_free_array[unknown])),
+        "observed_blocked_remains_blocked": bool(
+            np.all(~planning_free_array[observed_blocked])
+        ),
+        "planning_free_has_positive_distance": bool(
+            np.all(esdf[planning_free_array] > 0.0)
+        ),
+        "observed_blocked_has_nonpositive_distance": bool(
+            np.all(esdf[observed_blocked] <= 0.0)
+        ),
+        "grid_has_unknown": bool(unknown.any()),
+        "grid_has_observed_obstacle": bool(observed_blocked.any()),
     }

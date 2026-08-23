@@ -31,6 +31,7 @@ class ConservativeEsdf:
     voxel_size_m: float
     extent_m: tuple[float, float, float]
     center_robot_base_m: tuple[float, float, float]
+    unknown_policy: str
     report: dict[str, Any]
 
 
@@ -126,8 +127,14 @@ def _require_rigid_transform(transform: np.ndarray, *, label: str) -> np.ndarray
     return value
 
 
-def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
-    """Load Backend A only when every conservative-map invariant is present."""
+def load_backend_a_esdf(
+    directory: str | Path,
+    *,
+    expected_unknown_policy: str,
+) -> ConservativeEsdf:
+    """Load Backend A only when its selected unknown-space contract is exact."""
+    if expected_unknown_policy not in ("blocked", "free"):
+        raise ValueError("expected_unknown_policy must be 'blocked' or 'free'")
     root = Path(directory)
     report_path = root / "esdf_check.json"
     if not report_path.is_file():
@@ -145,16 +152,41 @@ def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
 
     parameters = report.get("parameters", {})
     unknown = report.get("unknown_environment_contract", {})
-    required_contract = {
-        "only_sensor_observed_space_can_be_free": True,
-        "unobserved_space_is_blocked": True,
-        "distance_to_unknown_boundary_recomputed": True,
-        "target_is_currently_blocked": True,
-    }
+    report_policy = parameters.get("unknown_policy", "blocked")
+    if report_policy != expected_unknown_policy:
+        raise ValueError(
+            f"Backend A unknown policy is {report_policy}, expected "
+            f"{expected_unknown_policy}"
+        )
+    required_contract = (
+        {
+            "only_sensor_observed_space_can_be_free": True,
+            "unobserved_space_is_blocked": True,
+            "distance_to_unknown_boundary_recomputed": True,
+            "target_is_currently_blocked": True,
+        }
+        if report_policy == "blocked"
+        else {
+            "only_sensor_observed_space_can_be_free": False,
+            "unobserved_space_is_blocked": False,
+            "unobserved_space_is_free": True,
+            "distance_to_unknown_boundary_recomputed": True,
+            "target_is_currently_blocked": False,
+        }
+    )
     if parameters.get("target_clear_applied") is not False:
         raise ValueError("unexpected target-clear mutation in Backend A map")
     if any(unknown.get(key) is not expected for key, expected in required_contract.items()):
         raise ValueError("Backend A unknown-space safety contract is missing")
+    if report_policy == "free":
+        scope = report.get("experiment_scope", {})
+        required_scope = {
+            "simulation_only": True,
+            "safe_for_unknown_real_environment": False,
+            "trajectory_execution_authorized": False,
+        }
+        if any(scope.get(key) is not value for key, value in required_scope.items()):
+            raise ValueError("optimistic Backend A simulation scope is missing")
 
     grid = report.get("grid", {})
     if grid.get("index_order") != "x_slowest_z_fastest":
@@ -190,6 +222,18 @@ def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
         raise ValueError("known-free voxels must have positive distance")
     if not np.all(features[~known_free] <= 0.0):
         raise ValueError("blocked voxels must have non-positive distance")
+    if report_policy == "free":
+        observed = np.load(root / "observed_mask.npy", allow_pickle=False).astype(
+            bool, copy=False
+        )
+        sensor_known_free = np.load(
+            root / "sensor_known_free_mask.npy", allow_pickle=False
+        ).astype(bool, copy=False)
+        if observed.shape != shape or sensor_known_free.shape != shape:
+            raise ValueError("optimistic Backend A evidence masks do not match grid")
+        expected_planning_free = sensor_known_free | ~observed
+        if not np.array_equal(known_free, expected_planning_free):
+            raise ValueError("optimistic planning-free mask changed observed obstacles")
 
     return ConservativeEsdf(
         features_m=features.astype(np.float32, copy=False),
@@ -198,8 +242,14 @@ def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
         voxel_size_m=voxel_size,
         extent_m=tuple(float(value) for value in extent),
         center_robot_base_m=tuple(float(value) for value in center),
+        unknown_policy=report_policy,
         report=report,
     )
+
+
+def load_conservative_esdf(directory: str | Path) -> ConservativeEsdf:
+    """Backward-compatible strict loader for unknown-as-blocked Backend A."""
+    return load_backend_a_esdf(directory, expected_unknown_policy="blocked")
 
 
 def validate_voxel_fix_report(path: str | Path) -> dict[str, Any]:

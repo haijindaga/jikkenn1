@@ -9,6 +9,7 @@ from panda_handover.curobo_planning import (
     CUROBO_COMMIT,
     CUROBO_VOXEL_PATCH_SHA256,
     classify_pregrasp_failure,
+    load_backend_a_esdf,
     load_conservative_esdf,
     prepare_pregrasp_goalset,
     rotation_matrix_to_quaternion_wxyz,
@@ -44,7 +45,63 @@ def _backend_a_report(shape=(2, 3, 4), voxel=0.1):
     }
 
 
+def _backend_a_optimistic_report(shape=(2, 3, 4), voxel=0.1):
+    report = _backend_a_report(shape=shape, voxel=voxel)
+    report["parameters"].update(
+        {"unknown_policy": "free", "planning_mode": "optimistic_sim"}
+    )
+    report["unknown_environment_contract"] = {
+        "policy": "free",
+        "only_sensor_observed_space_can_be_free": False,
+        "unobserved_space_is_blocked": False,
+        "unobserved_space_is_free": True,
+        "distance_to_unknown_boundary_recomputed": True,
+        "target_is_currently_blocked": False,
+    }
+    report["experiment_scope"] = {
+        "simulation_only": True,
+        "environment_visually_reviewed_by_operator": False,
+        "safe_for_unknown_real_environment": False,
+        "trajectory_execution_authorized": False,
+    }
+    return report
+
+
 class CuroboPlanningTests(unittest.TestCase):
+    def test_optimistic_loader_requires_exact_evidence_masks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = _backend_a_optimistic_report()
+            (root / "esdf_check.json").write_text(json.dumps(report))
+            observed = np.zeros((2, 3, 4), dtype=bool)
+            observed[0, 0, 0] = True
+            sensor_free = np.zeros_like(observed)
+            planning_free = ~observed
+            features = np.where(planning_free, 0.05, -0.05).astype(np.float32)
+            np.save(root / "observed_mask.npy", observed)
+            np.save(root / "sensor_known_free_mask.npy", sensor_free)
+            np.save(root / "known_free_mask.npy", planning_free)
+            np.save(root / "esdf_features.npy", features)
+            loaded = load_backend_a_esdf(root, expected_unknown_policy="free")
+            self.assertEqual(loaded.unknown_policy, "free")
+            planning_free[0, 0, 0] = True
+            np.save(root / "known_free_mask.npy", planning_free)
+            np.save(
+                root / "esdf_features.npy",
+                np.where(planning_free, 0.05, -0.05).astype(np.float32),
+            )
+            with self.assertRaisesRegex(ValueError, "observed obstacles"):
+                load_backend_a_esdf(root, expected_unknown_policy="free")
+
+    def test_loader_rejects_unknown_policy_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "esdf_check.json").write_text(
+                json.dumps(_backend_a_optimistic_report())
+            )
+            with self.assertRaisesRegex(ValueError, "expected blocked"):
+                load_backend_a_esdf(root, expected_unknown_policy="blocked")
+
     def test_ik_summary_counts_official_result_fields(self):
         summary = summarize_ik_result_arrays(
             np.array([[False, True, True]]),

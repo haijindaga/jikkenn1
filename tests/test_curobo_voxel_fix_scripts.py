@@ -35,6 +35,8 @@ class CuroboVoxelFixScriptTests(unittest.TestCase):
         self.assertIn("MotionPlannerCfg.create(", source)
         self.assertIn("planner.plan_pose(", source)
         self.assertNotIn("planner.plan_grasp(", source)
+        self.assertIn('choices=("blocked", "free")', source)
+        self.assertIn('"simulation_only": esdf.unknown_policy == "free"', source)
         self.assertIn('"final_approach_planned": False', source)
         self.assertIn('"safe_to_execute": False', source)
 

@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--approach-offset", type=float, default=0.15)
     parser.add_argument("--max-candidates", type=int, default=10)
     parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument(
+        "--unknown-policy",
+        choices=("blocked", "free"),
+        default="blocked",
+        help="must exactly match the Backend A map; free is simulation-only",
+    )
     return parser.parse_args()
 
 
@@ -97,7 +103,7 @@ def main() -> int:
     from panda_handover.curobo_bridge import select_named_joint_positions
     from panda_handover.curobo_planning import (
         classify_pregrasp_failure,
-        load_conservative_esdf,
+        load_backend_a_esdf,
         prepare_pregrasp_goalset,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
@@ -108,7 +114,9 @@ def main() -> int:
     # exact reviewed Issue #699 fix before real ESDF values reach the planner.
     _verify_imported_curobo_source(project_root)
     voxel_fix_report = validate_voxel_fix_report(args.voxel_fix_report)
-    esdf = load_conservative_esdf(args.esdf)
+    esdf = load_backend_a_esdf(
+        args.esdf, expected_unknown_policy=args.unknown_policy
+    )
     if not _resolved_report_view_matches(esdf.report, args.capture):
         raise ValueError("--capture is not one of the views integrated into Backend A")
 
@@ -434,6 +442,10 @@ def main() -> int:
             "optimizer_collision_activation_distance_m": 0.01,
             "random_seed": 123,
             "use_cuda_graph": False,
+            "unknown_policy": esdf.unknown_policy,
+            "planning_mode": (
+                "optimistic_sim" if esdf.unknown_policy == "free" else "conservative"
+            ),
         },
         "result": {
             "planner_reported_success": bool(
@@ -483,8 +495,10 @@ def main() -> int:
         "safety": {
             "input_map_declared_safe_to_plan": False,
             "pregrasp_only_scope_gate_passed": True,
-            "unknown_space_blocked": True,
-            "target_region_blocked": True,
+            "unknown_space_blocked": esdf.unknown_policy == "blocked",
+            "unknown_space_assumed_free": esdf.unknown_policy == "free",
+            "target_region_blocked": esdf.unknown_policy == "blocked",
+            "simulation_only": esdf.unknown_policy == "free",
             "robot_world_collision_enabled_for_entire_saved_trajectory": True,
             "robot_self_collision_enabled": True,
             "static_graspgenx_filter_required": True,

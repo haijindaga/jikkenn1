@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Backend A: conservative dense ESDF from official nvblox_torch TSDF fusion.
+"""Backend A: dense ESDF from official nvblox_torch TSDF fusion.
 
 Inputs are the robot/target-filtered depth frames already written by
 ``curobo_map_capture.py``.  This script only builds and inspects a map; it does
-not create a motion planner or execute a robot trajectory.
+not create a motion planner or execute a robot trajectory. Unknown space is
+blocked by default; the explicit ``free`` policy is simulation-only.
 """
 
 from __future__ import annotations
@@ -38,6 +39,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-tsdf-weight", type=float, default=0.1)
     parser.add_argument("--max-distance", type=float, default=1.0)
     parser.add_argument("--query-batch-size", type=int, default=262144)
+    parser.add_argument(
+        "--unknown-policy",
+        choices=("blocked", "free"),
+        default="blocked",
+        help=(
+            "blocked keeps the conservative contract; free is an explicitly "
+            "simulation-only optimistic experiment"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -51,6 +61,8 @@ def main() -> int:
         fingerprint_files,
         iter_voxel_centers,
         make_dense_grid_spec,
+        optimistic_sim_esdf_checks,
+        planning_free_from_unknown_policy,
         signed_distance_from_known_free,
         validate_prepared_view_order,
     )
@@ -169,27 +181,45 @@ def main() -> int:
 
     tsdf_distance = tsdf_distance.reshape(spec.shape)
     tsdf_weight = tsdf_weight.reshape(spec.shape)
-    observed, known_free = classify_known_free(
+    observed, sensor_known_free = classify_known_free(
         tsdf_distance,
         tsdf_weight,
         minimum_weight=args.minimum_tsdf_weight,
     )
+    planning_free = planning_free_from_unknown_policy(
+        observed,
+        sensor_known_free,
+        unknown_policy=args.unknown_policy,
+    )
     esdf = signed_distance_from_known_free(
-        known_free,
+        planning_free,
         voxel_size_m=args.voxel_size,
         max_distance_m=args.max_distance,
     )
-    checks = conservative_esdf_checks(observed, known_free, esdf)
+    if args.unknown_policy == "blocked":
+        checks = conservative_esdf_checks(observed, planning_free, esdf)
+    else:
+        checks = optimistic_sim_esdf_checks(
+            observed,
+            sensor_known_free,
+            planning_free,
+            esdf,
+        )
 
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     np.save(output / "tsdf_distance_m.npy", tsdf_distance)
     np.save(output / "tsdf_weight.npy", tsdf_weight)
     np.save(output / "observed_mask.npy", observed)
-    np.save(output / "known_free_mask.npy", known_free)
+    np.save(output / "sensor_known_free_mask.npy", sensor_known_free)
+    # This is the exact free mask consumed by cuRobo. In conservative mode it
+    # equals sensor_known_free; in optimistic_sim it additionally includes unknown.
+    np.save(output / "known_free_mask.npy", planning_free)
     np.save(output / "esdf_features.npy", esdf)
 
     unknown = ~observed
+    observed_blocked = observed & ~sensor_known_free
+    optimistic_sim = args.unknown_policy == "free"
     report = {
         "status": "success" if all(checks.values()) else "failed_checks",
         "backend": "A_nvblox_torch_dense_edt",
@@ -218,39 +248,59 @@ def main() -> int:
             "max_distance_m": args.max_distance,
             "input_frames": len(args.capture),
             "target_clear_applied": False,
+            "unknown_policy": args.unknown_policy,
+            "planning_mode": "optimistic_sim" if optimistic_sim else "conservative",
         },
         "input_fingerprint_sha256": input_fingerprint,
         "counts": {
             "total_voxels": voxel_count,
             "observed_voxels": int(observed.sum()),
-            "known_free_voxels": int(known_free.sum()),
+            "sensor_known_free_voxels": int(sensor_known_free.sum()),
+            "planning_free_voxels": int(planning_free.sum()),
+            "observed_blocked_voxels": int(observed_blocked.sum()),
             "unknown_voxels": int(unknown.sum()),
-            "blocked_voxels": int((~known_free).sum()),
+            "blocked_voxels": int((~planning_free).sum()),
         },
         "fractions": {
             "observed": float(observed.mean()),
-            "known_free": float(known_free.mean()),
+            "sensor_known_free": float(sensor_known_free.mean()),
+            "planning_free": float(planning_free.mean()),
             "unknown": float(unknown.mean()),
         },
         "views": view_reports,
         "automatic_checks": checks,
         "unknown_environment_contract": {
-            "only_sensor_observed_space_can_be_free": True,
-            "unobserved_space_is_blocked": True,
+            "policy": args.unknown_policy,
+            "only_sensor_observed_space_can_be_free": not optimistic_sim,
+            "unobserved_space_is_blocked": not optimistic_sim,
+            "unobserved_space_is_free": optimistic_sim,
             "distance_to_unknown_boundary_recomputed": True,
-            "target_is_currently_blocked": True,
+            "target_is_currently_blocked": not optimistic_sim,
+        },
+        "experiment_scope": {
+            "simulation_only": optimistic_sim,
+            "environment_visually_reviewed_by_operator": False,
+            "safe_for_unknown_real_environment": False,
+            "trajectory_execution_authorized": False,
         },
         "safe_to_plan": False,
-        "next_gate": "Compare with backend B, then choose a target-clear proxy before planning",
+        "next_gate": (
+            "Run simulation-only pre-grasp planning and manually inspect the trajectory"
+            if optimistic_sim
+            else "Compare with backend B, then choose a target-clear proxy before planning"
+        ),
     }
     report_path = output / "esdf_check.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"integrated views: {len(args.capture)}")
     print(f"grid voxels: {voxel_count}")
-    print(f"observed/free/unknown: {observed.sum()}/{known_free.sum()}/{unknown.sum()}")
+    print(
+        "observed/sensor-free/planning-free/unknown: "
+        f"{observed.sum()}/{sensor_known_free.sum()}/{planning_free.sum()}/{unknown.sum()}"
+    )
     print(f"saved: {report_path}")
     if not all(checks.values()):
-        raise RuntimeError(f"conservative ESDF checks failed; inspect {report_path}")
+        raise RuntimeError(f"Backend A ESDF checks failed; inspect {report_path}")
     return 0
 
 
