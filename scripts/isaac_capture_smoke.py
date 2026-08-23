@@ -13,6 +13,11 @@ import sys
 import traceback
 from pathlib import Path
 
+from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+
+
+LAYOUT = DEFAULT_TABLETOP_LAYOUT
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -26,7 +31,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         nargs=3,
         metavar=("X", "Y", "Z"),
-        default=(1.25, 0.0, 1.35),
+        default=LAYOUT.camera_position_m,
         help="Camera position in Isaac world metres",
     )
     parser.add_argument(
@@ -34,7 +39,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         nargs=3,
         metavar=("X", "Y", "Z"),
-        default=(0.48, 0.0, 0.73),
+        default=LAYOUT.camera_target_m,
         help="World point at which the camera looks",
     )
     parser.add_argument(
@@ -83,29 +88,33 @@ try:
     from panda_handover.robot_state import RobotStateCapture
 
     world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 60.0, rendering_dt=1.0 / 30.0)
-    world.scene.add_default_ground_plane()
-    panda = world.scene.add(Franka(prim_path="/World/Panda", name="panda"))
+    world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
+    panda = world.scene.add(
+        Franka(
+            prim_path="/World/Panda",
+            name="panda",
+            position=np.asarray(LAYOUT.robot_base_position_m),
+        )
+    )
 
-    # The table and primitives are only geometry/camera checks.  Tool assets are
-    # introduced after the RGB-D contract is verified.
+    # Follow the Isaac Lab Franka lift convention: the robot mount and tabletop
+    # share z=0 and the room floor is below them.  A thin fixed tabletop avoids
+    # filling the robot workspace with the old floor-to-table solid cuboid.
     world.scene.add(
         FixedCuboid(
             prim_path="/World/Table",
             name="table",
-            position=np.array([0.50, 0.0, 0.35]),
-            scale=np.array([0.80, 1.00, 0.70]),
+            position=np.asarray(LAYOUT.table_center_m),
+            scale=np.asarray(LAYOUT.table_size_m),
             color=np.array([0.45, 0.32, 0.20]),
         )
     )
-    # Calibration fixtures are fixed and rest exactly on the 0.70 m table
-    # surface.  Keeping them off the Panda centreline prevents the asset's
-    # default arm pose from occluding or contacting the fixtures.
     world.scene.add(
         FixedCuboid(
             prim_path="/World/TestObject",
             name="test_object",
-            position=np.array([0.55, 0.20, 0.725]),
-            scale=np.array([0.20, 0.05, 0.05]),
+            position=np.asarray(LAYOUT.target_center_m),
+            scale=np.asarray(LAYOUT.target_size_m),
             color=np.array([0.1, 0.5, 0.9]),
         )
     )
@@ -113,8 +122,8 @@ try:
         FixedCuboid(
             prim_path="/World/Obstacle",
             name="obstacle",
-            position=np.array([0.55, -0.20, 0.75]),
-            scale=np.array([0.10, 0.10, 0.10]),
+            position=np.asarray(LAYOUT.obstacle_center_m),
+            scale=np.asarray(LAYOUT.obstacle_size_m),
             color=np.array([0.9, 0.2, 0.1]),
         )
     )
@@ -198,6 +207,14 @@ try:
         points_world=points_world,
     )
     saved = capture.save(args.output)
+
+    scene_layout_report = LAYOUT.validation_report()
+    scene_layout_path = saved / "scene_layout.json"
+    scene_layout_path.write_text(
+        json.dumps(scene_layout_report, indent=2) + "\n", encoding="utf-8"
+    )
+    if scene_layout_report["status"] != "success":
+        raise RuntimeError(f"tabletop scene validation failed; inspect {scene_layout_path}")
 
     # cuRobo's official RobotSegmenter requires the measured articulation state
     # and the camera pose relative to the robot base. Save the actual Isaac
@@ -285,6 +302,7 @@ try:
             {
                 "status": "success",
                 "capture_directory": str(saved),
+                "scene_layout": str(scene_layout_path),
                 "segmentation_directory": (
                     str(segmentation_directory) if segmentation_directory is not None else None
                 ),
@@ -299,6 +317,7 @@ try:
     print(f"intrinsics=\n{intrinsics}", flush=True)
     print(f"T_world_camera=\n{T_world_camera}", flush=True)
     print(f"saved Panda state to {robot_state_path}", flush=True)
+    print(f"saved validated tabletop layout to {scene_layout_path}", flush=True)
     print(
         f"camera validation max errors: {max_pixel_error:.6g} px, {max_world_error_m:.6g} m",
         flush=True,
