@@ -466,7 +466,12 @@ def main() -> int:
     identity_pose = Pose.from_list(
         [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], device_cfg=device_cfg
     )
-    planner.attachment_manager.attach(
+    # The pinned cuRobo commit exposes a broken MotionPlanner accessor
+    # (trajopt_solver.attachment_manager).  Current upstream fixes that
+    # accessor to use trajopt_solver.core.attachment_manager.  Use the same
+    # official path here without modifying the vendored checkout.
+    attachment_manager = planner.trajopt_solver.core.attachment_manager
+    attachment_manager.attach(
         joint_states=lift_end,
         obstacles=[target_mesh],
         link_name="attached_object",
@@ -474,12 +479,12 @@ def main() -> int:
         world_objects_pose_offset=identity_pose,
     )
     attached_indices = (
-        planner.attachment_manager.kinematics_params.get_sphere_index_from_link_name(
+        attachment_manager.kinematics_params.get_sphere_index_from_link_name(
             "attached_object"
         )
     )
     attached_local_spheres = _cpu_numpy(
-        planner.attachment_manager.kinematics_params.link_spheres[
+        attachment_manager.kinematics_params.link_spheres[
             0, attached_indices, :
         ]
     ).astype(np.float32, copy=False)

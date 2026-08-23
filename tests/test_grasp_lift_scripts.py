@@ -11,7 +11,11 @@ class GraspLiftScriptTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("planner.plan_grasp(", source)
-        self.assertIn("planner.attachment_manager.attach(", source)
+        self.assertIn(
+            "attachment_manager = planner.trajopt_solver.core.attachment_manager",
+            source,
+        )
+        self.assertIn("attachment_manager.attach(", source)
         self.assertIn("Mesh.from_pointcloud(", source)
         self.assertIn("load_singleview_observed_pointcloud(", source)
         self.assertNotIn("file_path=str(mesh_path", source)
