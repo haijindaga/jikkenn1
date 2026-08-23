@@ -13,11 +13,14 @@ LABEL org.opencontainers.image.source="${ISAAC_ROS_NVBLOX_REPOSITORY}" \
 # This is the source-install dependency step from the official Isaac ROS
 # nvblox quickstart, baked into a disposable Docker layer so the Ubuntu 22.04
 # host and its Isaac Sim Python environment remain untouched.
+# rosdep only reads package metadata here. The repository's LFS payloads are
+# test rosbags and media, so this temporary checkout skips their download.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update \
     && apt-get install -y --no-install-recommends git git-lfs python3-numpy \
     && rm -rf /tmp/isaac_ros_nvblox_deps \
-    && git clone --recursive --branch "${ISAAC_ROS_NVBLOX_REF}" --depth 1 \
+    && GIT_LFS_SKIP_SMUDGE=1 git clone --recursive \
+        --branch "${ISAAC_ROS_NVBLOX_REF}" --depth 1 \
         "${ISAAC_ROS_NVBLOX_REPOSITORY}" /tmp/isaac_ros_nvblox_deps \
     && test "$(git -C /tmp/isaac_ros_nvblox_deps rev-parse HEAD)" = \
         "${ISAAC_ROS_NVBLOX_COMMIT}" \

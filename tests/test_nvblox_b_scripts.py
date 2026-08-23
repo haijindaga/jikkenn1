@@ -25,11 +25,14 @@ def test_backend_b_uses_official_source_rosdep_and_isolated_docker():
     resolver = read("scripts/resolve_isaac_ros_image.py")
     assert "ARG BASE_IMAGE" in dockerfile
     assert "git clone --recursive" in dockerfile
+    assert "GIT_LFS_SKIP_SMUDGE=1 git clone --recursive" in dockerfile
     assert "rosdep install -i -r" in dockerfile
     assert "--rosdistro jazzy" in dockerfile
     assert "env_isaaclab" not in dockerfile
     assert "env_isaaclab" not in setup
     assert "HOST_PYTHON=/usr/bin/python3" in setup
+    assert "unset PYTHONPATH PYTHONHOME" in setup
+    assert "export PYTHONNOUSERSITE=1" in setup
     assert "--gpus all" in setup
     assert "'PyYAML==6.0.2' 'termcolor==2.4.0'" in setup
     assert "workspace-entrypoint.sh" in setup

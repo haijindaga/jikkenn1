@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Keep a sourced host ROS/conda environment from leaking Python packages into
+# the small CLI venv. ROS Jazzy is sourced explicitly inside the container.
+unset PYTHONPATH PYTHONHOME
+export PYTHONNOUSERSITE=1
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PINS_FILE="${PROJECT_ROOT}/docker/isaac_ros_b_pins.env"
 # shellcheck source=/dev/null
