@@ -125,6 +125,23 @@ try:
     world.reset()
     camera.initialize()
     camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+
+    def save_camera_rgb(path: Path) -> bool:
+        frame = camera.get_current_frame()
+        rgba = frame.get("rgba")
+        if rgba is None or np.asarray(rgba).size <= 1:
+            rgba = frame.get("rgb")
+        if rgba is None or np.asarray(rgba).size <= 1:
+            return False
+        rgb = np.asarray(rgba)[..., :3]
+        if np.issubdtype(rgb.dtype, np.floating):
+            scale = 255.0 if float(np.nanmax(rgb)) <= 1.0 else 1.0
+            rgb = np.clip(rgb * scale, 0, 255).astype(np.uint8)
+        else:
+            rgb = rgb.astype(np.uint8, copy=False)
+        Image.fromarray(rgb, mode="RGB").save(path)
+        return True
+
     for _ in range(args.settle_frames):
         world.step(render=True)
 
@@ -175,19 +192,8 @@ try:
         if not np.all(np.isfinite(measured[index])):
             raise RuntimeError(f"Isaac returned a non-finite joint state at command {index}")
         if index in frame_indices:
-            frame = camera.get_current_frame()
-            rgba = frame.get("rgba")
-            if rgba is None or np.asarray(rgba).size <= 1:
-                rgba = frame.get("rgb")
-            if rgba is not None and np.asarray(rgba).size > 1:
-                rgb = np.asarray(rgba)[..., :3]
-                if np.issubdtype(rgb.dtype, np.floating):
-                    scale = 255.0 if float(np.nanmax(rgb)) <= 1.0 else 1.0
-                    rgb = np.clip(rgb * scale, 0, 255).astype(np.uint8)
-                else:
-                    rgb = rgb.astype(np.uint8, copy=False)
-                frame_path = output / f"replay_{index:04d}.png"
-                Image.fromarray(rgb, mode="RGB").save(frame_path)
+            frame_path = output / f"replay_{index:04d}.png"
+            if save_camera_rgb(frame_path):
                 saved_frames.append(str(frame_path))
 
     final_target = commanded[-1]
@@ -200,11 +206,21 @@ try:
         )
         world.step(render=True)
 
+    held_final = np.asarray(panda.get_joint_positions(), dtype=np.float64)[active_indices]
+    if not np.all(np.isfinite(held_final)):
+        raise RuntimeError("Isaac returned a non-finite final held joint state")
+    held_final_error = held_final - final_target
+    held_frame_path = output / "replay_final_held.png"
+    if save_camera_rgb(held_frame_path):
+        saved_frames.append(str(held_frame_path))
+
     tracking_error = measured - commanded
     np.save(output / "replay_time_s.npy", replay_time)
     np.save(output / "commanded_joint_positions.npy", commanded)
     np.save(output / "measured_joint_positions.npy", measured)
     np.save(output / "tracking_error_rad.npy", tracking_error)
+    np.save(output / "held_final_joint_positions.npy", held_final)
+    np.save(output / "held_final_error_rad.npy", held_final_error)
     report = {
         "status": "success",
         "reference": {
@@ -225,12 +241,18 @@ try:
             "maximum_start_state_error": float(start_error.max(initial=0.0)),
             "maximum_tracking_error": float(np.max(np.abs(tracking_error))),
             "rms_tracking_error": float(np.sqrt(np.mean(np.square(tracking_error)))),
+            "hold_frames": args.hold_frames,
+            "maximum_held_final_error": float(np.max(np.abs(held_final_error))),
+            "rms_held_final_error": float(
+                np.sqrt(np.mean(np.square(held_final_error)))
+            ),
             "saved_review_frames": saved_frames,
         },
         "automatic_checks": {
             "capture_start_state_reproduced": bool(np.all(start_error <= 2e-3)),
             "all_commands_finite": bool(np.isfinite(commanded).all()),
             "all_measurements_finite": bool(np.isfinite(measured).all()),
+            "held_final_measurement_is_finite": bool(np.isfinite(held_final).all()),
             "final_command_matches_saved_plan": bool(
                 np.allclose(commanded[-1], replay.positions[-1], atol=1e-12, rtol=0.0)
             ),
