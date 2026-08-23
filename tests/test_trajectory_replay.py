@@ -295,7 +295,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("target.get_masses()", script)
         self.assertIn('UsdPhysics.DriveAPI.Get(joint_prim, "linear")', script)
         self.assertIn("ComputeBoundMaterial(", script)
-        self.assertIn('Tf.Token("physics")', script)
+        self.assertIn('ComputeBoundMaterial(\n                    "physics"', script)
         self.assertIn('record_physics_sample("close")', script)
         self.assertIn('record_physics_sample("hold")', script)
         self.assertIn('output / "retention_finger_gap_m.npy"', script)

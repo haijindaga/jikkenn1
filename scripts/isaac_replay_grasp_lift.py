@@ -123,7 +123,7 @@ try:
     from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from pxr import PhysxSchema, Tf, Usd, UsdPhysics, UsdShade
+    from pxr import PhysxSchema, Usd, UsdPhysics, UsdShade
 
     from panda_handover.geometry import look_at_quaternion_world
 
@@ -295,7 +295,7 @@ try:
                 continue
             material, binding_relationship = (
                 UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(
-                    Tf.Token("physics")
+                    "physics"
                 )
             )
             material_prim = material.GetPrim() if material else None
