@@ -22,6 +22,18 @@ class PregraspReplay:
     plan_report: dict
 
 
+@dataclass(frozen=True)
+class GraspLiftReplay:
+    """Validated cuRobo approach, grasp, and lift trajectories for Isaac Sim."""
+
+    joint_names: tuple[str, ...]
+    phase_positions: dict[str, np.ndarray]
+    phase_segment_dt_s: dict[str, np.ndarray]
+    capture_joint_names: tuple[str, ...]
+    capture_joint_positions: np.ndarray
+    plan_report: dict
+
+
 def _load_json(path: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -130,6 +142,93 @@ def load_pregrasp_replay(
         capture_joint_names=capture_names,
         capture_joint_positions=capture_positions,
         capture_indices=capture_indices,
+        plan_report=report,
+    )
+
+
+def load_grasp_lift_replay(
+    capture_directory: str | Path,
+    plan_directory: str | Path,
+    *,
+    continuity_tolerance: float = 2e-3,
+) -> GraspLiftReplay:
+    """Load three planned phases without authorizing non-simulation execution."""
+
+    capture = Path(capture_directory)
+    plan = Path(plan_directory)
+    report = _load_json(plan / "grasp_lift_plan_check.json")
+    robot_report = _load_json(capture / "robot_state.json")
+    result = report.get("result", {})
+    checks = report.get("automatic_checks", {})
+    safety = report.get("safety", {})
+    if report.get("status") != "success" or not result.get("planner_reported_success"):
+        raise ValueError("grasp/lift report does not contain a successful cuRobo plan")
+    if not checks or not all(bool(value) for value in checks.values()):
+        raise ValueError("grasp/lift plan automatic checks did not all pass")
+    if safety.get("simulation_only") is not True:
+        raise ValueError("only an explicitly simulation-only grasp/lift plan is accepted")
+    if safety.get("final_approach_planned") is not True or safety.get("lift_planned") is not True:
+        raise ValueError("grasp/lift plan is missing required phases")
+    if safety.get("trajectory_executed") is not False:
+        raise ValueError("source plan unexpectedly claims prior execution")
+
+    joint_names = tuple(str(name) for name in result.get("trajectory_active_joint_names", ()))
+    if not joint_names or len(set(joint_names)) != len(joint_names):
+        raise ValueError("trajectory active joint names must be non-empty and unique")
+    phase_positions: dict[str, np.ndarray] = {}
+    phase_dt: dict[str, np.ndarray] = {}
+    for phase in ("approach", "grasp", "lift"):
+        positions = np.load(plan / f"{phase}_trajectory_position.npy").astype(
+            np.float64, copy=False
+        )
+        if positions.ndim != 2 or positions.shape[1] != len(joint_names):
+            raise ValueError(f"{phase} trajectory shape does not match joint names")
+        if positions.shape[0] < 2 or not np.isfinite(positions).all():
+            raise ValueError(f"{phase} trajectory must contain finite waypoints")
+        phase_positions[phase] = positions
+        phase_dt[phase] = normalize_segment_dt(
+            np.load(plan / f"{phase}_trajectory_dt_s.npy"), positions.shape[0]
+        )
+
+    capture_names = tuple(str(name) for name in robot_report.get("joint_names", ()))
+    capture_positions = np.load(capture / "panda_joint_positions.npy").astype(
+        np.float64, copy=False
+    )
+    if not capture_names or capture_positions.shape != (len(capture_names),):
+        raise ValueError("capture joint names and positions do not match")
+    name_to_capture = {name: index for index, name in enumerate(capture_names)}
+    missing = [name for name in joint_names if name not in name_to_capture]
+    if missing:
+        raise ValueError(f"planned joints are missing from capture: {missing}")
+    capture_active = capture_positions[[name_to_capture[name] for name in joint_names]]
+    if not np.allclose(
+        phase_positions["approach"][0],
+        capture_active,
+        atol=continuity_tolerance,
+        rtol=0.0,
+    ):
+        raise ValueError("approach trajectory does not start at captured state")
+    if not np.allclose(
+        phase_positions["grasp"][0],
+        phase_positions["approach"][-1],
+        atol=continuity_tolerance,
+        rtol=0.0,
+    ):
+        raise ValueError("grasp trajectory is discontinuous from approach")
+    if not np.allclose(
+        phase_positions["lift"][0],
+        phase_positions["grasp"][-1],
+        atol=continuity_tolerance,
+        rtol=0.0,
+    ):
+        raise ValueError("lift trajectory is discontinuous from grasp")
+
+    return GraspLiftReplay(
+        joint_names=joint_names,
+        phase_positions=phase_positions,
+        phase_segment_dt_s=phase_dt,
+        capture_joint_names=capture_names,
+        capture_joint_positions=capture_positions,
         plan_report=report,
     )
 
