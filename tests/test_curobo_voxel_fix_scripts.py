@@ -33,6 +33,49 @@ class CuroboVoxelFixScriptTests(unittest.TestCase):
                 trajectory, "position", required=True
             )
 
+    def test_full_trajectory_uses_official_name_aware_active_conversion(self):
+        full_names = [f"joint_{index}" for index in range(9)]
+        active_names = full_names[:7]
+        full = SimpleNamespace(
+            position=np.zeros((1, 1, 41, 9), dtype=np.float32),
+            joint_names=full_names,
+        )
+
+        class FakeTrajoptSolver:
+            def __init__(self):
+                self.called = False
+
+            def get_active_js(self, trajectory):
+                self.called = True
+                return SimpleNamespace(
+                    position=trajectory.position[..., :7],
+                    joint_names=active_names,
+                )
+
+        solver = FakeTrajoptSolver()
+        planner = SimpleNamespace(
+            trajopt_solver=solver,
+            joint_names=active_names,
+        )
+        active, recorded_full_names = PREGRASP_MODULE._get_active_trajectory(
+            planner, full
+        )
+        self.assertTrue(solver.called)
+        self.assertEqual(active.position.shape, (1, 1, 41, 7))
+        self.assertEqual(recorded_full_names, full_names)
+
+    def test_full_trajectory_rejects_missing_name_column(self):
+        trajectory = SimpleNamespace(
+            position=np.zeros((1, 1, 41, 9), dtype=np.float32),
+            joint_names=[f"joint_{index}" for index in range(8)],
+        )
+        planner = SimpleNamespace(
+            trajopt_solver=SimpleNamespace(),
+            joint_names=[f"joint_{index}" for index in range(7)],
+        )
+        with self.assertRaisesRegex(RuntimeError, "do not match"):
+            PREGRASP_MODULE._get_active_trajectory(planner, trajectory)
+
     def test_patch_is_exactly_the_six_issue_699_rounding_changes(self):
         patch = (
             PROJECT / "patches" / "curobo" / "057a96f-voxel-grid-round.patch"

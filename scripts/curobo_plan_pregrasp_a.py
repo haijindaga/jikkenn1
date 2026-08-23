@@ -103,6 +103,35 @@ def _json_tensor(value: Any) -> Any:
     return array.tolist()
 
 
+def _get_active_trajectory(planner: Any, trajectory: Any) -> tuple[Any, list[str]]:
+    """Use cuRobo's name-aware full-to-active JointState conversion."""
+    raw_position = np.asarray(_cpu_numpy(getattr(trajectory, "position", None)))
+    raw_joint_names = getattr(trajectory, "joint_names", None)
+    if raw_position.ndim < 2:
+        raise RuntimeError(f"full trajectory position has invalid shape {raw_position.shape}")
+    if raw_joint_names is None:
+        raise RuntimeError("full trajectory has no joint_names")
+    full_joint_names = [str(name) for name in raw_joint_names]
+    if len(full_joint_names) != raw_position.shape[-1]:
+        raise RuntimeError(
+            "full trajectory joint_names do not match its position columns: "
+            f"{len(full_joint_names)} vs {raw_position.shape[-1]}"
+        )
+    if len(set(full_joint_names)) != len(full_joint_names):
+        raise RuntimeError("full trajectory joint_names contain duplicates")
+
+    active = planner.trajopt_solver.get_active_js(trajectory)
+    active_joint_names = [str(name) for name in (active.joint_names or ())]
+    if active_joint_names != list(planner.joint_names):
+        raise RuntimeError(
+            "cuRobo active trajectory joint order does not match the planner"
+        )
+    active_position = np.asarray(_cpu_numpy(active.position))
+    if active_position.shape[-1] != len(active_joint_names):
+        raise RuntimeError("active trajectory columns do not match its joint_names")
+    return active, full_joint_names
+
+
 def _resolved_report_view_matches(report: dict[str, Any], capture: Path) -> bool:
     expected = capture.resolve()
     for view in report.get("views", []):
@@ -416,6 +445,7 @@ def main() -> int:
     selected_goalset = None
     trajectory_checks: dict[str, bool] = {}
     trajectory_waypoints = 0
+    full_trajectory_joint_names = None
     if planner_success:
         if result.goalset_index is None and len(goalset.scores) == 1:
             selected_goalset = 0
@@ -425,7 +455,10 @@ def main() -> int:
             selected_goalset = int(_cpu_numpy(result.goalset_index).reshape(-1)[0])
         if not 0 <= selected_goalset < len(goalset.scores):
             raise RuntimeError("cuRobo returned an invalid goalset index")
-        trajectory = result.get_interpolated_plan()
+        full_trajectory = result.get_interpolated_plan()
+        trajectory, full_trajectory_joint_names = _get_active_trajectory(
+            planner, full_trajectory
+        )
         position = _trajectory_field(trajectory, "position", required=True)
         velocity = _trajectory_field(trajectory, "velocity", required=True)
         acceleration = _trajectory_field(trajectory, "acceleration", required=True)
@@ -567,6 +600,8 @@ def main() -> int:
                 else None
             ),
             "trajectory_waypoints": trajectory_waypoints,
+            "trajectory_active_joint_names": list(planner.joint_names),
+            "trajectory_full_joint_names": full_trajectory_joint_names,
             "wall_time_s": elapsed_s,
             "curobo_total_time_s": _json_tensor(
                 getattr(result, "total_time", None) if result is not None else None
