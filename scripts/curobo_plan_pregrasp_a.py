@@ -96,9 +96,11 @@ def main() -> int:
 
     from panda_handover.curobo_bridge import select_named_joint_positions
     from panda_handover.curobo_planning import (
+        classify_pregrasp_failure,
         load_conservative_esdf,
         prepare_pregrasp_goalset,
         rotation_matrix_to_quaternion_wxyz,
+        summarize_ik_result_arrays,
         validate_voxel_fix_report,
     )
 
@@ -154,8 +156,10 @@ def main() -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("cuRobo pre-grasp planning requires CUDA")
     from curobo._src.geom.types import SceneCfg, VoxelGrid
+    from curobo._src.geom.collision.buffer_collision import CollisionBuffer
     from curobo._src.motion.motion_planner import MotionPlanner
     from curobo._src.motion.motion_planner_cfg import MotionPlannerCfg
+    from curobo._src.solver.solver_ik import IKSolver
     from curobo._src.state.state_joint import JointState
     from curobo._src.types.device_cfg import DeviceCfg
     from curobo._src.types.tool_pose import GoalToolPose
@@ -209,6 +213,111 @@ def main() -> int:
         quaternion=quaternions_gpu[None, None, None, :, :],
     )
 
+    # Query the same collision spheres and ESDF used by cuRobo's optimizers.
+    # Zero activation measures actual overlap; 10 mm matches the optimizer cost.
+    start_kinematics = planner.compute_kinematics(current_state)
+    start_spheres = start_kinematics.robot_spheres
+    if start_spheres is None:
+        raise RuntimeError("cuRobo Franka model returned no collision spheres")
+    collision_buffer = CollisionBuffer.from_shape(start_spheres.shape, device_cfg)
+    collision_weight = torch.tensor([1.0], device=device_cfg.device, dtype=torch.float32)
+
+    def query_start_collision(activation_distance_m: float) -> np.ndarray:
+        collision_buffer.zero_()
+        values = planner.scene_collision_checker.get_sphere_collision(
+            start_kinematics,
+            collision_buffer,
+            collision_weight,
+            torch.tensor(
+                [activation_distance_m], device=device_cfg.device, dtype=torch.float32
+            ),
+        )
+        torch.cuda.synchronize(device_cfg.device)
+        return _cpu_numpy(values).astype(np.float32, copy=False)
+
+    start_penetration_cost = query_start_collision(0.0)
+    start_optimizer_cost = query_start_collision(0.01)
+
+    # Reproduce the exact first stage of MotionPlanner._plan_pose_goalset.  Reset
+    # before planning so this diagnostic does not consume or change planner seeds.
+    planner.reset_seed()
+    world_ik_result = planner.ik_solver.solve_pose(
+        goals,
+        return_seeds=planner.trajopt_solver.config.num_seeds,
+        current_state=current_state,
+    )
+    world_ik_summary = summarize_ik_result_arrays(
+        _cpu_numpy(world_ik_result.success),
+        feasible=(
+            _cpu_numpy(world_ik_result.feasible)
+            if world_ik_result.feasible is not None
+            else None
+        ),
+        position_error=(
+            _cpu_numpy(world_ik_result.position_error)
+            if world_ik_result.position_error is not None
+            else None
+        ),
+        rotation_error=(
+            _cpu_numpy(world_ik_result.rotation_error)
+            if world_ik_result.rotation_error is not None
+            else None
+        ),
+        goalset_index=(
+            _cpu_numpy(world_ik_result.goalset_index)
+            if world_ik_result.goalset_index is not None
+            else None
+        ),
+    )
+    planner.reset_seed()
+
+    # If collision-aware IK has no solution, run the official IK solver again
+    # without a world scene. Joint limits and self-collision remain enabled. This
+    # is a diagnosis-only control and can never produce an executable artifact.
+    free_world_ik_summary = None
+    free_world_ik_solver = None
+    if world_ik_summary["success_count"] == 0:
+        free_world_cfg = MotionPlannerCfg.create(
+            robot=args.robot,
+            scene_model=None,
+            device_cfg=device_cfg,
+            num_ik_seeds=16,
+            num_trajopt_seeds=2,
+            optimizer_collision_activation_distance=0.01,
+            use_cuda_graph=False,
+            random_seed=123,
+            max_goalset=len(goalset.scores),
+        )
+        free_world_ik_solver = IKSolver(free_world_cfg.ik_solver_config, None)
+        free_world_result = free_world_ik_solver.solve_pose(
+            goals,
+            return_seeds=2,
+            current_state=current_state,
+        )
+        free_world_ik_summary = summarize_ik_result_arrays(
+            _cpu_numpy(free_world_result.success),
+            feasible=(
+                _cpu_numpy(free_world_result.feasible)
+                if free_world_result.feasible is not None
+                else None
+            ),
+            position_error=(
+                _cpu_numpy(free_world_result.position_error)
+                if free_world_result.position_error is not None
+                else None
+            ),
+            rotation_error=(
+                _cpu_numpy(free_world_result.rotation_error)
+                if free_world_result.rotation_error is not None
+                else None
+            ),
+            goalset_index=(
+                _cpu_numpy(free_world_result.goalset_index)
+                if free_world_result.goalset_index is not None
+                else None
+            ),
+        )
+
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     np.save(output / "grasp_transforms_robot_base.npy", goalset.grasp_robot_base)
@@ -216,6 +325,9 @@ def main() -> int:
     np.save(output / "candidate_scores.npy", goalset.scores)
     np.save(output / "source_candidate_indices.npy", goalset.candidate_indices)
     np.save(output / "start_joint_positions.npy", start_positions)
+    np.save(output / "start_robot_spheres.npy", _cpu_numpy(start_spheres))
+    np.save(output / "start_penetration_cost.npy", start_penetration_cost)
+    np.save(output / "start_optimizer_collision_cost.npy", start_optimizer_cost)
 
     started = time.monotonic()
     result = planner.plan_pose(
@@ -229,6 +341,8 @@ def main() -> int:
         and result.success is not None
         and result.success.any().item()
     )
+    start_penetrating_sphere_count = int(np.count_nonzero(start_penetration_cost > 0.0))
+    start_activation_sphere_count = int(np.count_nonzero(start_optimizer_cost > 0.0))
     selected_goalset = None
     trajectory_checks: dict[str, bool] = {}
     trajectory_waypoints = 0
@@ -271,6 +385,17 @@ def main() -> int:
         if getattr(trajectory, "dt", None) is not None:
             np.save(output / "trajectory_dt_s.npy", _cpu_numpy(trajectory.dt))
 
+    failure_stage = classify_pregrasp_failure(
+        planner_success=planner_success,
+        world_ik_success_count=int(world_ik_summary["success_count"]),
+        free_world_ik_success_count=(
+            int(free_world_ik_summary["success_count"])
+            if free_world_ik_summary is not None
+            else None
+        ),
+        start_penetrating_sphere_count=start_penetrating_sphere_count,
+        planner_returned_result=result is not None,
+    )
     status = "success" if planner_success else "no_safe_pregrasp_plan"
     report = {
         "status": status,
@@ -341,6 +466,18 @@ def main() -> int:
             "rotation_error_rad": _json_tensor(
                 getattr(result, "rotation_error", None) if result is not None else None
             ),
+            "failure_stage": failure_stage,
+        },
+        "diagnostics": {
+            "collision_aware_ik": world_ik_summary,
+            "ik_without_world_scene_control": free_world_ik_summary,
+            "start_state_vs_conservative_esdf": {
+                "robot_collision_sphere_count": int(start_spheres.shape[-2]),
+                "penetrating_sphere_count_activation_0m": start_penetrating_sphere_count,
+                "active_sphere_count_activation_0_01m": start_activation_sphere_count,
+                "maximum_penetration_cost_m": float(np.max(start_penetration_cost)),
+                "maximum_optimizer_collision_cost_m": float(np.max(start_optimizer_cost)),
+            },
         },
         "automatic_checks": trajectory_checks,
         "safety": {
@@ -360,12 +497,17 @@ def main() -> int:
             "manual_review_required": True,
         },
         "next_gate": (
-            "Inspect the saved pre-grasp trajectory in Isaac Sim. Final linear contact "
-            "approach requires a separately reviewed non-target collision sweep."
+            "If planning failed, review diagnostics before changing the ESDF or solver. "
+            "If it succeeded, inspect the saved pre-grasp trajectory in Isaac Sim. "
+            "Final linear contact approach requires a separately reviewed non-target "
+            "collision sweep."
         ),
     }
     report_path = output / "pregrasp_plan_check.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if free_world_ik_solver is not None:
+        free_world_ik_solver.destroy()
+    planner.destroy()
     print(json.dumps(report, indent=2))
     print(f"saved: {report_path}")
     return 0 if planner_success else 2

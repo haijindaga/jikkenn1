@@ -44,6 +44,72 @@ class PregraspGoalset:
     candidate_indices: np.ndarray
 
 
+def summarize_ik_result_arrays(
+    success: np.ndarray,
+    *,
+    feasible: np.ndarray | None = None,
+    position_error: np.ndarray | None = None,
+    rotation_error: np.ndarray | None = None,
+    goalset_index: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Build a small, JSON-safe diagnostic from official cuRobo IK fields."""
+    success_array = np.asarray(success, dtype=bool).reshape(-1)
+    summary: dict[str, Any] = {
+        "returned_seed_count": int(success_array.size),
+        "success_count": int(np.count_nonzero(success_array)),
+    }
+
+    def finite_minimum(value: np.ndarray | None) -> float | None:
+        if value is None:
+            return None
+        array = np.asarray(value, dtype=np.float64).reshape(-1)
+        finite = array[np.isfinite(array)]
+        return float(np.min(finite)) if finite.size else None
+
+    if feasible is None:
+        summary["feasible_count"] = None
+    else:
+        feasible_array = np.asarray(feasible, dtype=bool).reshape(-1)
+        summary["feasible_count"] = int(np.count_nonzero(feasible_array))
+    summary["minimum_position_error_m"] = finite_minimum(position_error)
+    summary["minimum_rotation_error_rad"] = finite_minimum(rotation_error)
+
+    if goalset_index is None:
+        summary["successful_goalset_indices"] = []
+    else:
+        indices = np.asarray(goalset_index).reshape(-1)
+        if indices.size != success_array.size:
+            raise ValueError("goalset_index and success must have the same size")
+        summary["successful_goalset_indices"] = [
+            int(value) for value in indices[success_array]
+        ]
+    return summary
+
+
+def classify_pregrasp_failure(
+    *,
+    planner_success: bool,
+    world_ik_success_count: int,
+    free_world_ik_success_count: int | None,
+    start_penetrating_sphere_count: int,
+    planner_returned_result: bool,
+) -> str:
+    """Classify a failed planning stage without changing any planner parameter."""
+    if planner_success:
+        return "plan_succeeded"
+    if world_ik_success_count == 0:
+        if free_world_ik_success_count is None:
+            return "collision_aware_ik_failed_without_control_measurement"
+        if free_world_ik_success_count > 0:
+            if start_penetrating_sphere_count > 0:
+                return "world_collision_rejects_ik_and_start_state_penetrates_map"
+            return "world_collision_rejects_all_pregrasp_ik"
+        return "pregrasp_ik_fails_even_without_world_collision"
+    if not planner_returned_result:
+        return "planner_ik_reproduction_mismatch"
+    return "trajectory_optimization_failed_after_collision_aware_ik"
+
+
 def _require_rigid_transform(transform: np.ndarray, *, label: str) -> np.ndarray:
     value = np.asarray(transform, dtype=np.float64)
     if value.shape != (4, 4):

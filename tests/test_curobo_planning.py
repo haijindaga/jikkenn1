@@ -8,9 +8,11 @@ import numpy as np
 from panda_handover.curobo_planning import (
     CUROBO_COMMIT,
     CUROBO_VOXEL_PATCH_SHA256,
+    classify_pregrasp_failure,
     load_conservative_esdf,
     prepare_pregrasp_goalset,
     rotation_matrix_to_quaternion_wxyz,
+    summarize_ik_result_arrays,
     validate_voxel_fix_report,
 )
 
@@ -43,6 +45,42 @@ def _backend_a_report(shape=(2, 3, 4), voxel=0.1):
 
 
 class CuroboPlanningTests(unittest.TestCase):
+    def test_ik_summary_counts_official_result_fields(self):
+        summary = summarize_ik_result_arrays(
+            np.array([[False, True, True]]),
+            feasible=np.array([[True, True, False]]),
+            position_error=np.array([[0.2, 0.003, np.inf]]),
+            rotation_error=np.array([[0.4, 0.02, 0.1]]),
+            goalset_index=np.array([[4, 2, 7]]),
+        )
+        self.assertEqual(summary["returned_seed_count"], 3)
+        self.assertEqual(summary["success_count"], 2)
+        self.assertEqual(summary["feasible_count"], 2)
+        self.assertEqual(summary["successful_goalset_indices"], [2, 7])
+        self.assertAlmostEqual(summary["minimum_position_error_m"], 0.003)
+
+    def test_failure_classifier_separates_world_collision_from_geometric_ik(self):
+        self.assertEqual(
+            classify_pregrasp_failure(
+                planner_success=False,
+                world_ik_success_count=0,
+                free_world_ik_success_count=2,
+                start_penetrating_sphere_count=3,
+                planner_returned_result=False,
+            ),
+            "world_collision_rejects_ik_and_start_state_penetrates_map",
+        )
+        self.assertEqual(
+            classify_pregrasp_failure(
+                planner_success=False,
+                world_ik_success_count=0,
+                free_world_ik_success_count=0,
+                start_penetrating_sphere_count=0,
+                planner_returned_result=False,
+            ),
+            "pregrasp_ik_fails_even_without_world_collision",
+        )
+
     def test_backend_a_loader_enforces_sign_and_grid_contract(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
