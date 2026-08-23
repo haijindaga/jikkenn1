@@ -20,7 +20,6 @@ from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
-YCB_KNIFE_PHYSICS_ASSET = "/Isaac/Props/YCB/Axis_Aligned_Physics/032_knife.usd"
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,11 +51,14 @@ def parse_args() -> argparse.Namespace:
         help="Capture directory name; use a unique name for each viewpoint",
     )
     parser.add_argument(
-        "--scene-target",
-        choices=("block", "ycb_knife"),
-        default="block",
-        help="Use the original block or NVIDIA's physics-ready YCB 032 knife asset",
+        "--scene-usd",
+        type=Path,
+        help="Open an authored USD scene instead of generating the legacy block scene",
     )
+    parser.add_argument("--panda-prim", default="/World/Panda")
+    parser.add_argument("--table-prim", default="/World/Table")
+    parser.add_argument("--target-prim", default="/World/Objects/Target")
+    parser.add_argument("--camera-prim", default="/World/camera_0")
     parser.add_argument("--sam3-prompt", help="Optional short noun phrase, for example 'blue block'")
     parser.add_argument(
         "--sam3-part-prompt",
@@ -91,10 +93,11 @@ try:
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import FixedCuboid
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
-    from isaacsim.core.utils.prims import create_prim
+    from isaacsim.core.prims import SingleArticulation
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from isaacsim.storage.native import get_assets_root_path
+    from isaacsim.core.experimental.utils import stage as stage_utils
+    from pxr import PhysxSchema, Usd, UsdPhysics
 
     from panda_handover.capture import RgbdCapture
     from panda_handover.geometry import (
@@ -104,113 +107,163 @@ try:
     )
     from panda_handover.robot_state import RobotStateCapture
 
-    world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 60.0, rendering_dt=1.0 / 30.0)
-    world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
-    panda = world.scene.add(
-        Franka(
-            prim_path="/World/Panda",
-            name="panda",
-            position=np.asarray(LAYOUT.robot_base_position_m),
+    scene_usd = None
+    if args.scene_usd is not None:
+        scene_usd = args.scene_usd.expanduser().resolve()
+        if not scene_usd.is_file():
+            raise FileNotFoundError(f"authored scene USD does not exist: {scene_usd}")
+        if scene_usd.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+            raise ValueError("--scene-usd must end in .usd, .usda, or .usdc")
+        stage_opened, stage = stage_utils.open_stage(str(scene_usd))
+        if not stage_opened or stage is None:
+            raise RuntimeError(f"Isaac Sim could not open authored scene: {scene_usd}")
+        required_prim_paths = (
+            args.panda_prim,
+            args.table_prim,
+            args.target_prim,
+            args.camera_prim,
         )
-    )
+        missing_prims = [
+            prim_path
+            for prim_path in required_prim_paths
+            if not stage.GetPrimAtPath(prim_path).IsValid()
+        ]
+        if missing_prims:
+            raise RuntimeError(
+                "authored scene is missing required prims: " + ", ".join(missing_prims)
+            )
 
-    # Follow the Isaac Lab Franka lift convention: the robot mount and tabletop
-    # share z=0 and the room floor is below them.  A thin fixed tabletop avoids
-    # filling the robot workspace with the old floor-to-table solid cuboid.
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Table",
-            name="table",
-            position=np.asarray(LAYOUT.table_center_m),
-            scale=np.asarray(LAYOUT.table_size_m),
-            color=np.array([0.45, 0.32, 0.20]),
+    world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 60.0, rendering_dt=1.0 / 30.0)
+    if scene_usd is None:
+        world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
+        panda = world.scene.add(
+            Franka(
+                prim_path=args.panda_prim,
+                name="panda",
+                position=np.asarray(LAYOUT.robot_base_position_m),
+            )
         )
-    )
-    if args.scene_target == "block":
+
+        # Follow the Isaac Lab Franka lift convention: the robot mount and
+        # tabletop share z=0 and the room floor is below them.
         world.scene.add(
             FixedCuboid(
-                prim_path="/World/TestObject",
+                prim_path=args.table_prim,
+                name="table",
+                position=np.asarray(LAYOUT.table_center_m),
+                scale=np.asarray(LAYOUT.table_size_m),
+                color=np.array([0.45, 0.32, 0.20]),
+            )
+        )
+        legacy_target_prim = "/World/TestObject"
+        world.scene.add(
+            FixedCuboid(
+                prim_path=legacy_target_prim,
                 name="test_object",
                 position=np.asarray(LAYOUT.target_center_m),
                 scale=np.asarray(LAYOUT.target_size_m),
                 color=np.array([0.1, 0.5, 0.9]),
             )
         )
+        target_prim_path = legacy_target_prim
         target_asset = {
             "kind": "fixed_cuboid",
             "source": "Isaac Sim FixedCuboid",
             "usd_path": None,
             "physics_ready": False,
         }
+        world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Obstacle",
+                name="obstacle",
+                position=np.asarray(LAYOUT.obstacle_center_m),
+                scale=np.asarray(LAYOUT.obstacle_size_m),
+                color=np.array([0.9, 0.2, 0.1]),
+            )
+        )
     else:
-        assets_root_path = get_assets_root_path()
-        if assets_root_path is None:
-            raise RuntimeError("Isaac Sim asset root is unavailable; cannot load the official YCB knife")
-        knife_usd_path = assets_root_path.rstrip("/") + YCB_KNIFE_PHYSICS_ASSET
-        # Axis_Aligned_Physics assets already carry RigidBodyAPI and collision.
-        # Spawn above the table and let PhysX establish the resting pose.
-        knife_spawn_position = (
-            LAYOUT.target_center_m[0],
-            LAYOUT.target_center_m[1],
-            LAYOUT.table_top_z_m + 0.08,
+        panda = world.scene.add(
+            SingleArticulation(
+                prim_path=args.panda_prim,
+                name="panda",
+            )
         )
-        create_prim(
-            prim_path="/World/TestObject",
-            usd_path=knife_usd_path,
-            translation=knife_spawn_position,
-            orientation=(1.0, 0.0, 0.0, 0.0),
-        )
+        target_prim_path = args.target_prim
+        target_prim = stage.GetPrimAtPath(target_prim_path)
+        target_prims = tuple(Usd.PrimRange(target_prim))
+        physics_apis = {
+            "rigid_body": any(
+                prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in target_prims
+            ),
+            "collision": any(
+                prim.HasAPI(UsdPhysics.CollisionAPI)
+                or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
+                for prim in target_prims
+            ),
+            "mass": any(prim.HasAPI(UsdPhysics.MassAPI) for prim in target_prims),
+        }
+        if not all(physics_apis.values()):
+            missing_apis = [name for name, present in physics_apis.items() if not present]
+            raise RuntimeError(
+                f"saved-scene target {target_prim_path} is not physics-ready; "
+                f"missing USD APIs: {missing_apis}"
+            )
         target_asset = {
-            "kind": "ycb_knife",
-            "source": "NVIDIA Isaac Sim YCB Axis_Aligned_Physics",
-            "usd_path": knife_usd_path,
-            "relative_asset_path": YCB_KNIFE_PHYSICS_ASSET,
+            "kind": "authored_usd_scene_object",
+            "source": str(scene_usd),
+            "prim_path": target_prim_path,
             "physics_ready": True,
-            "spawn_position_m": list(knife_spawn_position),
+            "physics_apis": physics_apis,
             "settled_by_physics": True,
         }
-    world.scene.add(
-        FixedCuboid(
-            prim_path="/World/Obstacle",
-            name="obstacle",
-            position=np.asarray(LAYOUT.obstacle_center_m),
-            scale=np.asarray(LAYOUT.obstacle_size_m),
-            color=np.array([0.9, 0.2, 0.1]),
-        )
-    )
 
     camera_position = np.asarray(args.camera_position, dtype=np.float64)
     camera_target = np.asarray(args.camera_target, dtype=np.float64)
     camera_orientation = look_at_quaternion_world(camera_position, camera_target)
     width, height = args.resolution
-    camera = Camera(
-        prim_path=f"/World/{args.camera_name}",
-        position=camera_position,
-        orientation=camera_orientation,
-        frequency=30,
-        resolution=(width, height),
-    )
+    if scene_usd is None:
+        camera = Camera(
+            prim_path=f"/World/{args.camera_name}",
+            position=camera_position,
+            orientation=camera_orientation,
+            frequency=30,
+            resolution=(width, height),
+        )
+    else:
+        camera = Camera(
+            prim_path=args.camera_prim,
+            frequency=30,
+            resolution=(width, height),
+        )
 
     world.reset()
     camera.initialize()
-    camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
-    camera.set_clipping_range(0.05, 3.0)
-    aperture = float(camera.get_horizontal_aperture())
-    focal_length = aperture / (2.0 * np.tan(np.deg2rad(args.horizontal_fov) / 2.0))
-    camera.set_focal_length(focal_length)
+    if scene_usd is None:
+        camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
+        camera.set_clipping_range(0.05, 3.0)
+        aperture = float(camera.get_horizontal_aperture())
+        focal_length = aperture / (2.0 * np.tan(np.deg2rad(args.horizontal_fov) / 2.0))
+        camera.set_focal_length(focal_length)
     camera.add_distance_to_image_plane_to_frame()
 
     for _ in range(args.warmup_frames):
         world.step(render=True)
 
     target_aabb = np.asarray(
-        compute_aabb(create_bbox_cache(), "/World/TestObject", include_children=True),
+        compute_aabb(create_bbox_cache(), target_prim_path, include_children=True),
         dtype=np.float64,
     )
     if target_aabb.shape != (6,) or not np.all(np.isfinite(target_aabb)):
         raise RuntimeError(f"invalid target AABB after settling: {target_aabb}")
-    table_min = np.asarray(LAYOUT.table_center_m) - 0.5 * np.asarray(LAYOUT.table_size_m)
-    table_max = np.asarray(LAYOUT.table_center_m) + 0.5 * np.asarray(LAYOUT.table_size_m)
+    table_aabb = np.asarray(
+        compute_aabb(create_bbox_cache(), args.table_prim, include_children=True),
+        dtype=np.float64,
+    )
+    if table_aabb.shape != (6,) or not np.all(np.isfinite(table_aabb)):
+        raise RuntimeError(f"invalid table AABB: {table_aabb}")
+    table_min = table_aabb[:3]
+    table_max = table_aabb[3:]
+    table_top_z_m = float(table_max[2])
     target_extent = target_aabb[3:] - target_aabb[:3]
     runtime_target_checks = {
         "aabb_extent_is_positive": bool(np.all(target_extent > 1e-4)),
@@ -220,11 +273,12 @@ try:
             and target_aabb[1] >= table_min[1]
             and target_aabb[4] <= table_max[1]
         ),
-        "bottom_is_not_below_table": bool(target_aabb[2] >= LAYOUT.table_top_z_m - 0.01),
+        "bottom_is_not_below_table": bool(target_aabb[2] >= table_top_z_m - 0.01),
         "bottom_is_near_table_after_settling": bool(
-            target_aabb[2] <= LAYOUT.table_top_z_m + 0.03
+            target_aabb[2] <= table_top_z_m + 0.03
         ),
     }
+    target_asset["table_aabb_world_m"] = table_aabb.astype(float).tolist()
     target_asset["settled_aabb_world_m"] = target_aabb.astype(float).tolist()
     target_asset["settled_extent_m"] = target_extent.astype(float).tolist()
     target_asset["automatic_checks"] = runtime_target_checks
@@ -285,14 +339,48 @@ try:
     )
     saved = capture.save(args.output)
 
-    scene_layout_report = LAYOUT.validation_report()
-    scene_layout_report["runtime_target"] = target_asset
-    scene_layout_report["automatic_checks"]["runtime_target_is_valid"] = bool(
-        all(runtime_target_checks.values())
-    )
-    scene_layout_report["status"] = (
-        "success" if all(scene_layout_report["automatic_checks"].values()) else "failure"
-    )
+    if scene_usd is None:
+        scene_layout_report = LAYOUT.validation_report()
+        scene_layout_report["scene_source"] = {
+            "kind": "generated_legacy_smoke_scene",
+            "scene_usd": None,
+        }
+        scene_layout_report["runtime_target"] = target_asset
+        scene_layout_report["automatic_checks"]["runtime_target_is_valid"] = bool(
+            all(runtime_target_checks.values())
+        )
+        scene_layout_report["status"] = (
+            "success"
+            if all(scene_layout_report["automatic_checks"].values())
+            else "failure"
+        )
+    else:
+        scene_layout_report = {
+            "status": "success" if all(runtime_target_checks.values()) else "failure",
+            "reference": {
+                "scene_loading": "Isaac Sim 5.1 core experimental stage.open_stage",
+                "asset_composition": "OpenUSD referenced physics-ready target",
+            },
+            "scene_source": {
+                "kind": "authored_usd_scene",
+                "scene_usd": str(scene_usd),
+                "panda_prim": args.panda_prim,
+                "table_prim": args.table_prim,
+                "target_prim": target_prim_path,
+                "camera_prim": args.camera_prim,
+            },
+            "runtime_target": target_asset,
+            "automatic_checks": {
+                "saved_scene_opened": True,
+                "target_is_physics_ready": bool(all(physics_apis.values())),
+                "runtime_target_is_valid": bool(all(runtime_target_checks.values())),
+            },
+        }
+        scene_layout_report["status"] = (
+            "success"
+            if all(scene_layout_report["automatic_checks"].values())
+            else "failure"
+        )
     scene_layout_path = saved / "scene_layout.json"
     scene_layout_path.write_text(
         json.dumps(scene_layout_report, indent=2) + "\n", encoding="utf-8"
@@ -308,7 +396,7 @@ try:
         joint_names=tuple(str(name) for name in panda.dof_names),
         joint_positions=np.asarray(panda.get_joint_positions(), dtype=np.float64),
         T_world_robot_base=matrix_from_pose(robot_base_position, robot_base_orientation),
-        prim_path="/World/Panda",
+        prim_path=args.panda_prim,
     )
     robot_state_path = robot_state.save(saved, T_world_camera)
 
@@ -414,6 +502,8 @@ try:
                 "status": "success",
                 "capture_directory": str(saved),
                 "scene_layout": str(scene_layout_path),
+                "scene_usd": str(scene_usd) if scene_usd is not None else None,
+                "target_prim": target_prim_path,
                 "segmentation_directory": (
                     str(segmentation_directory) if segmentation_directory is not None else None
                 ),
@@ -443,6 +533,7 @@ except Exception as exc:
         json.dumps(
             {
                 "status": "failure",
+                "scene_usd": str(args.scene_usd) if args.scene_usd is not None else None,
                 "exception_type": type(exc).__name__,
                 "message": str(exc),
                 "traceback": failure_traceback,

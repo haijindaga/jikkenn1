@@ -43,13 +43,32 @@ class SceneLayoutTests(unittest.TestCase):
         )
         self.assertLess(script.index(path_registration), script.index(layout_import))
 
-    def test_capture_script_uses_official_physics_ready_ycb_knife(self):
+    def test_capture_script_loads_authored_physics_ready_target(self):
         script = (
             Path(__file__).resolve().parents[1] / "scripts" / "isaac_capture_smoke.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("/Isaac/Props/YCB/Axis_Aligned_Physics/032_knife.usd", script)
-        self.assertIn("get_assets_root_path()", script)
+        self.assertIn('"--scene-usd"', script)
+        self.assertIn("stage_utils.open_stage(str(scene_usd))", script)
+        self.assertIn("UsdPhysics.RigidBodyAPI", script)
+        self.assertIn("UsdPhysics.CollisionAPI", script)
+        self.assertIn("PhysxSchema.PhysxCollisionAPI", script)
+        self.assertIn("UsdPhysics.MassAPI", script)
         self.assertIn("include_children=True", script)
+        self.assertNotIn("032_knife.usd", script)
+
+    def test_scene_editor_follows_separate_usd_authoring_stage_contract(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_edit_tabletop_scene.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('create_prim("/World/Objects", prim_type="Scope")', script)
+        self.assertIn('"/World/Objects/Target"', script)
+        self.assertIn("stage_utils.save_stage(str(output))", script)
+        self.assertIn("get_timeline_interface().stop()", script)
+        self.assertIn('"--overwrite"', script)
+        self.assertIn("output already exists", script)
+        self.assertNotIn("Save Flattened", script)
 
 
 if __name__ == "__main__":
