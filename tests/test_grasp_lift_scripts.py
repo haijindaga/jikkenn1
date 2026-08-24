@@ -16,6 +16,12 @@ class GraspLiftScriptTests(unittest.TestCase):
             run_name="curobo_plan_grasp_lift_test",
         )
         cls.restore_triangle_faces = staticmethod(namespace["_restore_triangle_faces"])
+        cls.collision_sphere_link_names = staticmethod(
+            namespace["_collision_sphere_link_names"]
+        )
+        cls.phase_contact_diagnostics = staticmethod(
+            namespace["_phase_contact_diagnostics"]
+        )
 
     def test_flat_curobo_faces_are_restored_without_geometry_changes(self):
         vertices = np.array(
@@ -30,6 +36,45 @@ class GraspLiftScriptTests(unittest.TestCase):
             self.restore_triangle_faces(vertices, [0, 1])
         with self.assertRaises(RuntimeError):
             self.restore_triangle_faces(vertices, [0, 1, 3])
+
+    def test_collision_sphere_links_use_curobo_ownership_api(self):
+        class FakeKinematicsParams:
+            link_name_to_idx_map = {"arm": 0, "finger": 1}
+
+            @staticmethod
+            def get_sphere_index_from_link_name(link_name):
+                return {
+                    "arm": np.array([0, 1]),
+                    "finger": np.array([2]),
+                }[link_name]
+
+        names, indices = self.collision_sphere_link_names(FakeKinematicsParams(), 3)
+        self.assertEqual(names, ["arm", "arm", "finger"])
+        self.assertEqual(indices, {"arm": [0, 1], "finger": [2]})
+
+    def test_contact_diagnostics_preserve_link_and_nearest_surfaces(self):
+        costs = np.zeros((2, 1, 2), dtype=np.float32)
+        costs[1, 0, 1] = 0.002
+        spheres = np.zeros((2, 1, 2, 4), dtype=np.float32)
+        spheres[1, 0, 1] = [1.0, 0.0, 0.0, 0.1]
+        report = self.phase_contact_diagnostics(
+            "grasp",
+            costs,
+            spheres,
+            ["arm", "finger"],
+            np.array([[1.05, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=np.float32),
+            np.array([[1.2, 0.0, 0.0]], dtype=np.float32),
+        )
+        self.assertEqual(report["positive_count"], 1)
+        contact = report["contacts"][0]
+        self.assertEqual(contact["waypoint_index"], 1)
+        self.assertEqual(contact["sphere_index"], 1)
+        self.assertEqual(contact["link_name"], "finger")
+        self.assertAlmostEqual(
+            contact["nearest_observed_source_point"]["sphere_surface_clearance_m"],
+            -0.05,
+            places=5,
+        )
 
     def test_planner_uses_reviewed_official_grasp_and_attachment_apis(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
@@ -52,6 +97,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("grasp_contact_link_names", source)
         self.assertIn("planner.enable_link_collision(contact_collision_links)", source)
         self.assertIn("all_returned_waypoints_clear_with_all_robot_links_enabled", source)
+        self.assertIn("get_sphere_index_from_link_name", source)
+        self.assertIn("grasp_contact_diagnostics.json", source)
+        self.assertIn("_full_robot_spheres_world.npy", source)
         self.assertIn('"status": "planning_failed"', source)
         self.assertIn("GraspGenX/end2end/e2e_grasp_demo.py::init_planner", source)
         self.assertNotIn("num_ik_seeds=16", source)

@@ -175,6 +175,118 @@ def _normalized_quaternion(value: Any) -> np.ndarray:
     return quaternion.astype(np.float32)
 
 
+def _collision_sphere_link_names(
+    kinematics_params: Any, sphere_count: int
+) -> tuple[list[str], dict[str, list[int]]]:
+    """Resolve cuRobo collision-sphere ownership through its official API."""
+    link_index_map = getattr(kinematics_params, "link_name_to_idx_map", None)
+    if not isinstance(link_index_map, dict) or not link_index_map:
+        raise RuntimeError("cuRobo kinematics has no link_name_to_idx_map")
+    sphere_links: list[str | None] = [None] * sphere_count
+    link_sphere_indices: dict[str, list[int]] = {}
+    for link_name in link_index_map:
+        indices = _cpu_numpy(
+            kinematics_params.get_sphere_index_from_link_name(link_name)
+        ).astype(np.int64).reshape(-1)
+        if indices.size == 0:
+            continue
+        if int(indices.min()) < 0 or int(indices.max()) >= sphere_count:
+            raise RuntimeError(f"sphere index for {link_name} is outside the robot model")
+        index_list = [int(index) for index in indices]
+        link_sphere_indices[str(link_name)] = index_list
+        for index in index_list:
+            previous = sphere_links[index]
+            if previous is not None and previous != str(link_name):
+                raise RuntimeError(
+                    f"collision sphere {index} belongs to both {previous} and {link_name}"
+                )
+            sphere_links[index] = str(link_name)
+    missing = [index for index, name in enumerate(sphere_links) if name is None]
+    if missing:
+        raise RuntimeError(f"cuRobo collision spheres have no owning link: {missing}")
+    return [str(name) for name in sphere_links], link_sphere_indices
+
+
+def _nearest_surface_point(
+    points: np.ndarray, center: np.ndarray, radius: float
+) -> dict[str, Any]:
+    """Report the nearest measured surface point without inventing a class label."""
+    cloud = np.asarray(points, dtype=np.float32)
+    query = np.asarray(center, dtype=np.float32)
+    if cloud.ndim != 2 or cloud.shape[1] != 3 or len(cloud) == 0:
+        raise RuntimeError(f"diagnostic point cloud must be non-empty Nx3, got {cloud.shape}")
+    if query.shape != (3,) or not np.isfinite(query).all():
+        raise RuntimeError("diagnostic sphere center must be a finite xyz vector")
+    if not np.isfinite(radius) or radius < 0.0:
+        raise RuntimeError("diagnostic sphere radius must be finite and non-negative")
+    distance_squared = np.einsum("ij,ij->i", cloud - query, cloud - query)
+    nearest_index = int(np.argmin(distance_squared))
+    center_distance = float(np.sqrt(distance_squared[nearest_index]))
+    return {
+        "point_index": nearest_index,
+        "point_robot_base_m": cloud[nearest_index].astype(float).tolist(),
+        "center_distance_m": center_distance,
+        "sphere_surface_clearance_m": center_distance - float(radius),
+    }
+
+
+def _phase_contact_diagnostics(
+    phase_name: str,
+    costs: np.ndarray,
+    spheres: np.ndarray,
+    sphere_link_names: list[str],
+    observed_points: np.ndarray,
+    target_points: np.ndarray,
+) -> dict[str, Any]:
+    """Describe positive full-robot collision costs without relaxing the gate."""
+    cost_values = np.asarray(costs, dtype=np.float32)
+    sphere_values = np.asarray(spheres, dtype=np.float32)
+    if sphere_values.shape[:-1] != cost_values.shape or sphere_values.shape[-1] != 4:
+        raise RuntimeError(
+            f"{phase_name} collision costs {cost_values.shape} and spheres "
+            f"{sphere_values.shape} do not align"
+        )
+    if cost_values.shape[-1] != len(sphere_link_names):
+        raise RuntimeError(f"{phase_name} sphere-link mapping length changed")
+    contacts = []
+    for raw_index in np.argwhere(cost_values > 0.0):
+        index = tuple(int(value) for value in raw_index)
+        sphere_index = index[-1]
+        sphere = sphere_values[index]
+        observed_nearest = _nearest_surface_point(
+            observed_points, sphere[:3], float(sphere[3])
+        )
+        target_nearest = _nearest_surface_point(
+            target_points, sphere[:3], float(sphere[3])
+        )
+        observed_point = np.asarray(
+            observed_nearest["point_robot_base_m"], dtype=np.float32
+        )
+        observed_to_target = _nearest_surface_point(
+            target_points, observed_point, 0.0
+        )
+        contacts.append(
+            {
+                "tensor_index": list(index),
+                "waypoint_index": index[0],
+                "sphere_index": sphere_index,
+                "link_name": sphere_link_names[sphere_index],
+                "collision_cost_m": float(cost_values[index]),
+                "sphere_robot_base_xyz_radius_m": sphere.astype(float).tolist(),
+                "nearest_observed_source_point": observed_nearest,
+                "nearest_sam3_target_point": target_nearest,
+                "nearest_observed_point_to_sam3_target": observed_to_target,
+            }
+        )
+    return {
+        "phase": phase_name,
+        "cost_shape": list(cost_values.shape),
+        "positive_count": len(contacts),
+        "maximum_collision_cost_m": float(np.max(cost_values)),
+        "contacts": contacts,
+    }
+
+
 def _load_reviewed_pregrasp(directory: Path) -> tuple[dict[str, Any], np.ndarray]:
     report_path = directory / "pregrasp_plan_check.json"
     if not report_path.is_file():
@@ -489,6 +601,9 @@ def main() -> int:
     # at any returned waypoint.  The SAM3 target is absent by construction.
     planner.enable_link_collision(contact_collision_links)
     phase_penetration_costs = {}
+    phase_robot_spheres = {}
+    sphere_link_names = None
+    link_sphere_indices = None
     for phase_name, values in phase_reports.items():
         phase_state = JointState.from_position(
             torch.from_numpy(values["position"]).to(device_cfg.device),
@@ -497,6 +612,16 @@ def main() -> int:
         phase_kinematics = planner.compute_kinematics(phase_state)
         if phase_kinematics.robot_spheres is None:
             raise RuntimeError(f"cuRobo returned no {phase_name} collision spheres")
+        phase_spheres_np = _cpu_numpy(phase_kinematics.robot_spheres).astype(
+            np.float32, copy=False
+        )
+        np.save(output / f"{phase_name}_full_robot_spheres_world.npy", phase_spheres_np)
+        phase_robot_spheres[phase_name] = phase_spheres_np
+        if sphere_link_names is None:
+            sphere_link_names, link_sphere_indices = _collision_sphere_link_names(
+                planner.kinematics.config.kinematics_config,
+                int(phase_spheres_np.shape[-2]),
+            )
         phase_buffer = CollisionBuffer.from_shape(
             phase_kinematics.robot_spheres.shape, device_cfg
         )
@@ -511,6 +636,49 @@ def main() -> int:
         phase_cost_np = _cpu_numpy(phase_cost).astype(np.float32, copy=False)
         np.save(output / f"{phase_name}_full_robot_penetration_cost.npy", phase_cost_np)
         phase_penetration_costs[phase_name] = phase_cost_np
+
+    if sphere_link_names is None or link_sphere_indices is None:
+        raise RuntimeError("cuRobo returned no collision-sphere ownership mapping")
+    sphere_map_report = {
+        "reference": "cuRobo KinematicsParams.get_sphere_index_from_link_name",
+        "sphere_count": len(sphere_link_names),
+        "sphere_index_to_link_name": sphere_link_names,
+        "link_to_sphere_indices": link_sphere_indices,
+    }
+    (output / "collision_sphere_link_map.json").write_text(
+        json.dumps(sphere_map_report, indent=2) + "\n", encoding="utf-8"
+    )
+    phase_contact_reports = {
+        phase_name: _phase_contact_diagnostics(
+            phase_name,
+            phase_penetration_costs[phase_name],
+            phase_robot_spheres[phase_name],
+            sphere_link_names,
+            observed_scene.points_robot_base_m,
+            target_robot_base,
+        )
+        for phase_name in phase_reports
+    }
+    contact_report = {
+        "reference": {
+            "sphere_ownership": (
+                "cuRobo KinematicsParams.get_sphere_index_from_link_name"
+            ),
+            "collision_geometry": "the exact observed point-cloud mesh used by planner",
+            "nearest_point_diagnostic": (
+                "nearest measured source points used to build the meshes; these are "
+                "not triangle-level closest points"
+            ),
+        },
+        "interpretation_gate": (
+            "Distances are diagnostics only. Do not classify a contact as target or "
+            "environment and do not relax collision tolerances without review."
+        ),
+        "phases": phase_contact_reports,
+    }
+    (output / "grasp_contact_diagnostics.json").write_text(
+        json.dumps(contact_report, indent=2) + "\n", encoding="utf-8"
+    )
 
     selected_rank = int(_cpu_numpy(result.goalset_index).reshape(-1)[0])
     if not 0 <= selected_rank < len(grasp_transforms):
@@ -824,6 +992,18 @@ def main() -> int:
                 for name, values in phase_reports.items()
             },
             "transport": transport_report,
+        },
+        "diagnostics": {
+            "collision_sphere_link_map": str(
+                output / "collision_sphere_link_map.json"
+            ),
+            "grasp_contact_diagnostics": str(
+                output / "grasp_contact_diagnostics.json"
+            ),
+            "positive_full_robot_contacts_by_phase": {
+                name: values["positive_count"]
+                for name, values in phase_contact_reports.items()
+            },
         },
         "automatic_checks": {
             "issue_663_preflight_succeeded": preflight_success,
