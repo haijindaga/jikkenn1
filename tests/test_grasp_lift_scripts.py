@@ -22,6 +22,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         cls.phase_contact_diagnostics = staticmethod(
             namespace["_phase_contact_diagnostics"]
         )
+        cls.review_transient_finger_support_contact = staticmethod(
+            namespace["_review_transient_finger_support_contact"]
+        )
 
     def test_flat_curobo_faces_are_restored_without_geometry_changes(self):
         vertices = np.array(
@@ -76,6 +79,88 @@ class GraspLiftScriptTests(unittest.TestCase):
             places=5,
         )
 
+    def test_reviewed_transient_finger_support_contact_is_narrowly_accepted(self):
+        def phase(name, waypoint_count, contacts):
+            return {
+                "phase": name,
+                "cost_shape": [waypoint_count, 1, 65],
+                "contacts": contacts,
+            }
+
+        def contact(waypoint, cost=0.00049, link="panda_rightfinger"):
+            return {
+                "waypoint_index": waypoint,
+                "collision_cost_m": cost,
+                "link_name": link,
+                "nearest_observed_source_point": {
+                    "point_robot_base_m": [0.45, -0.02, 0.005]
+                },
+            }
+
+        report = self.review_transient_finger_support_contact(
+            {
+                "approach": phase("approach", 41, []),
+                "grasp": phase("grasp", 41, [contact(i) for i in range(37, 41)]),
+                "lift": phase("lift", 41, [contact(i) for i in range(4)]),
+            },
+            support_surface_z_m=0.0,
+            support_height_tolerance_m=0.0051,
+        )
+        self.assertTrue(report["accepted"])
+        self.assertTrue(all(report["checks"].values()))
+
+    def test_support_contact_policy_rejects_arm_deep_or_persistent_contact(self):
+        def contact(waypoint, cost=0.0005, link="panda_rightfinger"):
+            return {
+                "waypoint_index": waypoint,
+                "collision_cost_m": cost,
+                "link_name": link,
+                "nearest_observed_source_point": {
+                    "point_robot_base_m": [0.45, -0.02, 0.005]
+                },
+            }
+
+        def report_for(contact_factory):
+            return self.review_transient_finger_support_contact(
+                {
+                    "approach": {"cost_shape": [2, 1, 65], "contacts": []},
+                    "grasp": {
+                        "cost_shape": [2, 1, 65],
+                        "contacts": [contact_factory(1)],
+                    },
+                    "lift": {
+                        "cost_shape": [2, 1, 65],
+                        "contacts": [contact_factory(0)],
+                    },
+                },
+                support_surface_z_m=0.0,
+                support_height_tolerance_m=0.0051,
+            )
+
+        self.assertTrue(report_for(contact)["accepted"])
+        self.assertFalse(
+            report_for(lambda waypoint: contact(waypoint, link="panda_hand"))[
+                "accepted"
+            ]
+        )
+        self.assertFalse(
+            report_for(lambda waypoint: contact(waypoint, cost=0.0011))["accepted"]
+        )
+
+        persistent = self.review_transient_finger_support_contact(
+            {
+                "approach": {"cost_shape": [2, 1, 65], "contacts": []},
+                "grasp": {"cost_shape": [2, 1, 65], "contacts": [contact(1)]},
+                "lift": {
+                    "cost_shape": [2, 1, 65],
+                    "contacts": [contact(0), contact(1)],
+                },
+            },
+            support_surface_z_m=0.0,
+            support_height_tolerance_m=0.0051,
+        )
+        self.assertFalse(persistent["accepted"])
+
     def test_planner_uses_reviewed_official_grasp_and_attachment_apis(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(
             encoding="utf-8"
@@ -96,7 +181,11 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertNotIn('disable_collision_links=[]', source)
         self.assertIn("grasp_contact_link_names", source)
         self.assertIn("planner.enable_link_collision(contact_collision_links)", source)
-        self.assertIn("all_returned_waypoints_clear_with_all_robot_links_enabled", source)
+        self.assertIn("returned_waypoints_pass_simulation_contact_policy", source)
+        self.assertIn(
+            "strict_all_returned_waypoints_clear_with_all_robot_links_enabled",
+            source,
+        )
         self.assertIn("get_sphere_index_from_link_name", source)
         self.assertIn("grasp_contact_diagnostics.json", source)
         self.assertIn("_full_robot_spheres_world.npy", source)

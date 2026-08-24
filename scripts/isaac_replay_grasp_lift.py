@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 import traceback
@@ -53,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         default=PANDA_CLOSED_FINGER_JOINT_M,
     )
     parser.add_argument(
+        "--finger-drive-max-force-n",
+        type=float,
+        help=(
+            "Optional OpenUSD linear DriveAPI max-force value for the actuated "
+            "Panda finger joint. This is recorded as a simulation drive limit and "
+            "is not claimed to equal calibrated total hardware grasp force."
+        ),
+    )
+    parser.add_argument(
         "--simulation-only",
         action="store_true",
         help="Required acknowledgement: this command controls only an Isaac Sim robot",
@@ -71,6 +81,11 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "finger positions must satisfy 0 <= closed <= open <= 0.04 metres"
         )
+    if args.finger_drive_max_force_n is not None and (
+        not math.isfinite(args.finger_drive_max_force_n)
+        or args.finger_drive_max_force_n <= 0.0
+    ):
+        parser.error("--finger-drive-max-force-n must be positive and finite")
     return args
 
 
@@ -335,7 +350,7 @@ try:
             )
         return records
 
-    def finger_drive_configuration(joint_name: str) -> dict:
+    def finger_drive_configuration(joint_name: str, *, apply_requested: bool) -> dict:
         panda_root = stage.GetPrimAtPath(args.panda_prim)
         matching_prims = [
             prim
@@ -357,12 +372,18 @@ try:
                 "found": False,
                 "reason": "linear DriveAPI is absent",
             }
+        before_max_force = usd_attribute_value(drive.GetMaxForceAttr())
+        if apply_requested and args.finger_drive_max_force_n is not None:
+            drive.GetMaxForceAttr().Set(float(args.finger_drive_max_force_n))
+        after_max_force = usd_attribute_value(drive.GetMaxForceAttr())
         return {
             "joint_name": joint_name,
             "joint_prim": str(joint_prim.GetPath()),
             "found": True,
             "drive_type": usd_attribute_value(drive.GetTypeAttr()),
-            "max_force": usd_attribute_value(drive.GetMaxForceAttr()),
+            "max_force_before": before_max_force,
+            "max_force_after": after_max_force,
+            "max_force_changed": before_max_force != after_max_force,
             "stiffness": usd_attribute_value(drive.GetStiffnessAttr()),
             "damping": usd_attribute_value(drive.GetDampingAttr()),
             "target_position": usd_attribute_value(drive.GetTargetPositionAttr()),
@@ -477,8 +498,24 @@ try:
         raise RuntimeError(f"target effective mass must be positive: {target_mass_kg}")
 
     finger_drive_report = [
-        finger_drive_configuration(joint_name) for joint_name in finger_names
+        finger_drive_configuration(joint_name, apply_requested=True)
+        for joint_name in finger_names
     ]
+    configured_finger_drives = [
+        item for item in finger_drive_report if item.get("found") is True
+    ]
+    if not configured_finger_drives:
+        raise RuntimeError("Panda has no configurable linear finger DriveAPI")
+    if args.finger_drive_max_force_n is not None and not all(
+        np.isclose(
+            float(item["max_force_after"]),
+            args.finger_drive_max_force_n,
+            atol=1e-6,
+            rtol=0.0,
+        )
+        for item in configured_finger_drives
+    ):
+        raise RuntimeError("requested Panda finger DriveAPI max force was not applied")
     target_collision_materials = collision_materials_below(target_prim_path)
     finger_collision_materials = []
     for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
@@ -758,6 +795,11 @@ try:
             "physical_pick_observed": physical_pick_observed,
         },
         "physical_parameters": {
+            "requested_finger_drive_max_force_n": args.finger_drive_max_force_n,
+            "finger_drive_force_interpretation": (
+                "OpenUSD linear DriveAPI max-force value; not calibrated as total "
+                "Franka Hand grasping force"
+            ),
             "target_effective_mass_kg": target_mass_kg,
             "target_effective_density_kg_m3": target_density_kg_m3,
             "target_inertia_flat": target_inertia,
