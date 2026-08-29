@@ -70,6 +70,27 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn("output already exists", script)
         self.assertNotIn("Save Flattened", script)
 
+    def test_scene_editor_can_reference_and_place_target_noninteractively(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_edit_tabletop_scene.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--target-usd"', script)
+        self.assertIn('"--target-center-xy"', script)
+        self.assertIn('"--target-clearance-m"', script)
+        self.assertIn(
+            'stage.DefinePrim("/World/Objects/Target/Asset", "Xform")', script
+        )
+        self.assertIn("GetReferences().AddReference(relative_asset_path)", script)
+        self.assertIn("os.path.relpath(target_usd, start=output.parent)", script)
+        self.assertIn('"/World/Objects/Target"', script)
+        self.assertIn("compute_aabb(", script)
+        self.assertIn("UsdPhysics.RigidBodyAPI", script)
+        self.assertIn("PhysxSchema.PhysxCollisionAPI", script)
+        self.assertIn("UsdPhysics.MassAPI", script)
+        self.assertIn('"source_assets_are_not_modified": True', script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,3 +100,17 @@ copied USD; do not flatten or silently rewrite the asset.
 After the same-hammer comparison is reviewed, the next controlled experiment is
 to place the pinned scissors USD into a new authored scene and run the existing
 RGB-D -> SAM3 -> masked point cloud -> GraspGenX -> cuRobo -> Isaac replay path.
+
+The physics-ready target can be referenced, centred, placed 2 mm above the table,
+validated, saved, and closed without GUI editing:
+
+```bash
+python scripts/isaac_edit_tabletop_scene.py \
+  --output scenes/scissors_01.usda \
+  --target-usd /home/suzutaro/RoboLab/assets/objects/ycb/scissors.usd \
+  --exit-after-save
+```
+
+The saved scene contains a relative OpenUSD reference. The RoboLab source asset
+is not flattened or modified. Capture-time physics settling closes the initial
+2 mm clearance before RGB-D validation.
