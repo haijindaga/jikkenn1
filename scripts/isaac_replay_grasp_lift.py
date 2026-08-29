@@ -14,6 +14,10 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.physics_baselines import (
+    FINGER_DRIVE_PRESETS,
+    resolve_finger_drive_values,
+)
 from panda_handover.trajectory_replay import (
     load_grasp_lift_replay,
     sample_positions_at_physics_rate,
@@ -54,6 +58,16 @@ def parse_args() -> argparse.Namespace:
         default=PANDA_CLOSED_FINGER_JOINT_M,
     )
     parser.add_argument(
+        "--finger-drive-preset",
+        choices=tuple(FINGER_DRIVE_PRESETS),
+        default="authored-usd",
+        help=(
+            "Named Panda finger-drive condition. 'authored-usd' preserves the "
+            "loaded USD; 'isaaclab-franka' applies the source-backed Isaac Lab "
+            "Franka simulator actuator values."
+        ),
+    )
+    parser.add_argument(
         "--finger-drive-max-force-n",
         type=float,
         help=(
@@ -90,6 +104,11 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
+finger_drive_preset = FINGER_DRIVE_PRESETS[args.finger_drive_preset]
+requested_finger_drive_values = resolve_finger_drive_values(
+    args.finger_drive_preset,
+    explicit_max_force=args.finger_drive_max_force_n,
+)
 replay = load_grasp_lift_replay(args.capture, args.plan)
 scene_usd = None
 if args.scene_usd is not None:
@@ -372,20 +391,40 @@ try:
                 "found": False,
                 "reason": "linear DriveAPI is absent",
             }
-        before_max_force = usd_attribute_value(drive.GetMaxForceAttr())
-        if apply_requested and args.finger_drive_max_force_n is not None:
-            drive.GetMaxForceAttr().Set(float(args.finger_drive_max_force_n))
-        after_max_force = usd_attribute_value(drive.GetMaxForceAttr())
+        drive_attributes = {
+            "max_force": drive.GetMaxForceAttr(),
+            "stiffness": drive.GetStiffnessAttr(),
+            "damping": drive.GetDampingAttr(),
+        }
+        before = {
+            name: usd_attribute_value(attribute)
+            for name, attribute in drive_attributes.items()
+        }
+        if apply_requested:
+            for name, requested_value in requested_finger_drive_values.items():
+                if requested_value is not None:
+                    drive_attributes[name].Set(float(requested_value))
+        after = {
+            name: usd_attribute_value(attribute)
+            for name, attribute in drive_attributes.items()
+        }
         return {
             "joint_name": joint_name,
             "joint_prim": str(joint_prim.GetPath()),
             "found": True,
             "drive_type": usd_attribute_value(drive.GetTypeAttr()),
-            "max_force_before": before_max_force,
-            "max_force_after": after_max_force,
-            "max_force_changed": before_max_force != after_max_force,
-            "stiffness": usd_attribute_value(drive.GetStiffnessAttr()),
-            "damping": usd_attribute_value(drive.GetDampingAttr()),
+            "max_force_before": before["max_force"],
+            "max_force_after": after["max_force"],
+            "max_force_changed": before["max_force"] != after["max_force"],
+            "stiffness_before": before["stiffness"],
+            "stiffness_after": after["stiffness"],
+            "stiffness_changed": before["stiffness"] != after["stiffness"],
+            "damping_before": before["damping"],
+            "damping_after": after["damping"],
+            "damping_changed": before["damping"] != after["damping"],
+            # Backward-compatible aliases describe the effective values.
+            "stiffness": after["stiffness"],
+            "damping": after["damping"],
             "target_position": usd_attribute_value(drive.GetTargetPositionAttr()),
             "target_velocity": usd_attribute_value(drive.GetTargetVelocityAttr()),
         }
@@ -506,16 +545,22 @@ try:
     ]
     if not configured_finger_drives:
         raise RuntimeError("Panda has no configurable linear finger DriveAPI")
-    if args.finger_drive_max_force_n is not None and not all(
-        np.isclose(
-            float(item["max_force_after"]),
-            args.finger_drive_max_force_n,
-            atol=1e-6,
-            rtol=0.0,
-        )
-        for item in configured_finger_drives
-    ):
-        raise RuntimeError("requested Panda finger DriveAPI max force was not applied")
+    for attribute_name, requested_value in requested_finger_drive_values.items():
+        if requested_value is None:
+            continue
+        report_key = f"{attribute_name}_after"
+        if not all(
+            np.isclose(
+                float(item[report_key]),
+                requested_value,
+                atol=1e-6,
+                rtol=0.0,
+            )
+            for item in configured_finger_drives
+        ):
+            raise RuntimeError(
+                f"requested Panda finger DriveAPI {attribute_name} was not applied"
+            )
     target_collision_materials = collision_materials_below(target_prim_path)
     finger_collision_materials = []
     for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
@@ -795,6 +840,9 @@ try:
             "physical_pick_observed": physical_pick_observed,
         },
         "physical_parameters": {
+            "finger_drive_preset": args.finger_drive_preset,
+            "finger_drive_preset_definition": finger_drive_preset.to_dict(),
+            "effective_requested_finger_drive_values": requested_finger_drive_values,
             "requested_finger_drive_max_force_n": args.finger_drive_max_force_n,
             "finger_drive_force_interpretation": (
                 "OpenUSD linear DriveAPI max-force value; not calibrated as total "

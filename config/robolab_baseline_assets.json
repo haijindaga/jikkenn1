@@ -1,0 +1,31 @@
+{
+  "source_repository": "https://github.com/NVlabs/RoboLab",
+  "source_commit": "9db0aaf09d9fe5d4f37b168320788258c7012463",
+  "policy": "Use upstream physics-ready USD files unchanged and keep each dataset's LICENSE and texture directory with the asset.",
+  "assets": {
+    "hammer": {
+      "path": "assets/objects/handal/hammer.usd",
+      "sha256": "df71de5352a4707b7af34d880cff5db1cd146649262f0e6bcaf30edbb2523d94",
+      "license": "CC BY-NC-SA 4.0",
+      "license_path": "assets/objects/handal/LICENSE",
+      "dataset": "handal",
+      "mass_kg": 0.5,
+      "static_friction": 2.0,
+      "dynamic_friction": 2.0,
+      "restitution": 0.1,
+      "dimensions_m": [0.41038939356803894, 0.14599280059337616, 0.03832000121474275]
+    },
+    "scissors": {
+      "path": "assets/objects/ycb/scissors.usd",
+      "sha256": "3c1a440f4cd07b0c8b6e0b969eb7683f94ff5827728fd0753535e25eed33ebca",
+      "license": "MIT",
+      "license_path": "assets/objects/ycb/LICENSE",
+      "dataset": "ycb",
+      "mass_kg": 0.20000000298023224,
+      "static_friction": 2.0,
+      "dynamic_friction": 2.0,
+      "restitution": 0.1,
+      "dimensions_m": [0.0960800051689148, 0.20154400169849396, 0.01571599952876568]
+    }
+  }
+}
