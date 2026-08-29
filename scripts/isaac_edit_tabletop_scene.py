@@ -177,7 +177,11 @@ try:
         relative_asset_path = Path(
             os.path.relpath(target_usd, start=output.parent)
         ).as_posix()
-        if not target_asset_prim.GetReferences().AddReference(relative_asset_path):
+        # The current World stage is anonymous until save_stage. Compose from
+        # the absolute source now; Isaac Sim's save_stage resolves authored
+        # asset paths from the anonymous root to the output layer, producing
+        # the portable relative reference recorded below.
+        if not target_asset_prim.GetReferences().AddReference(str(target_usd)):
             raise RuntimeError(f"failed to reference target USD: {target_usd}")
         simulation_app.update()
 
@@ -280,6 +284,8 @@ try:
         target_authoring = {
             "source_usd": str(target_usd),
             "scene_reference": relative_asset_path,
+            "authoring_reference": str(target_usd),
+            "save_stage_resolves_reference_to_output_layer": True,
             "wrapper_prim": "/World/Objects/Target",
             "asset_prim": "/World/Objects/Target/Asset",
             "initial_aabb_world_m": initial_aabb.tolist(),

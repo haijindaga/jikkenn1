@@ -82,8 +82,9 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn(
             'stage.DefinePrim("/World/Objects/Target/Asset", "Xform")', script
         )
-        self.assertIn("GetReferences().AddReference(relative_asset_path)", script)
+        self.assertIn("GetReferences().AddReference(str(target_usd))", script)
         self.assertIn("os.path.relpath(target_usd, start=output.parent)", script)
+        self.assertIn("save_stage resolves authored", script)
         self.assertIn('"/World/Objects/Target"', script)
         self.assertIn("compute_aabb(", script)
         self.assertIn("UsdPhysics.RigidBodyAPI", script)
