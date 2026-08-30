@@ -615,6 +615,7 @@ def main() -> int:
         # trajectory and leaves all reviewed planner settings unchanged.
         candidate_diagnostics: list[dict[str, Any]] = []
         free_world_solver = None
+        sphere_link_names = None
         for rank in range(len(grasp_transforms)):
             candidate_goal = GoalToolPose(
                 tool_frames=planner.tool_frames,
@@ -633,6 +634,7 @@ def main() -> int:
             )
             world_ik_summary = summarize_ik_result(world_ik_result)
             free_world_summary = None
+            free_world_solution_collision = None
             if int(world_ik_summary["success_count"]) == 0:
                 if free_world_solver is None:
                     free_world_cfg = MotionPlannerCfg.create(
@@ -650,6 +652,86 @@ def main() -> int:
                     current_state=current_state,
                 )
                 free_world_summary = summarize_ik_result(free_world_result)
+                free_success = _cpu_numpy(free_world_result.success).astype(
+                    bool, copy=False
+                ).reshape(-1)
+                if np.any(free_success):
+                    free_solutions = _cpu_numpy(free_world_result.solution).astype(
+                        np.float32, copy=False
+                    ).reshape(-1, len(planner.joint_names))
+                    if len(free_solutions) != len(free_success):
+                        raise RuntimeError(
+                            "free-world IK solutions do not match success entries"
+                        )
+                    solution = free_solutions[int(np.flatnonzero(free_success)[0])]
+                    diagnostic_state = JointState.from_position(
+                        torch.from_numpy(solution).to(device_cfg.device).unsqueeze(0),
+                        joint_names=planner.joint_names,
+                    )
+                    diagnostic_kinematics = planner.compute_kinematics(
+                        diagnostic_state
+                    )
+                    diagnostic_spheres = diagnostic_kinematics.robot_spheres
+                    if diagnostic_spheres is None:
+                        raise RuntimeError(
+                            "cuRobo returned no spheres for free-world IK diagnosis"
+                        )
+                    diagnostic_spheres_np = _cpu_numpy(diagnostic_spheres).astype(
+                        np.float32, copy=False
+                    )
+                    if sphere_link_names is None:
+                        sphere_link_names, _ = _collision_sphere_link_names(
+                            planner.kinematics.config.kinematics_config,
+                            int(diagnostic_spheres_np.shape[-2]),
+                        )
+
+                    def query_diagnostic_collision(
+                        activation_distance_m: float,
+                    ) -> np.ndarray:
+                        diagnostic_buffer = CollisionBuffer.from_shape(
+                            diagnostic_spheres.shape, device_cfg
+                        )
+                        diagnostic_buffer.zero_()
+                        values = planner.scene_collision_checker.get_sphere_collision(
+                            diagnostic_kinematics,
+                            diagnostic_buffer,
+                            torch.tensor(
+                                [1.0],
+                                device=device_cfg.device,
+                                dtype=torch.float32,
+                            ),
+                            torch.tensor(
+                                [activation_distance_m],
+                                device=device_cfg.device,
+                                dtype=torch.float32,
+                            ),
+                        )
+                        torch.cuda.synchronize(device_cfg.device)
+                        return _cpu_numpy(values).astype(np.float32, copy=False)
+
+                    penetration_cost = query_diagnostic_collision(0.0)
+                    optimizer_cost = query_diagnostic_collision(0.01)
+                    free_world_solution_collision = {
+                        "joint_positions": solution.astype(float).tolist(),
+                        "actual_penetration_activation_distance_m": 0.0,
+                        "optimizer_activation_distance_m": 0.01,
+                        "actual_penetration": _phase_contact_diagnostics(
+                            "exact_grasp_free_world_ik_penetration",
+                            penetration_cost,
+                            diagnostic_spheres_np,
+                            sphere_link_names,
+                            observed_scene.points_robot_base_m,
+                            target_robot_base,
+                        ),
+                        "optimizer_proximity": _phase_contact_diagnostics(
+                            "exact_grasp_free_world_ik_optimizer_proximity",
+                            optimizer_cost,
+                            diagnostic_spheres_np,
+                            sphere_link_names,
+                            observed_scene.points_robot_base_m,
+                            target_robot_base,
+                        ),
+                    }
             candidate_diagnostics.append(
                 {
                     "goalset_rank": rank,
@@ -657,6 +739,9 @@ def main() -> int:
                     "graspgenx_score": float(candidate_scores[rank]),
                     "collision_aware_ik": world_ik_summary,
                     "ik_without_world_scene_control": free_world_summary,
+                    "free_world_solution_vs_observed_scene": (
+                        free_world_solution_collision
+                    ),
                 }
             )
 

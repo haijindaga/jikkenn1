@@ -225,6 +225,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("https://github.com/NVlabs/curobo/issues/663", source)
         self.assertIn('"grasp_preflight_failure.json"', source)
         self.assertIn('"planner_parameters_changed_for_diagnosis": False', source)
+        self.assertIn('"free_world_solution_vs_observed_scene"', source)
+        self.assertIn('"actual_penetration_activation_distance_m": 0.0', source)
         self.assertIn("https://github.com/NVlabs/curobo/issues/692", source)
         self.assertIn("trim_joint_state_trajectory(", source)
 
