@@ -39,6 +39,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument(
+        "--source-candidate-index",
+        type=int,
+        help=(
+            "Plan only this GraspGenX source candidate. This is used by the "
+            "multi-candidate trial runner and does not change candidate scores "
+            "or planner parameters."
+        ),
+    )
+    parser.add_argument(
         "--allow-reviewed-support-contact-preflight",
         action="store_true",
         help=(
@@ -70,6 +79,35 @@ def _cpu_numpy(value: Any) -> np.ndarray:
     if hasattr(value, "detach"):
         return value.detach().cpu().numpy()
     return np.asarray(value)
+
+
+def _select_source_candidate(
+    grasp_transforms: np.ndarray,
+    source_indices: np.ndarray,
+    candidate_scores: np.ndarray,
+    requested_source_index: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int | None]:
+    """Optionally retain one candidate while preserving its source provenance."""
+
+    if requested_source_index is None:
+        return grasp_transforms, source_indices, candidate_scores, None
+    if requested_source_index < 0:
+        raise ValueError("--source-candidate-index must be non-negative")
+    matches = np.flatnonzero(source_indices == requested_source_index)
+    if len(matches) != 1:
+        available = ", ".join(str(int(value)) for value in source_indices)
+        raise ValueError(
+            f"source candidate {requested_source_index} is not uniquely present; "
+            f"available source indices: [{available}]"
+        )
+    original_rank = int(matches[0])
+    selected = slice(original_rank, original_rank + 1)
+    return (
+        grasp_transforms[selected],
+        source_indices[selected],
+        candidate_scores[selected],
+        original_rank,
+    )
 
 
 def _restore_triangle_faces(vertices: Any, faces: Any) -> np.ndarray:
@@ -602,6 +640,17 @@ def main() -> int:
         raise ValueError("source candidate indices do not match grasp transforms")
     if len(candidate_scores) != len(grasp_transforms):
         raise ValueError("candidate scores do not match grasp transforms")
+    (
+        grasp_transforms,
+        source_indices,
+        candidate_scores,
+        requested_candidate_original_rank,
+    ) = _select_source_candidate(
+        grasp_transforms,
+        source_indices,
+        candidate_scores,
+        args.source_candidate_index,
+    )
     prepared_map_value = pregrasp_report.get("inputs", {}).get("prepared_map")
     if not isinstance(prepared_map_value, str) or not prepared_map_value:
         raise ValueError("source pre-grasp report has no prepared_map provenance")
@@ -1552,6 +1601,10 @@ def main() -> int:
             "attachment_transform_configuration": "grasp phase end",
             "strict_issue_663_preflight_succeeded": strict_preflight_success,
             "support_contact_preflight": support_contact_preflight,
+            "requested_source_candidate_index": args.source_candidate_index,
+            "requested_candidate_original_goalset_rank": (
+                requested_candidate_original_rank
+            ),
         },
         "result": {
             "planner_reported_success": True,

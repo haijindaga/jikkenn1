@@ -36,6 +36,33 @@ class GraspLiftScriptTests(unittest.TestCase):
         cls.load_validated_support_surface_z = staticmethod(
             namespace["_load_validated_support_surface_z"]
         )
+        cls.select_source_candidate = staticmethod(
+            namespace["_select_source_candidate"]
+        )
+
+    def test_source_candidate_selection_preserves_score_order_provenance(self):
+        transforms = np.repeat(np.eye(4)[None, ...], 3, axis=0)
+        transforms[:, 0, 3] = [1.0, 2.0, 3.0]
+        selected, indices, scores, original_rank = self.select_source_candidate(
+            transforms,
+            np.array([29, 35, 72]),
+            np.array([0.9, 0.8, 0.7]),
+            35,
+        )
+        self.assertEqual(original_rank, 1)
+        self.assertEqual(selected.shape, (1, 4, 4))
+        self.assertEqual(selected[0, 0, 3], 2.0)
+        np.testing.assert_array_equal(indices, [35])
+        np.testing.assert_allclose(scores, [0.8])
+
+    def test_source_candidate_selection_rejects_unknown_or_negative_index(self):
+        transforms = np.eye(4)[None, ...]
+        indices = np.array([72])
+        scores = np.array([0.8])
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            self.select_source_candidate(transforms, indices, scores, -1)
+        with self.assertRaisesRegex(ValueError, "available source indices"):
+            self.select_source_candidate(transforms, indices, scores, 66)
 
     def test_support_surface_uses_reviewed_tabletop_plane_not_root_prim_aabb(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -328,6 +355,21 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"attachment_transform_defined_at_grasp_end": True', source)
         self.assertIn('"safe_for_real_robot_execution": False', source)
         self.assertIn('"manual_review_required": True', source)
+
+    def test_multi_candidate_trials_keep_conditions_fixed_and_stop_on_success(self):
+        planner_runner = (
+            PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"
+        ).read_text(encoding="utf-8")
+        replay_runner = (
+            PROJECT / "scripts" / "isaac_replay_grasp_lift_trials.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('default=5', planner_runner)
+        self.assertIn('"--source-candidate-index"', planner_runner)
+        self.assertIn('"candidate_specific_parameter_tuning": False', planner_runner)
+        self.assertIn('default="isaaclab-franka"', replay_runner)
+        self.assertIn('"stop_at_first_physical_pick": True', replay_runner)
+        self.assertIn('report.get("physical_object", {})', replay_runner)
+        self.assertIn('if completed.returncode == 0 and status == "success"', replay_runner)
 
 
 if __name__ == "__main__":
