@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import runpy
+import tempfile
 import unittest
 
 import numpy as np
@@ -31,6 +33,31 @@ class GraspLiftScriptTests(unittest.TestCase):
         cls.review_exact_grasp_support_candidate = staticmethod(
             namespace["_review_exact_grasp_support_candidate"]
         )
+        cls.load_validated_support_surface_z = staticmethod(
+            namespace["_load_validated_support_surface_z"]
+        )
+
+    def test_support_surface_uses_reviewed_tabletop_plane_not_root_prim_aabb(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            capture = Path(temporary_directory)
+            (capture / "scene_layout.json").write_text(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "scene_source": {"kind": "authored_usd_scene"},
+                        "runtime_target": {
+                            "table_aabb_world_m": [0, 0, -0.026, 1, 1, -0.024]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            support_z = self.load_validated_support_surface_z(
+                capture,
+                np.eye(4),
+                expected_tabletop_world_z_m=0.0,
+            )
+            self.assertEqual(support_z, 0.0)
 
     def test_preflight_failure_separates_collision_from_geometric_ik(self):
         def candidate(world_success, free_success):

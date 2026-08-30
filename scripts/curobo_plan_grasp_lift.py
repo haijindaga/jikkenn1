@@ -259,25 +259,30 @@ def _review_exact_grasp_support_candidate(
 
 
 def _load_validated_support_surface_z(
-    capture: Path, T_world_robot_base: np.ndarray
+    capture: Path,
+    T_world_robot_base: np.ndarray,
+    *,
+    expected_tabletop_world_z_m: float,
 ) -> float:
-    """Load the authored tabletop top plane and express it in robot-base z."""
+    """Validate the capture and express the reviewed tabletop plane in base z."""
     report_path = capture / "scene_layout.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("status") != "success":
         raise ValueError("capture scene layout did not pass validation")
-    aabb = np.asarray(
-        report.get("runtime_target", {}).get("table_aabb_world_m"),
-        dtype=np.float64,
-    )
-    if aabb.shape != (6,) or not np.isfinite(aabb).all():
-        raise ValueError("capture scene layout has no valid table AABB")
+    scene_kind = report.get("scene_source", {}).get("kind")
+    if scene_kind not in {"authored_usd_scene", "generated_legacy_smoke_scene"}:
+        raise ValueError("capture scene layout has an unsupported scene source")
+    if not np.isfinite(expected_tabletop_world_z_m):
+        raise ValueError("reviewed tabletop height must be finite")
     transform = np.asarray(T_world_robot_base, dtype=np.float64)
     if transform.shape != (4, 4) or not np.allclose(
         transform[:3, :3], np.eye(3), atol=1e-5, rtol=0.0
     ):
         raise ValueError("support-contact review requires an axis-aligned robot base")
-    return float(aabb[5] - transform[2, 3])
+    # The root table prim AABB is not a reliable top-plane measurement for every
+    # referenced USD hierarchy. The project scene contract fixes the robot mount
+    # and tabletop plane at world z=0 and the RGB-D map verifies it independently.
+    return float(expected_tabletop_world_z_m - transform[2, 3])
 
 
 def _goalset_index(result: Any) -> int | None:
@@ -576,6 +581,7 @@ def main() -> int:
         summarize_ik_result_arrays,
     )
     from panda_handover.geometry import transform_points
+    from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
     subprocess.run(
         [
@@ -620,7 +626,11 @@ def main() -> int:
         args.capture / "T_world_robot_base.npy", allow_pickle=False
     )
     support_surface_z_m = (
-        _load_validated_support_surface_z(args.capture, T_world_robot_base)
+        _load_validated_support_surface_z(
+            args.capture,
+            T_world_robot_base,
+            expected_tabletop_world_z_m=DEFAULT_TABLETOP_LAYOUT.table_top_z_m,
+        )
         if args.allow_reviewed_support_contact_preflight
         else None
     )
