@@ -28,6 +28,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         cls.classify_preflight_failure = staticmethod(
             namespace["_classify_preflight_failure"]
         )
+        cls.review_exact_grasp_support_candidate = staticmethod(
+            namespace["_review_exact_grasp_support_candidate"]
+        )
 
     def test_preflight_failure_separates_collision_from_geometric_ik(self):
         def candidate(world_success, free_success):
@@ -52,6 +55,46 @@ class GraspLiftScriptTests(unittest.TestCase):
             self.classify_preflight_failure([candidate(0, 0)]),
             "exact_grasp_ik_fails_even_without_world_collision",
         )
+
+    def test_exact_grasp_support_review_accepts_voxel_only_finger_contact(self):
+        def candidate(sphere_z, cost):
+            return {
+                "ik_without_world_scene_control": {"success_count": 4},
+                "free_world_solution_vs_observed_scene": {
+                    "actual_penetration": {
+                        "contacts": [
+                            {
+                                "link_name": "panda_leftfinger",
+                                "collision_cost_m": cost,
+                                "sphere_robot_base_xyz_radius_m": [
+                                    0.5,
+                                    0.2,
+                                    sphere_z,
+                                    0.011,
+                                ],
+                                "nearest_observed_source_point": {
+                                    "point_robot_base_m": [0.5, 0.2, 0.005]
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+
+        accepted = self.review_exact_grasp_support_candidate(
+            candidate(0.0125, 0.0033),
+            support_surface_z_m=0.0,
+            support_height_tolerance_m=0.0051,
+            map_discretization_allowance_m=0.005,
+        )
+        self.assertTrue(accepted["accepted"])
+        deep = self.review_exact_grasp_support_candidate(
+            candidate(0.0004, 0.0064),
+            support_surface_z_m=0.0,
+            support_height_tolerance_m=0.0051,
+            map_discretization_allowance_m=0.005,
+        )
+        self.assertFalse(deep["accepted"])
 
     def test_flat_curobo_faces_are_restored_without_geometry_changes(self):
         vertices = np.array(
@@ -122,6 +165,7 @@ class GraspLiftScriptTests(unittest.TestCase):
                 "nearest_observed_source_point": {
                     "point_robot_base_m": [0.45, -0.02, 0.005]
                 },
+                "sphere_robot_base_xyz_radius_m": [0.45, -0.02, 0.011, 0.01],
             }
 
         report = self.review_transient_finger_support_contact(
@@ -145,6 +189,7 @@ class GraspLiftScriptTests(unittest.TestCase):
                 "nearest_observed_source_point": {
                     "point_robot_base_m": [0.45, -0.02, 0.005]
                 },
+                "sphere_robot_base_xyz_radius_m": [0.45, -0.02, 0.011, 0.01],
             }
 
         def report_for(contact_factory):
@@ -227,6 +272,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"planner_parameters_changed_for_diagnosis": False', source)
         self.assertIn('"free_world_solution_vs_observed_scene"', source)
         self.assertIn('"actual_penetration_activation_distance_m": 0.0', source)
+        self.assertIn('"--allow-reviewed-support-contact-preflight"', source)
+        self.assertIn("planner.disable_link_collision(support_contact_links)", source)
         self.assertIn("https://github.com/NVlabs/curobo/issues/692", source)
         self.assertIn("trim_joint_state_trajectory(", source)
 

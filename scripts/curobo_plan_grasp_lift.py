@@ -39,6 +39,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument(
+        "--allow-reviewed-support-contact-preflight",
+        action="store_true",
+        help=(
+            "Simulation-only opt-in: retry an exact-grasp preflight with only "
+            "finger/support contacts disabled after strict per-candidate review"
+        ),
+    )
+    parser.add_argument(
         "--handover-goal-position-robot-base-m",
         type=float,
         nargs=3,
@@ -177,6 +185,99 @@ def _classify_preflight_failure(candidate_diagnostics: list[dict[str, Any]]) -> 
     if any(int(summary["success_count"]) > 0 for summary in free_world_summaries):
         return "world_collision_rejects_exact_grasp_ik"
     return "exact_grasp_ik_fails_even_without_world_collision"
+
+
+def _review_exact_grasp_support_candidate(
+    candidate: dict[str, Any],
+    *,
+    support_surface_z_m: float,
+    support_height_tolerance_m: float,
+    map_discretization_allowance_m: float,
+    maximum_physical_penetration_m: float = SIMULATION_FINGER_SUPPORT_CONTACT_LIMIT_M,
+) -> dict[str, Any]:
+    """Narrowly review a free-world exact grasp against the measured support."""
+    collision = candidate.get("free_world_solution_vs_observed_scene")
+    penetration = collision.get("actual_penetration") if collision else None
+    contacts = penetration.get("contacts", []) if penetration else []
+    effective_cost_limit_m = (
+        maximum_physical_penetration_m + map_discretization_allowance_m
+    )
+    checks = {
+        "free_world_ik_succeeded": int(
+            (candidate.get("ik_without_world_scene_control") or {}).get(
+                "success_count", 0
+            )
+        )
+        > 0,
+        "actual_contact_exists_for_review": bool(contacts),
+        "only_finger_links_contact_environment": bool(contacts)
+        and all(
+            str(contact["link_name"]) in SIMULATION_FINGER_CONTACT_LINKS
+            for contact in contacts
+        ),
+        "nearest_points_match_support_height": bool(contacts)
+        and all(
+            abs(
+                float(
+                    contact["nearest_observed_source_point"][
+                        "point_robot_base_m"
+                    ][2]
+                )
+                - support_surface_z_m
+            )
+            <= support_height_tolerance_m
+            for contact in contacts
+        ),
+        "collision_cost_within_voxel_aware_limit": bool(contacts)
+        and max(float(contact["collision_cost_m"]) for contact in contacts)
+        <= effective_cost_limit_m,
+        "physical_sphere_support_penetration_within_1mm": bool(contacts)
+        and all(
+            support_surface_z_m
+            - (
+                float(contact["sphere_robot_base_xyz_radius_m"][2])
+                - float(contact["sphere_robot_base_xyz_radius_m"][3])
+            )
+            <= maximum_physical_penetration_m
+            for contact in contacts
+        ),
+    }
+    return {
+        "policy": (
+            "simulation-only exact-grasp support review; only finger contacts "
+            "at the validated tabletop are eligible"
+        ),
+        "support_surface_z_m": float(support_surface_z_m),
+        "support_height_tolerance_m": float(support_height_tolerance_m),
+        "maximum_physical_penetration_m": float(maximum_physical_penetration_m),
+        "map_discretization_allowance_m": float(map_discretization_allowance_m),
+        "effective_collision_cost_limit_m": float(effective_cost_limit_m),
+        "checks": checks,
+        "accepted": bool(all(checks.values())),
+        "safe_for_real_robot_execution": False,
+    }
+
+
+def _load_validated_support_surface_z(
+    capture: Path, T_world_robot_base: np.ndarray
+) -> float:
+    """Load the authored tabletop top plane and express it in robot-base z."""
+    report_path = capture / "scene_layout.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "success":
+        raise ValueError("capture scene layout did not pass validation")
+    aabb = np.asarray(
+        report.get("runtime_target", {}).get("table_aabb_world_m"),
+        dtype=np.float64,
+    )
+    if aabb.shape != (6,) or not np.isfinite(aabb).all():
+        raise ValueError("capture scene layout has no valid table AABB")
+    transform = np.asarray(T_world_robot_base, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.allclose(
+        transform[:3, :3], np.eye(3), atol=1e-5, rtol=0.0
+    ):
+        raise ValueError("support-contact review requires an axis-aligned robot base")
+    return float(aabb[5] - transform[2, 3])
 
 
 def _goalset_index(result: Any) -> int | None:
@@ -318,6 +419,7 @@ def _review_transient_finger_support_contact(
     support_surface_z_m: float,
     support_height_tolerance_m: float,
     maximum_collision_cost_m: float = SIMULATION_FINGER_SUPPORT_CONTACT_LIMIT_M,
+    map_discretization_allowance_m: float = 0.0,
 ) -> dict[str, Any]:
     """Apply the reviewed simulation-only support-contact acceptance policy.
 
@@ -334,6 +436,11 @@ def _review_transient_finger_support_contact(
         )
     if not np.isfinite(maximum_collision_cost_m) or maximum_collision_cost_m <= 0.0:
         raise ValueError("maximum support-contact cost must be positive and finite")
+    if (
+        not np.isfinite(map_discretization_allowance_m)
+        or map_discretization_allowance_m < 0.0
+    ):
+        raise ValueError("map discretization allowance must be finite and non-negative")
     if not np.isfinite(support_surface_z_m):
         raise ValueError("support surface height must be finite")
     if not np.isfinite(support_height_tolerance_m) or support_height_tolerance_m <= 0.0:
@@ -352,6 +459,9 @@ def _review_transient_finger_support_contact(
         return not values or values == list(range(values[0], values[-1] + 1))
 
     all_contacts = contacts["approach"] + contacts["grasp"] + contacts["lift"]
+    effective_collision_cost_limit_m = (
+        maximum_collision_cost_m + map_discretization_allowance_m
+    )
     checks = {
         "approach_is_strictly_clear": not contacts["approach"],
         "contact_exists_for_review": bool(contacts["grasp"] or contacts["lift"]),
@@ -371,9 +481,19 @@ def _review_transient_finger_support_contact(
             <= support_height_tolerance_m
             for item in all_contacts
         ),
-        "maximum_collision_cost_within_1mm": bool(all_contacts)
+        "maximum_collision_cost_within_voxel_aware_limit": bool(all_contacts)
         and max(float(item["collision_cost_m"]) for item in all_contacts)
-        <= maximum_collision_cost_m,
+        <= effective_collision_cost_limit_m,
+        "physical_sphere_support_penetration_within_1mm": bool(all_contacts)
+        and all(
+            support_surface_z_m
+            - (
+                float(item["sphere_robot_base_xyz_radius_m"][2])
+                - float(item["sphere_robot_base_xyz_radius_m"][3])
+            )
+            <= maximum_collision_cost_m
+            for item in all_contacts
+        ),
         "grasp_contacts_form_terminal_suffix": bool(grasp_indices)
         and is_contiguous(grasp_indices)
         and grasp_indices[-1] == grasp_waypoint_count - 1,
@@ -389,6 +509,10 @@ def _review_transient_finger_support_contact(
             "costs are retained and no planner tolerance is changed"
         ),
         "maximum_collision_cost_m": float(maximum_collision_cost_m),
+        "map_discretization_allowance_m": float(map_discretization_allowance_m),
+        "effective_collision_cost_limit_m": float(
+            effective_collision_cost_limit_m
+        ),
         "support_surface_z_m": float(support_surface_z_m),
         "support_height_tolerance_m": float(support_height_tolerance_m),
         "accepted_links": sorted(SIMULATION_FINGER_CONTACT_LINKS),
@@ -495,6 +619,12 @@ def main() -> int:
     T_world_robot_base = np.load(
         args.capture / "T_world_robot_base.npy", allow_pickle=False
     )
+    support_surface_z_m = (
+        _load_validated_support_surface_z(args.capture, T_world_robot_base)
+        if args.allow_reviewed_support_contact_preflight
+        else None
+    )
+    map_discretization_allowance_m = float(observed_scene.voxel_size_m * 0.5)
     target_robot_base = transform_points(
         np.linalg.inv(T_world_robot_base), target_world
     ).astype(np.float32, copy=False)
@@ -585,6 +715,8 @@ def main() -> int:
         and preflight.success is not None
         and preflight.success.any().item()
     )
+    strict_preflight_success = preflight_success
+    support_contact_preflight = None
     if not preflight_success:
         def summarize_ik_result(result: Any) -> dict[str, Any]:
             return summarize_ik_result_arrays(
@@ -746,53 +878,135 @@ def main() -> int:
             )
 
         failure_stage = _classify_preflight_failure(candidate_diagnostics)
-        failure_report = {
-            "status": "preflight_failed",
-            "reference": {
-                "curobo_commit": CUROBO_COMMIT,
-                "planner": "MotionPlanner.plan_pose Issue #663 preflight",
-                "issue_663": "https://github.com/NVlabs/curobo/issues/663",
-            },
-            "inputs": {
-                "capture": str(args.capture),
-                "segmentation": str(args.segmentation),
-                "pregrasp_plan": str(args.pregrasp_plan),
-                "prepared_map": str(prepared_map),
-            },
-            "parameters": {
-                "planner_config_policy": "GraspGenX end2end official defaults",
-                "max_attempts": args.max_attempts,
-                "candidate_count": int(len(grasp_transforms)),
-                "planner_parameters_changed_for_diagnosis": False,
-            },
-            "result": {
-                "issue_663_preflight_succeeded": False,
-                "failure_stage": failure_stage,
-                "plan_grasp_called": False,
-            },
-            "candidate_diagnostics": candidate_diagnostics,
-            "safety": {
-                "diagnosis_only": True,
-                "trajectory_saved": False,
-                "trajectory_executed": False,
-                "simulation_only": True,
-            },
-            "next_gate": (
-                "Use failure_stage to decide whether to regenerate grasps, inspect "
-                "world collision, or investigate trajectory optimization. Do not "
-                "tune planner parameters from the preflight status alone."
-            ),
-        }
-        failure_path = output / "grasp_preflight_failure.json"
-        failure_path.write_text(
-            json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
-        )
+        support_reviews = []
+        if args.allow_reviewed_support_contact_preflight:
+            assert support_surface_z_m is not None
+            for candidate in candidate_diagnostics:
+                review = _review_exact_grasp_support_candidate(
+                    candidate,
+                    support_surface_z_m=support_surface_z_m,
+                    support_height_tolerance_m=(
+                        map_discretization_allowance_m + 1e-6
+                    ),
+                    map_discretization_allowance_m=(
+                        map_discretization_allowance_m
+                    ),
+                )
+                candidate["reviewed_support_contact"] = review
+                if review["accepted"]:
+                    support_reviews.append(candidate)
+
+        if support_reviews:
+            # Candidate arrays are score ordered; retain only the highest-scoring
+            # candidate that passed every narrow support-contact check.
+            selected_rank = int(support_reviews[0]["goalset_rank"])
+            support_contact_links = sorted(
+                SIMULATION_FINGER_CONTACT_LINKS.intersection(
+                    contact_collision_links
+                )
+            )
+            if support_contact_links != sorted(SIMULATION_FINGER_CONTACT_LINKS):
+                raise RuntimeError(
+                    "reviewed Franka config is missing finger contact links"
+                )
+            selected_goal = GoalToolPose(
+                tool_frames=planner.tool_frames,
+                position=torch.from_numpy(
+                    grasp_transforms[selected_rank : selected_rank + 1, :3, 3]
+                ).to(device_cfg.device)[None, None, None, :, :],
+                quaternion=torch.from_numpy(
+                    quaternions[selected_rank : selected_rank + 1]
+                ).to(device_cfg.device)[None, None, None, :, :],
+            )
+            planner.disable_link_collision(support_contact_links)
+            planner.reset_seed()
+            support_preflight_result = planner.plan_pose(
+                current_state=current_state,
+                goal_tool_poses=selected_goal,
+                max_attempts=args.max_attempts,
+            )
+            planner.enable_link_collision(support_contact_links)
+            preflight_success = bool(
+                support_preflight_result is not None
+                and support_preflight_result.success is not None
+                and support_preflight_result.success.any().item()
+            )
+            support_contact_preflight = {
+                "attempted": True,
+                "succeeded": preflight_success,
+                "selected_original_goalset_rank": selected_rank,
+                "selected_source_candidate_index": int(
+                    source_indices[selected_rank]
+                ),
+                "temporarily_disabled_links": support_contact_links,
+                "review": support_reviews[0]["reviewed_support_contact"],
+            }
+            if preflight_success:
+                grasp_transforms = grasp_transforms[
+                    selected_rank : selected_rank + 1
+                ]
+                source_indices = source_indices[selected_rank : selected_rank + 1]
+                candidate_scores = candidate_scores[
+                    selected_rank : selected_rank + 1
+                ]
+                quaternions = quaternions[selected_rank : selected_rank + 1]
+                grasp_goals = selected_goal
+
         if free_world_solver is not None:
             free_world_solver.destroy()
-        planner.destroy()
-        print(json.dumps(failure_report, indent=2))
-        print(f"saved: {failure_path}")
-        return 2
+
+        if not preflight_success:
+            failure_report = {
+                "status": "preflight_failed",
+                "reference": {
+                    "curobo_commit": CUROBO_COMMIT,
+                    "planner": "MotionPlanner.plan_pose Issue #663 preflight",
+                    "issue_663": "https://github.com/NVlabs/curobo/issues/663",
+                },
+                "inputs": {
+                    "capture": str(args.capture),
+                    "segmentation": str(args.segmentation),
+                    "pregrasp_plan": str(args.pregrasp_plan),
+                    "prepared_map": str(prepared_map),
+                },
+                "parameters": {
+                    "planner_config_policy": "GraspGenX end2end official defaults",
+                    "max_attempts": args.max_attempts,
+                    "candidate_count": int(len(grasp_transforms)),
+                    "planner_parameters_changed_for_diagnosis": False,
+                    "reviewed_support_contact_opt_in": bool(
+                        args.allow_reviewed_support_contact_preflight
+                    ),
+                },
+                "result": {
+                    "issue_663_preflight_succeeded": False,
+                    "strict_preflight_succeeded": strict_preflight_success,
+                    "support_contact_preflight": support_contact_preflight,
+                    "failure_stage": failure_stage,
+                    "plan_grasp_called": False,
+                },
+                "candidate_diagnostics": candidate_diagnostics,
+                "safety": {
+                    "diagnosis_only": True,
+                    "trajectory_saved": False,
+                    "trajectory_executed": False,
+                    "simulation_only": True,
+                },
+                "next_gate": (
+                    "Use failure_stage to decide whether to regenerate grasps, "
+                    "inspect world collision, or investigate trajectory "
+                    "optimization. Do not tune planner parameters from the "
+                    "preflight status alone."
+                ),
+            }
+            failure_path = output / "grasp_preflight_failure.json"
+            failure_path.write_text(
+                json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+            )
+            planner.destroy()
+            print(json.dumps(failure_report, indent=2))
+            print(f"saved: {failure_path}")
+            return 2
 
     started = time.monotonic()
     result = planner.plan_grasp(
@@ -836,6 +1050,11 @@ def main() -> int:
             "selected_goalset_rank": _goalset_index(result),
             "stage_success": {
                 "issue_663_preflight": preflight_success,
+                "strict_issue_663_preflight": strict_preflight_success,
+                "reviewed_support_contact_preflight": bool(
+                    support_contact_preflight
+                    and support_contact_preflight["succeeded"]
+                ),
                 "goalset": _success_any(getattr(result, "goalset_result", None)),
                 "approach": _success_any(getattr(result, "approach_result", None)),
                 "grasp": _success_any(getattr(result, "grasp_result", None)),
@@ -849,6 +1068,7 @@ def main() -> int:
                 ),
                 "lift_offset_m": args.lift_offset,
                 "candidate_count": int(len(grasp_transforms)),
+                "support_contact_preflight": support_contact_preflight,
             },
             "next_gate": (
                 "Do not tune solver parameters from this status alone; inspect the "
@@ -993,10 +1213,21 @@ def main() -> int:
     strict_full_robot_clear = bool(
         all(not np.any(cost > 0.0) for cost in phase_penetration_costs.values())
     )
+    support_preflight_used = bool(
+        support_contact_preflight and support_contact_preflight["succeeded"]
+    )
+    postvalidation_support_surface_z_m = (
+        float(support_surface_z_m)
+        if support_preflight_used and support_surface_z_m is not None
+        else float(np.min(target_robot_base[:, 2]))
+    )
     transient_finger_support_contact = _review_transient_finger_support_contact(
         phase_contact_reports,
-        support_surface_z_m=float(np.min(target_robot_base[:, 2])),
+        support_surface_z_m=postvalidation_support_surface_z_m,
         support_height_tolerance_m=float(observed_scene.voxel_size_m * 0.5 + 1e-6),
+        map_discretization_allowance_m=(
+            map_discretization_allowance_m if support_preflight_used else 0.0
+        ),
     )
     contact_report = {
         "reference": {
@@ -1309,6 +1540,8 @@ def main() -> int:
             "attachment_sphere_count": 4,
             "attachment_mesh_triangle_count": int(len(target_triangle_faces)),
             "attachment_transform_configuration": "grasp phase end",
+            "strict_issue_663_preflight_succeeded": strict_preflight_success,
+            "support_contact_preflight": support_contact_preflight,
         },
         "result": {
             "planner_reported_success": True,
@@ -1343,6 +1576,7 @@ def main() -> int:
                 strict_full_robot_clear
             ),
             "transient_finger_support_contact": transient_finger_support_contact,
+            "support_contact_preflight": support_contact_preflight,
         },
         "automatic_checks": {
             "issue_663_preflight_succeeded": preflight_success,
@@ -1371,6 +1605,7 @@ def main() -> int:
                 transient_finger_support_contact["accepted"]
             ),
             "support_contact_acceptance_is_simulation_only": True,
+            "reviewed_support_contact_preflight_used": support_preflight_used,
             "robot_self_collision_enabled": True,
             "target_removed_from_world_collision_scene": True,
             "final_approach_planned": True,
