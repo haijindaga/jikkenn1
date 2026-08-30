@@ -158,6 +158,27 @@ def _success_any(result: Any) -> bool:
     return bool(success is not None and success.any().item())
 
 
+def _classify_preflight_failure(candidate_diagnostics: list[dict[str, Any]]) -> str:
+    """Classify exact-grasp preflight failure without changing planner settings."""
+    world_success_count = sum(
+        int(item["collision_aware_ik"]["success_count"])
+        for item in candidate_diagnostics
+    )
+    if world_success_count > 0:
+        return "trajectory_optimization_failed_after_collision_aware_ik"
+
+    free_world_summaries = [
+        item["ik_without_world_scene_control"]
+        for item in candidate_diagnostics
+        if item.get("ik_without_world_scene_control") is not None
+    ]
+    if not free_world_summaries:
+        return "collision_aware_ik_failed_without_control_measurement"
+    if any(int(summary["success_count"]) > 0 for summary in free_world_summaries):
+        return "world_collision_rejects_exact_grasp_ik"
+    return "exact_grasp_ik_fails_even_without_world_collision"
+
+
 def _goalset_index(result: Any) -> int | None:
     value = getattr(result, "goalset_index", None)
     if value is None:
@@ -428,6 +449,7 @@ def main() -> int:
     from panda_handover.curobo_planning import (
         load_singleview_observed_pointcloud,
         rotation_matrix_to_quaternion_wxyz,
+        summarize_ik_result_arrays,
     )
     from panda_handover.geometry import transform_points
 
@@ -440,6 +462,16 @@ def main() -> int:
         check=True,
     )
     pregrasp_report, grasp_transforms = _load_reviewed_pregrasp(args.pregrasp_plan)
+    source_indices = np.load(
+        args.pregrasp_plan / "source_candidate_indices.npy", allow_pickle=False
+    ).reshape(-1)
+    candidate_scores = np.load(
+        args.pregrasp_plan / "candidate_scores.npy", allow_pickle=False
+    ).reshape(-1)
+    if len(source_indices) != len(grasp_transforms):
+        raise ValueError("source candidate indices do not match grasp transforms")
+    if len(candidate_scores) != len(grasp_transforms):
+        raise ValueError("candidate scores do not match grasp transforms")
     prepared_map_value = pregrasp_report.get("inputs", {}).get("prepared_map")
     if not isinstance(prepared_map_value, str) or not prepared_map_value:
         raise ValueError("source pre-grasp report has no prepared_map provenance")
@@ -482,6 +514,7 @@ def main() -> int:
     from curobo._src.geom.types import Mesh, SceneCfg
     from curobo._src.motion.motion_planner import MotionPlanner
     from curobo._src.motion.motion_planner_cfg import MotionPlannerCfg
+    from curobo._src.solver.solver_ik import IKSolver
     from curobo._src.state.state_joint import JointState
     from curobo._src.state.state_joint_trajectory_ops import trim_joint_state_trajectory
     from curobo._src.types.device_cfg import DeviceCfg
@@ -553,7 +586,128 @@ def main() -> int:
         and preflight.success.any().item()
     )
     if not preflight_success:
-        raise RuntimeError("cuRobo Issue #663 preflight goalset plan did not succeed")
+        def summarize_ik_result(result: Any) -> dict[str, Any]:
+            return summarize_ik_result_arrays(
+                _cpu_numpy(result.success),
+                feasible=(
+                    _cpu_numpy(result.feasible)
+                    if result.feasible is not None
+                    else None
+                ),
+                position_error=(
+                    _cpu_numpy(result.position_error)
+                    if result.position_error is not None
+                    else None
+                ),
+                rotation_error=(
+                    _cpu_numpy(result.rotation_error)
+                    if result.rotation_error is not None
+                    else None
+                ),
+                goalset_index=(
+                    _cpu_numpy(result.goalset_index)
+                    if result.goalset_index is not None
+                    else None
+                ),
+            )
+
+        # Diagnose each exact grasp independently. This never saves an executable
+        # trajectory and leaves all reviewed planner settings unchanged.
+        candidate_diagnostics: list[dict[str, Any]] = []
+        free_world_solver = None
+        for rank in range(len(grasp_transforms)):
+            candidate_goal = GoalToolPose(
+                tool_frames=planner.tool_frames,
+                position=torch.from_numpy(
+                    grasp_transforms[rank : rank + 1, :3, 3]
+                ).to(device_cfg.device)[None, None, None, :, :],
+                quaternion=torch.from_numpy(quaternions[rank : rank + 1]).to(
+                    device_cfg.device
+                )[None, None, None, :, :],
+            )
+            planner.reset_seed()
+            world_ik_result = planner.ik_solver.solve_pose(
+                candidate_goal,
+                return_seeds=planner.trajopt_solver.config.num_seeds,
+                current_state=current_state,
+            )
+            world_ik_summary = summarize_ik_result(world_ik_result)
+            free_world_summary = None
+            if int(world_ik_summary["success_count"]) == 0:
+                if free_world_solver is None:
+                    free_world_cfg = MotionPlannerCfg.create(
+                        robot=args.robot,
+                        scene_model=None,
+                        device_cfg=device_cfg,
+                        max_goalset=1,
+                    )
+                    free_world_solver = IKSolver(
+                        free_world_cfg.ik_solver_config, None
+                    )
+                free_world_result = free_world_solver.solve_pose(
+                    candidate_goal,
+                    return_seeds=planner.trajopt_solver.config.num_seeds,
+                    current_state=current_state,
+                )
+                free_world_summary = summarize_ik_result(free_world_result)
+            candidate_diagnostics.append(
+                {
+                    "goalset_rank": rank,
+                    "source_candidate_index": int(source_indices[rank]),
+                    "graspgenx_score": float(candidate_scores[rank]),
+                    "collision_aware_ik": world_ik_summary,
+                    "ik_without_world_scene_control": free_world_summary,
+                }
+            )
+
+        failure_stage = _classify_preflight_failure(candidate_diagnostics)
+        failure_report = {
+            "status": "preflight_failed",
+            "reference": {
+                "curobo_commit": CUROBO_COMMIT,
+                "planner": "MotionPlanner.plan_pose Issue #663 preflight",
+                "issue_663": "https://github.com/NVlabs/curobo/issues/663",
+            },
+            "inputs": {
+                "capture": str(args.capture),
+                "segmentation": str(args.segmentation),
+                "pregrasp_plan": str(args.pregrasp_plan),
+                "prepared_map": str(prepared_map),
+            },
+            "parameters": {
+                "planner_config_policy": "GraspGenX end2end official defaults",
+                "max_attempts": args.max_attempts,
+                "candidate_count": int(len(grasp_transforms)),
+                "planner_parameters_changed_for_diagnosis": False,
+            },
+            "result": {
+                "issue_663_preflight_succeeded": False,
+                "failure_stage": failure_stage,
+                "plan_grasp_called": False,
+            },
+            "candidate_diagnostics": candidate_diagnostics,
+            "safety": {
+                "diagnosis_only": True,
+                "trajectory_saved": False,
+                "trajectory_executed": False,
+                "simulation_only": True,
+            },
+            "next_gate": (
+                "Use failure_stage to decide whether to regenerate grasps, inspect "
+                "world collision, or investigate trajectory optimization. Do not "
+                "tune planner parameters from the preflight status alone."
+            ),
+        }
+        failure_path = output / "grasp_preflight_failure.json"
+        failure_path.write_text(
+            json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+        )
+        if free_world_solver is not None:
+            free_world_solver.destroy()
+        planner.destroy()
+        print(json.dumps(failure_report, indent=2))
+        print(f"saved: {failure_path}")
+        return 2
 
     started = time.monotonic()
     result = planner.plan_grasp(
@@ -1016,12 +1170,6 @@ def main() -> int:
             },
         }
 
-    source_indices = np.load(
-        args.pregrasp_plan / "source_candidate_indices.npy", allow_pickle=False
-    )
-    candidate_scores = np.load(
-        args.pregrasp_plan / "candidate_scores.npy", allow_pickle=False
-    )
     report = {
         "status": "success",
         "reference": {

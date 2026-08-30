@@ -25,6 +25,33 @@ class GraspLiftScriptTests(unittest.TestCase):
         cls.review_transient_finger_support_contact = staticmethod(
             namespace["_review_transient_finger_support_contact"]
         )
+        cls.classify_preflight_failure = staticmethod(
+            namespace["_classify_preflight_failure"]
+        )
+
+    def test_preflight_failure_separates_collision_from_geometric_ik(self):
+        def candidate(world_success, free_success):
+            return {
+                "collision_aware_ik": {"success_count": world_success},
+                "ik_without_world_scene_control": (
+                    {"success_count": free_success}
+                    if free_success is not None
+                    else None
+                ),
+            }
+
+        self.assertEqual(
+            self.classify_preflight_failure([candidate(1, None)]),
+            "trajectory_optimization_failed_after_collision_aware_ik",
+        )
+        self.assertEqual(
+            self.classify_preflight_failure([candidate(0, 1)]),
+            "world_collision_rejects_exact_grasp_ik",
+        )
+        self.assertEqual(
+            self.classify_preflight_failure([candidate(0, 0)]),
+            "exact_grasp_ik_fails_even_without_world_collision",
+        )
 
     def test_flat_curobo_faces_are_restored_without_geometry_changes(self):
         vertices = np.array(
@@ -196,6 +223,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertNotIn("        use_cuda_graph=False,", source)
         self.assertIn("planner.warmup(enable_graph=False, num_warmup_iterations=1)", source)
         self.assertIn("https://github.com/NVlabs/curobo/issues/663", source)
+        self.assertIn('"grasp_preflight_failure.json"', source)
+        self.assertIn('"planner_parameters_changed_for_diagnosis": False', source)
         self.assertIn("https://github.com/NVlabs/curobo/issues/692", source)
         self.assertIn("trim_joint_state_trajectory(", source)
 
