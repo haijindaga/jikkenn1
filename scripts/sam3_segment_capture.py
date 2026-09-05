@@ -6,8 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
+
+
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.segmentation import (
     infer_sam3_prompts,

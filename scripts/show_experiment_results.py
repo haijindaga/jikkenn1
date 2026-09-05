@@ -5,6 +5,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.result_report import generate_result_report, open_result_report
 
