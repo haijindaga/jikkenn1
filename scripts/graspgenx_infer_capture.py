@@ -19,6 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--segmentation", type=Path, required=True)
+    parser.add_argument(
+        "--segmentation-role",
+        choices=("whole_object", "grasp_part"),
+        default="whole_object",
+        help="Semantic role of the supplied mask; recorded for provenance",
+    )
     parser.add_argument("--output", type=Path, default=Path("outputs/graspgenx_smoke"))
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5556)
@@ -93,6 +99,9 @@ def main() -> int:
     empty_scores = np.empty((0,), dtype=np.float32)
     grasps, scores, tags = results.get(1, (empty_grasps, empty_scores, []))
     parameters = {
+        "segmentation_directory": str(args.segmentation.resolve()),
+        "segmentation_role": args.segmentation_role,
+        "fallback_to_whole_object": False,
         "planner": args.planner,
         "gripper": "franka_panda",
         "min_object_points": args.min_object_points,

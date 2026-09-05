@@ -7,8 +7,8 @@ boundaries but executes them in order:
 2. optional Ollama vision inference with strict `object`, `grasp_part`, and
    `receive_part` structured output
 3. existing SAM3 multi-prompt segmentation
-4. cuRobo observed-point-cloud map preparation
-5. managed GraspGenX server startup, inference, and shutdown
+4. cuRobo observed-point-cloud map preparation with the whole target removed
+5. managed GraspGenX server startup, grasp-part inference, and shutdown
 6. GraspGenX static scene collision filtering
 7. cuRobo pre-grasp and candidate-specific grasp/lift planning
 8. Isaac physical replay of at most five candidates, stopping at the first pick
@@ -27,7 +27,7 @@ conda activate env_isaaclab
 python scripts/run_sim_grasp_pipeline.py \
   --scene-usd scenes/scissors_01.usda \
   --target-object scissors \
-  --ollama-model qwen3-vl:4b \
+  --ollama-model gemma3:12b \
   --output outputs/scissors_e2e_v1 \
   --allow-reviewed-support-contact-preflight
 ```
@@ -46,6 +46,14 @@ Invalid JSON, extra fields, an altered object name, or ambiguous part phrases
 fail closed. The exact Ollama request, response, model digest when available,
 and input-image SHA-256 are saved under `vlm/vlm_part_discovery.json`.
 `keep_alive=0` unloads the VLM before SAM3 starts.
+
+In VLM mode, only the saved `parts/grasp_part` mask is sent to GraspGenX for
+candidate generation. The whole-object mask remains authoritative for removing
+the target from the observed collision map, filtering candidates against the
+surrounding scene, and constructing cuRobo's attached-object geometry. A
+missing or undersampled grasp-part mask fails the inference stage; it never
+silently falls back to whole-object grasp generation. `results.html` records
+both mask paths and their distinct roles.
 
 The previous manual whole-object mode remains available for controlled
 comparisons and debugging:

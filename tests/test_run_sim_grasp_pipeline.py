@@ -68,6 +68,13 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             stages["curobo_grasp_lift_trials"].command,
         )
         self.assertIn("--prompt", stages["sam3_segmentation"].command)
+        infer = stages["graspgenx_inference"].command
+        self.assertEqual(
+            infer[infer.index("--segmentation") + 1], str(paths.segmentation)
+        )
+        self.assertEqual(
+            infer[infer.index("--segmentation-role") + 1], "whole_object"
+        )
 
     def test_vlm_mode_inserts_ollama_before_sam3(self) -> None:
         args = MODULE.parse_args(
@@ -96,6 +103,52 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         )
         self.assertIn("--vlm-result", stages["sam3_segmentation"].command)
         self.assertNotIn("--sam3-prompt", stages["capture_rgbd"].command)
+        infer = stages["graspgenx_inference"].command
+        self.assertEqual(
+            infer[infer.index("--segmentation") + 1],
+            str(paths.segmentation / "parts" / "grasp_part"),
+        )
+        self.assertEqual(
+            infer[infer.index("--segmentation-role") + 1], "grasp_part"
+        )
+        for stage_name in (
+            "curobo_map",
+            "static_collision_filter",
+            "curobo_grasp_lift_trials",
+        ):
+            command = stages[stage_name].command
+            self.assertEqual(
+                command[command.index("--segmentation") + 1], str(paths.segmentation)
+            )
+
+    def test_manual_part_prompt_also_drives_candidate_generation(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "hammer",
+                "--grasp-part-prompt",
+                "hammer handle",
+                "--receive-part-prompt",
+                "hammer head",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        infer = stages["graspgenx_inference"].command
+        self.assertEqual(
+            infer[infer.index("--segmentation") + 1],
+            str(paths.segmentation / "parts" / "grasp_part"),
+        )
 
     def test_vlm_mode_requires_explicit_model(self) -> None:
         with self.assertRaises(SystemExit):

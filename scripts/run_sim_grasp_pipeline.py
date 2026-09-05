@@ -307,6 +307,15 @@ def build_stages(
 ) -> dict[str, Stage]:
     script = project_root / "scripts"
     scene_usd = args.scene_usd.expanduser().resolve()
+    use_grasp_part = bool(args.target_object is not None or args.grasp_part_prompt)
+    grasp_candidate_segmentation = (
+        paths.segmentation / "parts" / "grasp_part"
+        if use_grasp_part
+        else paths.segmentation
+    )
+    grasp_candidate_segmentation_role = (
+        "grasp_part" if use_grasp_part else "whole_object"
+    )
 
     capture_command = [
         str(isaac_python),
@@ -374,7 +383,9 @@ def build_stages(
         "--capture",
         str(paths.capture),
         "--segmentation",
-        str(paths.segmentation),
+        str(grasp_candidate_segmentation),
+        "--segmentation-role",
+        grasp_candidate_segmentation_role,
         "--output",
         str(paths.raw_candidates),
         "--host",
@@ -557,6 +568,22 @@ def main(argv: Iterable[str] | None = None) -> int:
             "max_pregrasp_candidates": args.max_pregrasp_candidates,
             "max_physical_trials": args.max_physical_trials,
             "finger_drive_preset": "isaaclab-franka",
+            "grasp_candidate_segmentation": (
+                "grasp_part" if args.target_object is not None or args.grasp_part_prompt
+                else "whole_object"
+            ),
+            "grasp_candidate_segmentation_path": str(
+                paths.segmentation / "parts" / "grasp_part"
+                if args.target_object is not None or args.grasp_part_prompt
+                else paths.segmentation
+            ),
+            "whole_object_segmentation_path": str(paths.segmentation),
+            "whole_object_uses": [
+                "target_removal_from_observed_collision_map",
+                "static_surrounding-scene_collision_filter",
+                "attached_object_geometry",
+            ],
+            "grasp_part_fallback_to_whole_object": False,
             "allow_reviewed_support_contact_preflight": bool(
                 args.allow_reviewed_support_contact_preflight
             ),

@@ -90,6 +90,7 @@ class GraspGenXScriptTests(unittest.TestCase):
                 str(script_path),
                 "--capture", str(capture),
                 "--segmentation", str(segmentation),
+                "--segmentation-role", "grasp_part",
                 "--output", str(output),
                 "--min-object-points", "1",
             ]
@@ -103,6 +104,9 @@ class GraspGenXScriptTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertTrue((output / "grasps_camera.npy").is_file())
             self.assertTrue((output / "panda_hand_world.npy").is_file())
+            report = json.loads((output / "graspgenx_check.json").read_text())
+            self.assertEqual(report["parameters"]["segmentation_role"], "grasp_part")
+            self.assertFalse(report["parameters"]["fallback_to_whole_object"])
 
     def test_official_collision_filter_contract_uses_surrounding_scene(self):
         project = Path(__file__).resolve().parents[1]
