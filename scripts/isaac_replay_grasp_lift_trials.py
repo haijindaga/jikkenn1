@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,7 @@ def parse_args() -> argparse.Namespace:
         choices=("authored-usd", "isaaclab-franka"),
         default="isaaclab-franka",
     )
+    parser.add_argument("--finger-drive-scale", type=float, default=1.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--simulation-only", action="store_true")
     args = parser.parse_args()
@@ -29,6 +31,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--simulation-only is required")
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
+        parser.error("--finger-drive-scale must be positive and finite")
+    if args.finger_drive_scale != 1.0 and args.finger_drive_preset != "isaaclab-franka":
+        parser.error("scaled diagnostics require --finger-drive-preset isaaclab-franka")
     return args
 
 
@@ -66,6 +72,12 @@ def main() -> int:
             "maximum_physical_trials": args.max_physical_trials,
             "stop_at_first_physical_pick": True,
             "finger_drive_preset_for_every_candidate": args.finger_drive_preset,
+            "finger_drive_diagnostic_scale_for_every_candidate": args.finger_drive_scale,
+            "finger_drive_scaling_policy": (
+                "max_force and stiffness multiplied by scale; damping multiplied "
+                "by sqrt(scale); simulation diagnostic only"
+            ),
+            "hardware_force_calibrated": False,
             "candidate_specific_parameter_tuning": False,
         },
         "attempts": [],
@@ -90,6 +102,8 @@ def main() -> int:
             str(trial_output),
             "--finger-drive-preset",
             args.finger_drive_preset,
+            "--finger-drive-scale",
+            str(args.finger_drive_scale),
             "--simulation-only",
         ]
         if args.headless:

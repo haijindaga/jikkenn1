@@ -301,6 +301,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('output / "retention_finger_gap_m.npy"', script)
         self.assertIn('"peak_object_lift_m": peak_object_lift_m', script)
         self.assertIn('"--finger-drive-max-force-n"', script)
+        self.assertIn('"--finger-drive-scale"', script)
         self.assertIn('"--finger-drive-preset"', script)
         self.assertIn('default="authored-usd"', script)
         self.assertIn('"finger_drive_preset_definition"', script)
@@ -313,6 +314,8 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"max_force_before": before["max_force"]', script)
         self.assertIn('"max_force_after": after["max_force"]', script)
         self.assertIn("not calibrated as total", script)
+        self.assertIn('"finger_drive_diagnostic_scale"', script)
+        self.assertIn('"hardware_force_calibrated": False', script)
         self.assertNotIn("GetStaticFrictionAttr().Set", script)
 
 

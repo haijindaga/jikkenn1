@@ -77,6 +77,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--finger-drive-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Simulation-only diagnostic scale: multiply max force and stiffness "
+            "by this value and damping by its square root. This is not a "
+            "hardware-calibrated grasp-force command."
+        ),
+    )
+    parser.add_argument(
         "--simulation-only",
         action="store_true",
         help="Required acknowledgement: this command controls only an Isaac Sim robot",
@@ -100,6 +110,14 @@ def parse_args() -> argparse.Namespace:
         or args.finger_drive_max_force_n <= 0.0
     ):
         parser.error("--finger-drive-max-force-n must be positive and finite")
+    if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
+        parser.error("--finger-drive-scale must be positive and finite")
+    if args.finger_drive_scale != 1.0 and args.finger_drive_preset == "authored-usd":
+        parser.error("--finger-drive-scale requires --finger-drive-preset isaaclab-franka")
+    if args.finger_drive_scale != 1.0 and args.finger_drive_max_force_n is not None:
+        parser.error(
+            "--finger-drive-scale cannot be combined with --finger-drive-max-force-n"
+        )
     return args
 
 
@@ -108,6 +126,7 @@ finger_drive_preset = FINGER_DRIVE_PRESETS[args.finger_drive_preset]
 requested_finger_drive_values = resolve_finger_drive_values(
     args.finger_drive_preset,
     explicit_max_force=args.finger_drive_max_force_n,
+    diagnostic_scale=args.finger_drive_scale,
 )
 replay = load_grasp_lift_replay(args.capture, args.plan)
 scene_usd = None
@@ -844,6 +863,14 @@ try:
             "finger_drive_preset_definition": finger_drive_preset.to_dict(),
             "effective_requested_finger_drive_values": requested_finger_drive_values,
             "requested_finger_drive_max_force_n": args.finger_drive_max_force_n,
+            "finger_drive_diagnostic_scale": args.finger_drive_scale,
+            "finger_drive_scaling_policy": {
+                "max_force_multiplier": args.finger_drive_scale,
+                "stiffness_multiplier": args.finger_drive_scale,
+                "damping_multiplier": math.sqrt(args.finger_drive_scale),
+                "diagnostic_only": args.finger_drive_scale != 1.0,
+                "hardware_force_calibrated": False,
+            },
             "finger_drive_force_interpretation": (
                 "OpenUSD linear DriveAPI max-force value; not calibrated as total "
                 "Franka Hand grasping force"

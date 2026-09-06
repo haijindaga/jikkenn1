@@ -63,6 +63,8 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             str(Path("/graspgenx/.venv/bin/python")),
         )
         self.assertIn("--simulation-only", stages["isaac_physical_trials"].command)
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "1.0")
         self.assertIn(
             "--allow-reviewed-support-contact-preflight",
             stages["curobo_grasp_lift_trials"].command,
@@ -162,6 +164,30 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                     "outputs/e2e",
                 ]
             )
+
+    def test_fivefold_drive_diagnostic_is_forwarded_to_every_replay(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--finger-drive-scale",
+                "5",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "5.0")
 
     def test_resume_accepts_only_expected_report_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -31,6 +31,22 @@ class PhysicsBaselineTests(unittest.TestCase):
             {"max_force": 70.0, "stiffness": 2000.0, "damping": 100.0},
         )
 
+    def test_diagnostic_scale_preserves_approximate_damping_ratio(self):
+        values = resolve_finger_drive_values(
+            "isaaclab-franka", diagnostic_scale=5.0
+        )
+        self.assertEqual(values["max_force"], 1000.0)
+        self.assertEqual(values["stiffness"], 10000.0)
+        self.assertAlmostEqual(values["damping"], 223.60679774997897)
+
+    def test_cannot_scale_unresolved_authored_usd_values(self):
+        with self.assertRaisesRegex(ValueError, "cannot be scaled"):
+            resolve_finger_drive_values("authored-usd", diagnostic_scale=5.0)
+
+    def test_invalid_diagnostic_scale_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            resolve_finger_drive_values("isaaclab-franka", diagnostic_scale=0.0)
+
     def test_unknown_preset_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unknown finger-drive preset"):
             resolve_finger_drive_values("hammer-special")

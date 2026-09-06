@@ -75,6 +75,14 @@ both success and failure and opens in the default browser. `--headless` or
 saved. It embeds every saved image, provides expandable JSON previews, and
 links every NPY, PLY, log, and report artifact.
 
+For a controlled simulation-only high-drive diagnostic, reuse the same saved
+capture and candidate plans with `scripts/isaac_replay_grasp_lift_trials.py`
+and pass `--finger-drive-scale 5`. The scale multiplies the source-backed
+`max_force` and `stiffness` by 5 and `damping` by `sqrt(5)`. Every candidate in
+the run receives the same values, and reports explicitly mark the condition as
+diagnostic and not hardware-force calibrated. Do not compare it to a baseline
+generated from different candidate plans.
+
 To generate or reopen the same report for an existing output directory:
 
 ```bash

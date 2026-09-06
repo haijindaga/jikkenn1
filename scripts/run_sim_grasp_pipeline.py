@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shlex
 import shutil
 import socket
@@ -93,6 +94,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--collision-threshold", type=float, default=0.005)
     parser.add_argument("--max-pregrasp-candidates", type=int, default=100)
     parser.add_argument("--max-physical-trials", type=int, default=5)
+    parser.add_argument(
+        "--finger-drive-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Simulation-only diagnostic scale passed unchanged to every physical "
+            "replay; max force and stiffness use scale, damping uses sqrt(scale)"
+        ),
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--sam3-allow-download", action="store_true")
     parser.add_argument(
@@ -142,6 +152,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--topk cannot exceed --num-grasps")
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
+        parser.error("--finger-drive-scale must be positive and finite")
     if args.collision_threshold <= 0:
         parser.error("--collision-threshold must be positive")
     return args
@@ -459,6 +471,8 @@ def build_stages(
         str(args.max_physical_trials),
         "--finger-drive-preset",
         "isaaclab-franka",
+        "--finger-drive-scale",
+        str(args.finger_drive_scale),
         "--simulation-only",
     ]
     if args.headless:
@@ -568,6 +582,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             "max_pregrasp_candidates": args.max_pregrasp_candidates,
             "max_physical_trials": args.max_physical_trials,
             "finger_drive_preset": "isaaclab-franka",
+            "finger_drive_diagnostic_scale": args.finger_drive_scale,
+            "finger_drive_diagnostic_only": args.finger_drive_scale != 1.0,
+            "finger_drive_hardware_force_calibrated": False,
             "grasp_candidate_segmentation": (
                 "grasp_part" if args.target_object is not None or args.grasp_part_prompt
                 else "whole_object"

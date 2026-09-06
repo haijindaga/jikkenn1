@@ -367,6 +367,10 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"--source-candidate-index"', planner_runner)
         self.assertIn('"candidate_specific_parameter_tuning": False', planner_runner)
         self.assertIn('default="isaaclab-franka"', replay_runner)
+        self.assertIn('"--finger-drive-scale"', replay_runner)
+        self.assertIn(
+            '"finger_drive_diagnostic_scale_for_every_candidate"', replay_runner
+        )
         self.assertIn('"stop_at_first_physical_pick": True', replay_runner)
         self.assertIn('report.get("physical_object", {})', replay_runner)
         self.assertIn('if completed.returncode == 0 and status == "success"', replay_runner)

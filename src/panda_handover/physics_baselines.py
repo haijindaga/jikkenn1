@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 
 
@@ -54,20 +55,45 @@ def resolve_finger_drive_values(
     preset_name: str,
     *,
     explicit_max_force: float | None = None,
+    diagnostic_scale: float = 1.0,
 ) -> dict[str, float | None]:
-    """Resolve a named baseline with the legacy explicit max-force override."""
+    """Resolve a baseline and an explicitly labelled diagnostic strength scale.
+
+    The scale multiplies max force and stiffness. Damping is multiplied by the
+    square root of the scale to approximately preserve the linear PD damping
+    ratio for a fixed effective mass.
+    """
 
     try:
         preset = FINGER_DRIVE_PRESETS[preset_name]
     except KeyError as exc:
         choices = ", ".join(sorted(FINGER_DRIVE_PRESETS))
         raise ValueError(f"unknown finger-drive preset {preset_name!r}; choose {choices}") from exc
+    if not math.isfinite(diagnostic_scale) or diagnostic_scale <= 0.0:
+        raise ValueError("diagnostic_scale must be positive and finite")
+    if diagnostic_scale != 1.0 and any(
+        value is None for value in (preset.max_force, preset.stiffness, preset.damping)
+    ):
+        raise ValueError(
+            f"preset {preset_name!r} cannot be scaled because its values are not explicit"
+        )
+    max_force = (
+        float(explicit_max_force)
+        if explicit_max_force is not None
+        else preset.max_force
+    )
     return {
         "max_force": (
-            float(explicit_max_force)
-            if explicit_max_force is not None
-            else preset.max_force
+            None if max_force is None else float(max_force) * diagnostic_scale
         ),
-        "stiffness": preset.stiffness,
-        "damping": preset.damping,
+        "stiffness": (
+            None
+            if preset.stiffness is None
+            else float(preset.stiffness) * diagnostic_scale
+        ),
+        "damping": (
+            None
+            if preset.damping is None
+            else float(preset.damping) * math.sqrt(diagnostic_scale)
+        ),
     }
