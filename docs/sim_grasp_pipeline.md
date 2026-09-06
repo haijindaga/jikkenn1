@@ -47,6 +47,13 @@ fail closed. The exact Ollama request, response, model digest when available,
 and input-image SHA-256 are saved under `vlm/vlm_part_discovery.json`.
 `keep_alive=0` unloads the VLM before SAM3 starts.
 
+An exploratory task instruction can be added without changing the three-field
+output contract, for example `--task-instruction "Grasp near the estimated
+center of mass."`. The VLM must translate abstract requests into a visible
+semantic region suitable for SAM3; neither the VLM nor SAM3 output is treated
+as a measured physical center of mass. The exact instruction and resulting
+part phrase are saved in the VLM report for manual review.
+
 In VLM mode, only the saved `parts/grasp_part` mask is sent to GraspGenX for
 candidate generation. The whole-object mask remains authoritative for removing
 the target from the observed collision map, filtering candidates against the

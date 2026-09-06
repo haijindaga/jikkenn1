@@ -35,6 +35,9 @@ Rules:
 - Every value must be a short English noun phrase suitable as a SAM3 text prompt.
 - Each part phrase must be self-contained and include the complete object phrase.
 - grasp_part and receive_part must name different regions.
+- If the user supplies an additional grasp instruction, follow it when choosing
+  grasp_part. Translate abstract requests such as center of mass into the closest
+  visually identifiable semantic region; do not claim an exact physical point.
 - Do not add explanations, markdown, confidence scores, or extra fields.
 """
 
@@ -95,15 +98,25 @@ class HandoverParts:
         return asdict(self)
 
 
-def build_user_prompt(target_object: str) -> str:
+def build_user_prompt(
+    target_object: str, *, task_instruction: str | None = None
+) -> str:
     target = target_object.strip()
     if not target:
         raise ValueError("target object must not be empty")
-    return (
+    prompt = (
         f"Target object: {target}\n"
         "Task: hand the object to a human. Identify the region the robot should "
         "grasp and the distinct region the human should receive."
     )
+    if task_instruction is not None:
+        instruction = task_instruction.strip()
+        if not instruction:
+            raise ValueError("task instruction must not be empty")
+        if len(instruction) > 500:
+            raise ValueError("task instruction is too long")
+        prompt += f"\nAdditional grasp instruction: {instruction}"
+    return prompt
 
 
 def _request_json(
@@ -162,6 +175,7 @@ def discover_handover_parts(
     model: str,
     base_url: str = "http://127.0.0.1:11434",
     timeout_s: float = 180.0,
+    task_instruction: str | None = None,
 ) -> tuple[HandoverParts, dict[str, Any]]:
     """Call Ollama's official chat API with a strict JSON schema."""
     image_path = Path(image_path)
@@ -173,7 +187,9 @@ def discover_handover_parts(
         raise ValueError("timeout must be positive")
 
     image_bytes = image_path.read_bytes()
-    user_prompt = build_user_prompt(target_object)
+    user_prompt = build_user_prompt(
+        target_object, task_instruction=task_instruction
+    )
     payload = {
         "model": model,
         "messages": [
@@ -211,6 +227,9 @@ def discover_handover_parts(
             "base_url": base_url,
             "model": model,
             "target_object": target_object.strip(),
+            "task_instruction": (
+                task_instruction.strip() if task_instruction is not None else None
+            ),
             "system_prompt": SYSTEM_PROMPT,
             "user_prompt": user_prompt,
             "schema": HANDOVER_PARTS_SCHEMA,

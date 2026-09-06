@@ -19,6 +19,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--target-object", required=True)
+    parser.add_argument(
+        "--task-instruction",
+        help="Optional task-specific instruction used to choose the grasp part",
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--timeout-s", type=float, default=180.0)
@@ -37,12 +41,14 @@ def main() -> int:
             model=args.model,
             base_url=args.ollama_url,
             timeout_s=args.timeout_s,
+            task_instruction=args.task_instruction,
         )
         report = {
             "status": "success",
             "inputs": {
                 "capture": str(args.capture.resolve()),
                 "target_object": args.target_object.strip(),
+                "task_instruction": args.task_instruction,
             },
             "parameters": {
                 "model": args.model,
@@ -60,6 +66,7 @@ def main() -> int:
             "inputs": {
                 "capture": str(args.capture.resolve()),
                 "target_object": args.target_object.strip(),
+                "task_instruction": args.task_instruction,
             },
             "failure": {"type": type(exc).__name__, "message": str(exc)},
             "automatic_checks_passed": False,

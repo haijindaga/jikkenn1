@@ -189,6 +189,36 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "5.0")
 
+    def test_task_instruction_is_forwarded_only_to_vlm(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--target-object",
+                "hammer",
+                "--task-instruction",
+                "Grasp near the estimated center of mass.",
+                "--ollama-model",
+                "gemma3:12b",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        vlm = stages["ollama_vlm"].command
+        self.assertEqual(
+            vlm[vlm.index("--task-instruction") + 1],
+            "Grasp near the estimated center of mass.",
+        )
+        self.assertNotIn("--task-instruction", stages["sam3_segmentation"].command)
+
     def test_resume_accepts_only_expected_report_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "report.json"

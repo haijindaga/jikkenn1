@@ -75,6 +75,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--grasp-part-prompt")
     parser.add_argument("--receive-part-prompt")
     parser.add_argument(
+        "--task-instruction",
+        help="Optional VLM instruction for choosing the grasp part",
+    )
+    parser.add_argument(
         "--ollama-model",
         help="Explicit Ollama vision model tag; required with --target-object",
     )
@@ -140,6 +144,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         args.grasp_part_prompt or args.receive_part_prompt
     ):
         parser.error("manual part prompts cannot be combined with --target-object")
+    if args.task_instruction is not None and args.target_object is None:
+        parser.error("--task-instruction requires --target-object")
+    if args.task_instruction is not None and not args.task_instruction.strip():
+        parser.error("--task-instruction must not be empty")
     if args.ollama_timeout_s <= 0:
         parser.error("--ollama-timeout-s must be positive")
     if args.port <= 0 or args.port > 65535:
@@ -358,6 +366,8 @@ def build_stages(
             "--output",
             str(paths.vlm),
         ]
+        if args.task_instruction is not None:
+            vlm_command.extend(["--task-instruction", args.task_instruction])
 
     sam3_command = [
         str(isaac_python),
@@ -570,6 +580,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "scene_usd": str(scene_usd),
             "prompt": args.prompt,
             "target_object": args.target_object,
+            "task_instruction": args.task_instruction,
             "ollama_model": args.ollama_model,
             "ollama_url": args.ollama_url if args.target_object else None,
             "isaac_python": str(isaac_python),

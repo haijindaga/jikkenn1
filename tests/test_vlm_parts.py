@@ -63,6 +63,14 @@ class HandoverPartsTests(unittest.TestCase):
         self.assertIn("Target object: knife", prompt)
         self.assertIn("hand", prompt)
 
+    def test_user_prompt_records_additional_grasp_instruction(self) -> None:
+        prompt = build_user_prompt(
+            "hammer", task_instruction="Grasp near the estimated center of mass."
+        )
+        self.assertIn("Target object: hammer", prompt)
+        self.assertIn("Additional grasp instruction", prompt)
+        self.assertIn("center of mass", prompt)
+
     def test_ollama_request_uses_schema_and_unloads_model(self) -> None:
         calls = []
 
@@ -89,6 +97,7 @@ class HandoverPartsTests(unittest.TestCase):
                     image,
                     target_object="hammer",
                     model="qwen3-vl:4b",
+                    task_instruction="Grasp near the estimated center of mass.",
                 )
         self.assertEqual(parts.receive_part, "hammer handle")
         payload = calls[0][2]
@@ -98,6 +107,10 @@ class HandoverPartsTests(unittest.TestCase):
         self.assertEqual(payload["options"]["temperature"], 0)
         self.assertFalse(payload["format"]["additionalProperties"])
         self.assertEqual(metadata["model_digest"], "digest")
+        self.assertEqual(
+            metadata["request"]["task_instruction"],
+            "Grasp near the estimated center of mass.",
+        )
 
 
 if __name__ == "__main__":
