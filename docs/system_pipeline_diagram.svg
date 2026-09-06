@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1040" viewBox="0 0 1800 1040" role="img" aria-labelledby="title desc">
+  <title id="title">Unknown-object RGB-D grasping system pipeline</title>
+  <desc id="desc">Current single-view simulation pipeline from task instruction and calibrated RGB-D through Ollama, SAM3, GraspGenX, cuRobo, and Isaac Sim physical validation. A dashed future lane shows the RoboSeg-inspired multi-view semantic reconstruction extension.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#405268"/>
+    </marker>
+    <marker id="arrow-fail" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#b44848"/>
+    </marker>
+    <style>
+      .title { font: 700 32px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #172335; }
+      .subtitle { font: 500 17px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #516174; }
+      .lane { font: 700 18px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #243449; letter-spacing: .04em; }
+      .node-title { font: 700 20px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #172335; }
+      .node-text { font: 500 15px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #36475b; }
+      .small { font: 500 13px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #5f6f80; }
+      .note { font: 600 14px "Yu Gothic UI", "Noto Sans JP", sans-serif; fill: #29394c; }
+      .edge { fill: none; stroke: #405268; stroke-width: 3; marker-end: url(#arrow); }
+      .edge-dashed { fill: none; stroke: #68798d; stroke-width: 2.5; stroke-dasharray: 9 7; marker-end: url(#arrow); }
+      .edge-fail { fill: none; stroke: #b44848; stroke-width: 3; stroke-dasharray: 8 6; marker-end: url(#arrow-fail); }
+      .perception { fill: #eaf4ff; stroke: #4b83b8; stroke-width: 2; }
+      .grasp { fill: #f2edff; stroke: #7661b5; stroke-width: 2; }
+      .planning { fill: #fff2df; stroke: #bd7a2b; stroke-width: 2; }
+      .execution { fill: #e9f7ee; stroke: #4e9168; stroke-width: 2; }
+      .neutral { fill: #f5f7fa; stroke: #7a8999; stroke-width: 2; }
+      .future { fill: #f8f9fb; stroke: #8b98a8; stroke-width: 2.5; stroke-dasharray: 10 7; }
+      .warning { fill: #fff7e8; stroke: #b98331; stroke-width: 1.7; }
+      .success { fill: #e8f7ec; stroke: #3f8c5c; stroke-width: 2; }
+      .fail { fill: #fff0f0; stroke: #b44848; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1040" fill="#ffffff"/>
+  <text x="48" y="54" class="title">未知物体 RGB-D 把持システム - 現在の実装</text>
+  <text x="48" y="84" class="subtitle">既存モデルを接続し、認識・計画成功・物理把持成功を別々に検証する simulation-only パイプライン</text>
+
+  <text x="48" y="128" class="lane">入力・知覚</text>
+  <line x1="48" y1="140" x2="1750" y2="140" stroke="#d8dee7" stroke-width="2"/>
+
+  <rect x="50" y="170" width="270" height="144" rx="14" class="perception"/>
+  <text x="75" y="204" class="node-title">校正済み RGB-D</text>
+  <text x="75" y="233" class="node-text">RGB / depth / intrinsics K</text>
+  <text x="75" y="257" class="node-text">T_world_camera / robot state</text>
+  <text x="75" y="286" class="small">Isaac Sim 現在 / RealSense 将来</text>
+
+  <rect x="365" y="170" width="250" height="144" rx="14" class="perception"/>
+  <text x="390" y="204" class="node-title">Ollama VLM</text>
+  <text x="390" y="233" class="node-text">対象名 + タスク指示</text>
+  <text x="390" y="257" class="node-text">→ 把持部位の短い語句</text>
+  <text x="390" y="286" class="small">任意。手動 prompt でも実行可</text>
+
+  <rect x="660" y="170" width="300" height="144" rx="14" class="perception"/>
+  <text x="685" y="204" class="node-title">SAM3 2D segmentation</text>
+  <text x="685" y="233" class="node-text">whole-object mask</text>
+  <text x="685" y="257" class="node-text">grasp-part mask（任意）</text>
+  <text x="685" y="286" class="small">depth と対応付けて 3D 点群化</text>
+
+  <rect x="1005" y="170" width="290" height="144" rx="14" class="grasp"/>
+  <text x="1030" y="204" class="node-title">GraspGenX</text>
+  <text x="1030" y="233" class="node-text">masked 3D point cloud</text>
+  <text x="1030" y="257" class="node-text">→ 6-DoF candidates + score</text>
+  <text x="1030" y="286" class="small">NVIDIA 公式 server / weights</text>
+
+  <rect x="1340" y="170" width="300" height="144" rx="14" class="grasp"/>
+  <text x="1365" y="204" class="node-title">静的衝突フィルタ</text>
+  <text x="1365" y="233" class="node-text">GraspGenX 公式 filter</text>
+  <text x="1365" y="257" class="node-text">周辺 scene と候補を照合</text>
+  <text x="1365" y="286" class="small">target 自身は world から除外</text>
+
+  <path d="M320 242 H365" class="edge"/>
+  <path d="M615 242 H660" class="edge"/>
+  <path d="M320 270 C470 340 570 335 660 275" class="edge-dashed"/>
+  <path d="M960 242 H1005" class="edge"/>
+  <path d="M1295 242 H1340" class="edge"/>
+  <text x="450" y="159" class="small">RGB + task</text>
+  <text x="777" y="159" class="small">VLM phrase / manual prompt</text>
+  <text x="1019" y="159" class="small">grasp-part（または whole-object）</text>
+
+  <text x="48" y="370" class="lane">3D環境表現・動作計画</text>
+  <line x1="48" y1="382" x2="1750" y2="382" stroke="#d8dee7" stroke-width="2"/>
+
+  <rect x="50" y="416" width="270" height="150" rx="14" class="neutral"/>
+  <text x="75" y="450" class="node-title">Scene USD</text>
+  <text x="75" y="479" class="node-text">物理・描画・評価に使用</text>
+  <text x="75" y="503" class="node-text">target pose/CAD は認識入力外</text>
+  <text x="75" y="536" class="small">未知物体条件を崩さない</text>
+
+  <rect x="365" y="416" width="290" height="150" rx="14" class="planning"/>
+  <text x="390" y="450" class="node-title">観測 world map</text>
+  <text x="390" y="479" class="node-text">depth - robot - target</text>
+  <text x="390" y="503" class="node-text">point cloud / voxel / mesh</text>
+  <text x="390" y="536" class="small">机・障害物を保持</text>
+
+  <rect x="700" y="416" width="290" height="150" rx="14" class="planning"/>
+  <text x="725" y="450" class="node-title">target geometry</text>
+  <text x="725" y="479" class="node-text">whole-object 3D points</text>
+  <text x="725" y="503" class="node-text">→ attached-object spheres</text>
+  <text x="725" y="536" class="small">把持後の搬送衝突判定用</text>
+
+  <rect x="1035" y="406" width="315" height="170" rx="14" class="planning"/>
+  <text x="1060" y="440" class="node-title">cuRobo motion planning</text>
+  <text x="1060" y="469" class="node-text">pre-grasp → approach → grasp</text>
+  <text x="1060" y="493" class="node-text">→ lift → attached transport</text>
+  <text x="1060" y="517" class="node-text">world/self collision + IK</text>
+  <text x="1060" y="550" class="small">計画成功 ≠ 物理把持成功</text>
+
+  <rect x="1395" y="416" width="245" height="150" rx="14" class="planning"/>
+  <text x="1420" y="450" class="node-title">候補 trial 管理</text>
+  <text x="1420" y="479" class="node-text">実行可能候補を保存</text>
+  <text x="1420" y="503" class="node-text">最大5件を順番に試す</text>
+  <text x="1420" y="536" class="small">候補別の恣意的 tuning なし</text>
+
+  <path d="M810 314 V350 H510 V416" class="edge"/>
+  <path d="M850 314 V416" class="edge"/>
+  <path d="M1490 314 V355 H1190 V406" class="edge"/>
+  <path d="M655 491 H1035" class="edge"/>
+  <path d="M990 491 H1035" class="edge"/>
+  <path d="M1350 491 H1395" class="edge"/>
+  <text x="390" y="402" class="small">whole-object mask</text>
+  <text x="727" y="402" class="small">whole-object mask</text>
+  <text x="1112" y="397" class="small">filtered candidates</text>
+
+  <text x="48" y="626" class="lane">物理実行・判定・記録</text>
+  <line x1="48" y1="638" x2="1750" y2="638" stroke="#d8dee7" stroke-width="2"/>
+
+  <rect x="365" y="680" width="290" height="158" rx="14" class="execution"/>
+  <text x="390" y="714" class="node-title">Isaac Sim replay</text>
+  <text x="390" y="743" class="node-text">接近・閉指・持上げ・保持</text>
+  <text x="390" y="767" class="node-text">Isaac Lab Franka drive</text>
+  <text x="390" y="791" class="node-text">scale 5 は診断条件</text>
+  <text x="390" y="819" class="small">USD physics はここで評価に使用</text>
+
+  <rect x="720" y="680" width="275" height="158" rx="14" class="success"/>
+  <text x="745" y="714" class="node-title">physical success gate</text>
+  <text x="745" y="743" class="node-text">持上げ量 + hold 後保持</text>
+  <text x="745" y="767" class="node-text">成功 → trial 停止</text>
+  <text x="745" y="791" class="node-text">失敗 → 次候補</text>
+  <text x="745" y="819" class="small">計画結果と独立に記録</text>
+
+  <rect x="1050" y="680" width="290" height="158" rx="14" class="neutral"/>
+  <text x="1075" y="714" class="node-title">results.html + artifacts</text>
+  <text x="1075" y="743" class="node-text">VLM input/output・mask・点群</text>
+  <text x="1075" y="767" class="node-text">候補・trajectory・JSON</text>
+  <text x="1075" y="791" class="node-text">成功/失敗 stage を自動表示</text>
+  <text x="1075" y="819" class="small">再現可能な experiment output</text>
+
+  <path d="M1518 566 V620 H510 V680" class="edge"/>
+  <path d="M655 759 H720" class="edge"/>
+  <path d="M995 759 H1050" class="edge"/>
+  <path d="M857 838 V872 H1518 V566" class="edge-fail"/>
+  <path d="M185 566 V759 H365" class="edge-dashed"/>
+  <text x="1190" y="864" class="small">physical_pick_not_observed</text>
+
+  <rect x="1395" y="680" width="345" height="158" rx="14" class="warning"/>
+  <text x="1420" y="714" class="node-title">現在の到達点</text>
+  <text x="1420" y="743" class="node-text">Hammer: 物理把持・保持を確認</text>
+  <text x="1420" y="767" class="node-text">Scissors: 計画成功、保持は不安定</text>
+  <text x="1420" y="791" class="node-text">一括 pipeline は動作確認済み</text>
+  <text x="1420" y="819" class="small">実機実行は未接続</text>
+
+  <text x="48" y="895" class="lane">RoboSegを参考にした次の拡張（未実装）</text>
+  <rect x="50" y="916" width="1690" height="88" rx="14" class="future"/>
+  <text x="85" y="951" class="node-title">eye-in-hand multi-view scan</text>
+  <text x="360" y="951" class="node-title">→ TSDF fusion</text>
+  <text x="565" y="951" class="node-title">→ SAM3 keyframes</text>
+  <text x="825" y="951" class="node-title">→ voxel voting</text>
+  <text x="1040" y="951" class="node-title">→ stable part-labeled 3D map</text>
+  <text x="85" y="982" class="small">RoboSegの「VLMで部位語彙を決め、複数視点で3D意味を安定化する」考え方。現在は単一視点なので、現行機能と混同しない。</text>
+</svg>
