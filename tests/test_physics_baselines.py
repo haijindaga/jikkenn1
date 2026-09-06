@@ -2,6 +2,7 @@ import unittest
 
 from panda_handover.physics_baselines import (
     FINGER_DRIVE_PRESETS,
+    drive_value_matches_float_storage,
     resolve_finger_drive_values,
 )
 
@@ -46,6 +47,16 @@ class PhysicsBaselineTests(unittest.TestCase):
     def test_invalid_diagnostic_scale_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "positive and finite"):
             resolve_finger_drive_values("isaaclab-franka", diagnostic_scale=0.0)
+
+    def test_drive_readback_accepts_openusd_float_rounding(self):
+        requested = 223.60679774997897
+        stored_float = 223.60679626464844
+        self.assertTrue(
+            drive_value_matches_float_storage(stored_float, requested)
+        )
+        self.assertFalse(
+            drive_value_matches_float_storage(223.5, requested)
+        )
 
     def test_unknown_preset_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unknown finger-drive preset"):

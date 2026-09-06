@@ -51,6 +51,14 @@ FINGER_DRIVE_PRESETS: dict[str, FingerDrivePreset] = {
 }
 
 
+def drive_value_matches_float_storage(actual: float, requested: float) -> bool:
+    """Compare a read-back DriveAPI float with its pre-storage Python value."""
+
+    return math.isclose(
+        float(actual), float(requested), rel_tol=1e-6, abs_tol=1e-6
+    )
+
+
 def resolve_finger_drive_values(
     preset_name: str,
     *,

@@ -16,6 +16,7 @@ sys.path.insert(0, str(repo_root / "src"))
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 from panda_handover.physics_baselines import (
     FINGER_DRIVE_PRESETS,
+    drive_value_matches_float_storage,
     resolve_finger_drive_values,
 )
 from panda_handover.trajectory_replay import (
@@ -569,12 +570,7 @@ try:
             continue
         report_key = f"{attribute_name}_after"
         if not all(
-            np.isclose(
-                float(item[report_key]),
-                requested_value,
-                atol=1e-6,
-                rtol=0.0,
-            )
+            drive_value_matches_float_storage(item[report_key], requested_value)
             for item in configured_finger_drives
         ):
             raise RuntimeError(
