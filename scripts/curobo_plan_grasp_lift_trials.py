@@ -36,6 +36,18 @@ def parse_args() -> argparse.Namespace:
         metavar=("W", "X", "Y", "Z"),
     )
     parser.add_argument(
+        "--handover-receiver-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+    )
+    parser.add_argument(
+        "--handover-human-direction-robot-base",
+        type=float,
+        nargs=3,
+        metavar=("DX", "DY", "DZ"),
+    )
+    parser.add_argument(
         "--allow-reviewed-support-contact-preflight", action="store_true"
     )
     args = parser.parse_args()
@@ -48,6 +60,20 @@ def parse_args() -> argparse.Namespace:
         and args.handover_goal_position_robot_base_m is None
     ):
         parser.error("handover orientation requires a handover position")
+    if (args.handover_receiver_position_robot_base_m is None) != (
+        args.handover_human_direction_robot_base is None
+    ):
+        parser.error(
+            "automatic handover requires both receiver position and human direction"
+        )
+    if (
+        args.handover_receiver_position_robot_base_m is not None
+        and args.handover_goal_position_robot_base_m is not None
+    ):
+        parser.error(
+            "automatic affordance-aware handover cannot be combined with a fixed "
+            "panda_hand goal"
+        )
     return args
 
 
@@ -103,11 +129,25 @@ def main() -> int:
             "continue_after_planning_rejection": True,
             "handover_transport_requested": bool(
                 args.handover_goal_position_robot_base_m is not None
+                or args.handover_receiver_position_robot_base_m is not None
             ),
             "handover_goal_position_robot_base_m": (
                 args.handover_goal_position_robot_base_m
             ),
             "handover_goal_quaternion_wxyz": args.handover_goal_quaternion_wxyz,
+            "handover_receiver_position_robot_base_m": (
+                args.handover_receiver_position_robot_base_m
+            ),
+            "handover_human_direction_robot_base": (
+                args.handover_human_direction_robot_base
+            ),
+            "handover_orientation_policy": (
+                "affordance-axis alignment with fixed roll variants"
+                if args.handover_receiver_position_robot_base_m is not None
+                else "manual panda_hand goal"
+                if args.handover_goal_position_robot_base_m is not None
+                else None
+            ),
         },
         "candidate_pool_count": int(len(source_indices)),
         "attempts": [],
@@ -163,6 +203,21 @@ def main() -> int:
                 [
                     "--handover-goal-quaternion-wxyz",
                     *[str(value) for value in args.handover_goal_quaternion_wxyz],
+                ]
+            )
+        if args.handover_receiver_position_robot_base_m is not None:
+            command.extend(
+                [
+                    "--handover-receiver-position-robot-base-m",
+                    *[
+                        str(value)
+                        for value in args.handover_receiver_position_robot_base_m
+                    ],
+                    "--handover-human-direction-robot-base",
+                    *[
+                        str(value)
+                        for value in args.handover_human_direction_robot_base
+                    ],
                 ]
             )
         print(

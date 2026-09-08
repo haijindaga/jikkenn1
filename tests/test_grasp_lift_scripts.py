@@ -343,6 +343,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("preserve_selected_grasp_orientation", source)
         self.assertIn("transport_all_waypoints_clear_of_observed_scene", source)
         self.assertIn('"human_or_receiver_collision_model_present": False', source)
+        self.assertIn("generate_affordance_handover_goals(", source)
+        self.assertIn("handover_goal_candidates_robot_base.npy", source)
+        self.assertIn('"automatic_affordance_handover"', source)
         self.assertIn('"handover_release_planned": False', source)
         self.assertNotIn("transport_result.status", source)
         self.assertIn('"result_type": type(transport_result).__name__', source)
@@ -376,6 +379,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('report.get("physical_object", {})', replay_runner)
         self.assertIn('if completed.returncode == 0 and status == "success"', replay_runner)
         self.assertIn('"--handover-goal-position-robot-base-m"', planner_runner)
+        self.assertIn(
+            '"--handover-receiver-position-robot-base-m"', planner_runner
+        )
 
 
 if __name__ == "__main__":

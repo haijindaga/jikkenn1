@@ -75,8 +75,34 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-For a handover-transport experiment, add a reviewed `panda_hand` goal expressed
-in the Panda base frame:
+For an affordance-aware handover experiment, use VLM or manual part prompts and
+specify (1) where the segmented receive-part representative point should be and
+(2) the direction from the robot-held part toward the human, both in the Panda
+base frame:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/hammer_01.usda \
+  --target-object hammer \
+  --ollama-model gemma3:12b \
+  --output outputs/hammer_affordance_handover_e2e_v1 \
+  --handover-receiver-position-robot-base-m X Y Z \
+  --handover-human-direction-robot-base DX DY DZ \
+  --allow-reviewed-support-contact-preflight
+```
+
+This mode first rejects candidates whose official Franka collision mesh enters
+the observed receive-part clearance region (15 mm by default), then preserves
+the original GraspGenX score order. It adds no weighted handover score. For each
+remaining grasp, the grasp-part-to-receive-part axis is aligned with the human
+direction, the receive-part median is placed at the requested position, and
+cuRobo tests six fixed roll variants with the whole object attached. Candidate
+planning continues until the configured number of complete attached transport
+plans is available. This is a receive-region clearance proxy; it does not model
+the human body, gaze, or true multi-view visibility.
+
+The previous manual transport mode remains available when a fully reviewed
+`panda_hand` pose is already known:
 
 ```bash
 python scripts/run_sim_grasp_pipeline.py \
@@ -87,12 +113,13 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-Supplying a handover position makes `rigid-attachment` the replay default. The
+Supplying either handover mode makes `rigid-attachment` the replay default. The
 object's current pose relative to `panda_hand` is preserved immediately after
 gripper closure with a runtime `UsdPhysics.FixedJoint`; no friction tuning is
 used. The cuRobo transport is still planned with the whole-object attached
-collision geometry. If `--handover-goal-quaternion-wxyz W X Y Z` is omitted,
-the selected grasp orientation is preserved. Reports distinguish this explicit
+collision geometry. In manual mode, if
+`--handover-goal-quaternion-wxyz W X Y Z` is omitted, the selected grasp
+orientation is preserved. Reports distinguish this explicit
 no-slip grasp assumption from contact-only physical-pick evidence. Use
 `--grasp-retention-mode physics` only when frictional retention itself is the
 quantity being evaluated.

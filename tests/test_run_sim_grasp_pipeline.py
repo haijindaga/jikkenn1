@@ -245,6 +245,94 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                 ]
             )
 
+    def test_affordance_handover_inserts_reranking_and_candidate_specific_goal(self):
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--target-object",
+                "hammer",
+                "--ollama-model",
+                "gemma3:12b",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-receiver-position-robot-base-m",
+                "0.55",
+                "-0.30",
+                "0.65",
+                "--handover-human-direction-robot-base",
+                "0",
+                "-1",
+                "0",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        names = list(stages)
+        self.assertEqual(
+            names[names.index("static_collision_filter") + 1],
+            "handover_aware_rerank",
+        )
+        rerank = stages["handover_aware_rerank"].command
+        self.assertIn("--receive-segmentation", rerank)
+        pregrasp = stages["curobo_pregrasp"].command
+        self.assertEqual(
+            pregrasp[pregrasp.index("--candidates") + 1],
+            str(paths.handover_candidates),
+        )
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertIn("--handover-receiver-position-robot-base-m", planner)
+        self.assertIn("--handover-human-direction-robot-base", planner)
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--grasp-retention-mode") + 1],
+            "rigid-attachment",
+        )
+
+    def test_affordance_handover_requires_part_segmentation_and_complete_geometry(self):
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "hammer",
+                    "--output",
+                    "outputs/e2e",
+                    "--handover-receiver-position-robot-base-m",
+                    "0.5",
+                    "0",
+                    "0.6",
+                    "--handover-human-direction-robot-base",
+                    "1",
+                    "0",
+                    "0",
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--target-object",
+                    "hammer",
+                    "--ollama-model",
+                    "gemma3:12b",
+                    "--output",
+                    "outputs/e2e",
+                    "--handover-receiver-position-robot-base-m",
+                    "0.5",
+                    "0",
+                    "0.6",
+                ]
+            )
+
     def test_task_instruction_is_forwarded_only_to_vlm(self) -> None:
         args = MODULE.parse_args(
             [

@@ -72,6 +72,23 @@ def parse_args() -> argparse.Namespace:
         metavar=("W", "X", "Y", "Z"),
         help="Optional handover orientation; omitted preserves the grasp orientation",
     )
+    parser.add_argument(
+        "--handover-receiver-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Automatic handover: desired receive-part representative point in "
+            "panda_link0 metres"
+        ),
+    )
+    parser.add_argument(
+        "--handover-human-direction-robot-base",
+        type=float,
+        nargs=3,
+        metavar=("DX", "DY", "DZ"),
+        help="Automatic handover direction from the robot-held part toward the human",
+    )
     return parser.parse_args()
 
 
@@ -602,6 +619,20 @@ def main() -> int:
         and args.handover_goal_position_robot_base_m is None
     ):
         raise ValueError("a handover quaternion requires a handover goal position")
+    if (args.handover_receiver_position_robot_base_m is None) != (
+        args.handover_human_direction_robot_base is None
+    ):
+        raise ValueError(
+            "automatic handover requires both receiver position and human direction"
+        )
+    if (
+        args.handover_receiver_position_robot_base_m is not None
+        and args.handover_goal_position_robot_base_m is not None
+    ):
+        raise ValueError(
+            "automatic affordance-aware handover cannot be combined with a fixed "
+            "panda_hand goal"
+        )
     handover_goal_position = None
     if args.handover_goal_position_robot_base_m is not None:
         handover_goal_position = np.asarray(
@@ -609,6 +640,23 @@ def main() -> int:
         )
         if not np.isfinite(handover_goal_position).all():
             raise ValueError("handover goal position must contain finite values")
+    automatic_handover = args.handover_receiver_position_robot_base_m is not None
+    handover_receiver_position = None
+    handover_human_direction = None
+    if automatic_handover:
+        handover_receiver_position = np.asarray(
+            args.handover_receiver_position_robot_base_m, dtype=np.float32
+        )
+        handover_human_direction = np.asarray(
+            args.handover_human_direction_robot_base, dtype=np.float32
+        )
+        if not np.isfinite(handover_receiver_position).all():
+            raise ValueError("handover receiver position must contain finite values")
+        if (
+            not np.isfinite(handover_human_direction).all()
+            or np.linalg.norm(handover_human_direction) <= 1e-8
+        ):
+            raise ValueError("handover human direction must be finite and non-zero")
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root / "src"))
 
@@ -619,6 +667,7 @@ def main() -> int:
         summarize_ik_result_arrays,
     )
     from panda_handover.geometry import transform_points
+    from panda_handover.handover import generate_affordance_handover_goals
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
     subprocess.run(
@@ -687,6 +736,34 @@ def main() -> int:
     target_robot_base = transform_points(
         np.linalg.inv(T_world_robot_base), target_world
     ).astype(np.float32, copy=False)
+    grasp_part_robot_base = None
+    receive_part_robot_base = None
+    if automatic_handover:
+        part_points: dict[str, np.ndarray] = {}
+        for role in ("grasp_part", "receive_part"):
+            part_directory = args.segmentation / "parts" / role
+            part_report = json.loads(
+                (part_directory / "segmentation_check.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if part_report.get("automatic_checks_passed") is not True:
+                raise ValueError(f"SAM3 {role} segmentation did not pass its gate")
+            points_world = np.load(
+                part_directory / "points_world.npy", allow_pickle=False
+            ).astype(np.float32, copy=False)
+            if (
+                points_world.ndim != 2
+                or points_world.shape[1] != 3
+                or len(points_world) < 20
+                or not np.isfinite(points_world).all()
+            ):
+                raise ValueError(f"SAM3 {role} point cloud is too small or invalid")
+            part_points[role] = transform_points(
+                np.linalg.inv(T_world_robot_base), points_world
+            ).astype(np.float32, copy=False)
+        grasp_part_robot_base = part_points["grasp_part"]
+        receive_part_robot_base = part_points["receive_part"]
 
     robot_report = json.loads(
         (args.capture / "robot_state.json").read_text(encoding="utf-8")
@@ -1407,29 +1484,63 @@ def main() -> int:
     np.save(output / "lift_end_attached_penetration_cost.npy", lifted_cost_np)
 
     # Optional fourth phase: keep the fitted object spheres attached and use
-    # cuRobo's official pose planner from the lift endpoint. The position must
-    # be supplied by the experiment configuration; it is not guessed here.
+    # cuRobo's official pose planner from the lift endpoint. The legacy mode
+    # accepts one hand goal. The affordance-aware mode derives a fixed goalset
+    # from the observed grasp and receive parts, then lets cuRobo select a roll.
     transport_report = None
     transport_checks: dict[str, bool] = {}
     transport_cost_np = None
-    if handover_goal_position is not None:
-        if args.handover_goal_quaternion_wxyz is None:
-            handover_goal_quaternion = rotation_matrix_to_quaternion_wxyz(
-                grasp_transforms[selected_rank, :3, :3]
+    if handover_goal_position is not None or automatic_handover:
+        handover_goal_diagnostics = None
+        if automatic_handover:
+            assert handover_receiver_position is not None
+            assert handover_human_direction is not None
+            assert grasp_part_robot_base is not None
+            assert receive_part_robot_base is not None
+            handover_goal_transforms, handover_goal_diagnostics = (
+                generate_affordance_handover_goals(
+                    grasp_transforms[selected_rank],
+                    grasp_part_robot_base,
+                    receive_part_robot_base,
+                    handover_receiver_position,
+                    handover_human_direction,
+                )
             )
-            handover_orientation_policy = "preserve_selected_grasp_orientation"
+            handover_goal_positions = handover_goal_transforms[:, :3, 3]
+            handover_goal_quaternions = rotation_matrix_to_quaternion_wxyz(
+                handover_goal_transforms[:, :3, :3]
+            ).astype(np.float32, copy=False)
+            handover_orientation_policy = (
+                "align_grasp_to_receive_part_axis_with_human_direction_then_"
+                "curobo_selects_roll"
+            )
+            np.save(
+                output / "handover_goal_candidates_robot_base.npy",
+                handover_goal_transforms,
+            )
         else:
-            handover_goal_quaternion = _normalized_quaternion(
-                args.handover_goal_quaternion_wxyz
-            )
-            handover_orientation_policy = "explicit_quaternion_wxyz"
+            assert handover_goal_position is not None
+            if args.handover_goal_quaternion_wxyz is None:
+                handover_goal_quaternion = rotation_matrix_to_quaternion_wxyz(
+                    grasp_transforms[selected_rank, :3, :3]
+                )
+                handover_orientation_policy = "preserve_selected_grasp_orientation"
+            else:
+                handover_goal_quaternion = _normalized_quaternion(
+                    args.handover_goal_quaternion_wxyz
+                )
+                handover_orientation_policy = "explicit_quaternion_wxyz"
+            handover_goal_positions = handover_goal_position[None, :]
+            handover_goal_quaternions = handover_goal_quaternion[None, :]
         handover_goal = GoalToolPose(
             tool_frames=planner.tool_frames,
-            position=torch.from_numpy(handover_goal_position).to(device_cfg.device)[
-                None, None, None, None, :
+            position=torch.from_numpy(handover_goal_positions).to(device_cfg.device)[
+                None, None, None, :, :
             ],
-            quaternion=torch.from_numpy(handover_goal_quaternion).to(device_cfg.device)[
-                None, None, None, None, :
+            quaternion=torch.from_numpy(handover_goal_quaternions).to(
+                device_cfg.device
+            )[
+                None, None, None, :, :
             ],
         )
         planner.reset_seed()
@@ -1445,6 +1556,19 @@ def main() -> int:
             and transport_result.success is not None
             and transport_result.success.any().item()
         )
+        selected_transport_goal_rank = None
+        if transport_success:
+            goalset_index = getattr(transport_result, "goalset_index", None)
+            if goalset_index is not None:
+                selected_transport_goal_rank = int(
+                    _cpu_numpy(goalset_index).reshape(-1)[0]
+                )
+            elif len(handover_goal_positions) == 1:
+                selected_transport_goal_rank = 0
+            if selected_transport_goal_rank is not None and not (
+                0 <= selected_transport_goal_rank < len(handover_goal_positions)
+            ):
+                selected_transport_goal_rank = None
         if not transport_success:
             failure_report = {
                 "status": "handover_transport_planning_failed",
@@ -1455,16 +1579,18 @@ def main() -> int:
                 "goal": {
                     "frame": "panda_link0 robot base",
                     "tool_frame": "panda_hand",
-                    "position_m": handover_goal_position.tolist(),
-                    "quaternion_wxyz": handover_goal_quaternion.tolist(),
+                    "candidate_count": int(len(handover_goal_positions)),
+                    "positions_m": handover_goal_positions.tolist(),
+                    "quaternions_wxyz": handover_goal_quaternions.tolist(),
                     "orientation_policy": handover_orientation_policy,
+                    "affordance_geometry": handover_goal_diagnostics,
                 },
                 "planner_status": str(
                     getattr(transport_result, "status", "plan_pose returned no result")
                 ),
                 "next_gate": (
-                    "Review the fixed goal and diagnostics before changing solver "
-                    "parameters."
+                    "Review the handover goal candidates and diagnostics before "
+                    "changing solver parameters."
                 ),
             }
             failure_path = output / "handover_transport_failure.json"
@@ -1539,9 +1665,22 @@ def main() -> int:
             "goal": {
                 "frame": "panda_link0 robot base",
                 "tool_frame": "panda_hand",
-                "position_m": handover_goal_position.tolist(),
-                "quaternion_wxyz": handover_goal_quaternion.tolist(),
+                "candidate_count": int(len(handover_goal_positions)),
+                "selected_goalset_rank": selected_transport_goal_rank,
+                "position_m": (
+                    handover_goal_positions[selected_transport_goal_rank].tolist()
+                    if selected_transport_goal_rank is not None
+                    else None
+                ),
+                "quaternion_wxyz": (
+                    handover_goal_quaternions[selected_transport_goal_rank].tolist()
+                    if selected_transport_goal_rank is not None
+                    else None
+                ),
+                "all_candidate_positions_m": handover_goal_positions.tolist(),
+                "all_candidate_quaternions_wxyz": handover_goal_quaternions.tolist(),
                 "orientation_policy": handover_orientation_policy,
+                "affordance_geometry": handover_goal_diagnostics,
             },
         }
 
@@ -1568,6 +1707,11 @@ def main() -> int:
             "attached_transport": (
                 "MotionPlanner.plan_pose after AttachmentManager.attach"
             ),
+            "handover_affordance_precedent": "https://arxiv.org/abs/2404.01402",
+            "handover_orientation_precedent": (
+                "https://vbn.aau.dk/en/publications/optimizing-robot-to-human-"
+                "object-handovers-using-vision-based-aff/"
+            ),
             "attachment_face_contract": (
                 "cuRobo Mesh.from_pointcloud flat triangle indices restored to the "
                 "Nx3 contract required by trimesh"
@@ -1583,6 +1727,16 @@ def main() -> int:
                 observed_scene.points_robot_base_m.shape[0]
             ),
             "target_point_count": int(len(target_robot_base)),
+            "grasp_part_point_count": (
+                int(len(grasp_part_robot_base))
+                if grasp_part_robot_base is not None
+                else None
+            ),
+            "receive_part_point_count": (
+                int(len(receive_part_robot_base))
+                if receive_part_robot_base is not None
+                else None
+            ),
         },
         "parameters": {
             "robot": args.robot,
@@ -1604,6 +1758,20 @@ def main() -> int:
             "requested_source_candidate_index": args.source_candidate_index,
             "requested_candidate_original_goalset_rank": (
                 requested_candidate_original_rank
+            ),
+            "automatic_affordance_handover": automatic_handover,
+            "handover_receiver_position_robot_base_m": (
+                handover_receiver_position.tolist()
+                if handover_receiver_position is not None
+                else None
+            ),
+            "handover_human_direction_robot_base": (
+                (
+                    handover_human_direction
+                    / np.linalg.norm(handover_human_direction)
+                ).tolist()
+                if handover_human_direction is not None
+                else None
             ),
         },
         "result": {
@@ -1686,6 +1854,8 @@ def main() -> int:
                 transport_report is not None and transport_cost_np is not None
             ),
             "human_or_receiver_collision_model_present": False,
+            "receive_part_gripper_clearance_prefilter_expected": automatic_handover,
+            "human_direction_is_user_supplied_not_human_tracked": automatic_handover,
             "handover_release_planned": False,
             "trajectory_executed": False,
             "manual_review_required": True,

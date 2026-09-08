@@ -195,6 +195,104 @@ class GraspGenXScriptTests(unittest.TestCase):
             self.assertEqual(saved["candidates"]["collision_free"], 1)
             self.assertFalse(saved["safety"]["approach_sweep_checked"])
 
+    def test_handover_rerank_reuses_official_gripper_and_preserves_provenance(self):
+        project = Path(__file__).resolve().parents[1]
+        script_path = project / "scripts" / "graspgenx_handover_rerank.py"
+        observed = {}
+
+        def fake_filter(**kwargs):
+            observed.update(kwargs)
+            return np.array([True, False, True], dtype=bool)
+
+        fake_trimesh = types.ModuleType("trimesh")
+        fake_trimesh.sample = types.SimpleNamespace(
+            sample_surface=lambda mesh, count: (
+                np.zeros((count, 3), dtype=np.float32),
+                np.zeros(count, dtype=np.int32),
+            )
+        )
+        fake_modules = {
+            "trimesh": fake_trimesh,
+            "graspgenx": types.ModuleType("graspgenx"),
+            "graspgenx.utils": types.ModuleType("graspgenx.utils"),
+            "graspgenx.utils.collision_filter": types.ModuleType(
+                "graspgenx.utils.collision_filter"
+            ),
+            "graspgenx.x_grippers": types.ModuleType("graspgenx.x_grippers"),
+        }
+        fake_modules[
+            "graspgenx.utils.collision_filter"
+        ].filter_colliding_grasps = fake_filter
+        fake_modules["graspgenx.x_grippers"].resolve_gripper_info = (
+            lambda name: _FakeGripper()
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / "capture"
+            receive = root / "receive"
+            candidates = root / "candidates"
+            output = root / "output"
+            capture.mkdir()
+            receive.mkdir()
+            candidates.mkdir()
+            np.save(capture / "T_world_camera.npy", np.eye(4))
+            np.save(
+                receive / "points_camera.npy",
+                np.ones((30, 3), dtype=np.float32),
+            )
+            (receive / "segmentation_check.json").write_text(
+                json.dumps({"automatic_checks_passed": True})
+            )
+            (candidates / "collision_filter_check.json").write_text(
+                json.dumps({"status": "success"})
+            )
+            np.save(
+                candidates / "grasps_camera.npy",
+                np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0),
+            )
+            np.save(candidates / "scores.npy", np.array([0.7, 0.95, 0.9]))
+            np.save(candidates / "kept_candidate_indices.npy", [10, 11, 12])
+            (candidates / "branch_tags.json").write_text(
+                '["diff", "obb", "diff"]'
+            )
+
+            argv = [
+                str(script_path),
+                "--capture",
+                str(capture),
+                "--receive-segmentation",
+                str(receive),
+                "--candidates",
+                str(candidates),
+                "--output",
+                str(output),
+                "--num-collision-samples",
+                "5",
+                "--device",
+                "cpu",
+            ]
+            with patch.dict(sys.modules, fake_modules), patch.object(sys, "argv", argv):
+                spec = importlib.util.spec_from_file_location(
+                    "graspgenx_handover_rerank_test", script_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                spec.loader.exec_module(module)
+                result = module.main()
+
+            self.assertEqual(result, 0)
+            self.assertEqual(observed["scene_pc"].shape, (30, 3))
+            self.assertEqual(observed["collision_threshold"], 0.015)
+            np.testing.assert_array_equal(
+                np.load(output / "kept_candidate_indices.npy"), [12, 10]
+            )
+            report = json.loads(
+                (output / "handover_rerank_check.json").read_text()
+            )
+            self.assertFalse(report["policy"]["weighted_score_added"])
+            self.assertEqual(report["candidates"]["receive_clear"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

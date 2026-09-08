@@ -36,6 +36,7 @@ class PipelinePaths:
     prepared_map: Path
     raw_candidates: Path
     filtered_candidates: Path
+    handover_candidates: Path
     pregrasp: Path
     plan_trials: Path
     replay_trials: Path
@@ -96,6 +97,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-grasps", type=int, default=500)
     parser.add_argument("--topk", type=int, default=300)
     parser.add_argument("--collision-threshold", type=float, default=0.005)
+    parser.add_argument(
+        "--handover-receive-clearance",
+        type=float,
+        default=0.015,
+        help="Minimum gripper clearance from the segmented human receive part",
+    )
     parser.add_argument("--max-pregrasp-candidates", type=int, default=100)
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
@@ -111,6 +118,26 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         nargs=4,
         metavar=("W", "X", "Y", "Z"),
         help="Optional transport orientation; omitted preserves grasp orientation",
+    )
+    parser.add_argument(
+        "--handover-receiver-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Automatic affordance-aware mode: desired receive-part representative "
+            "point in panda_link0 metres"
+        ),
+    )
+    parser.add_argument(
+        "--handover-human-direction-robot-base",
+        type=float,
+        nargs=3,
+        metavar=("DX", "DY", "DZ"),
+        help=(
+            "Automatic affordance-aware mode: direction from the robot-held part "
+            "toward the human"
+        ),
     )
     parser.add_argument(
         "--grasp-retention-mode",
@@ -187,14 +214,53 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     if args.collision_threshold <= 0:
         parser.error("--collision-threshold must be positive")
     if (
+        not math.isfinite(args.handover_receive_clearance)
+        or args.handover_receive_clearance <= 0
+    ):
+        parser.error("--handover-receive-clearance must be positive and finite")
+    if (
         args.handover_goal_quaternion_wxyz is not None
         and args.handover_goal_position_robot_base_m is None
     ):
         parser.error("handover orientation requires a handover position")
+    automatic_handover_values = (
+        args.handover_receiver_position_robot_base_m,
+        args.handover_human_direction_robot_base,
+    )
+    if (automatic_handover_values[0] is None) != (
+        automatic_handover_values[1] is None
+    ):
+        parser.error(
+            "automatic handover requires both receiver position and human direction"
+        )
+    if automatic_handover_values[0] is not None:
+        if args.handover_goal_position_robot_base_m is not None:
+            parser.error(
+                "automatic affordance-aware handover cannot be combined with a "
+                "fixed panda_hand goal"
+            )
+        if args.target_object is None and not args.grasp_part_prompt:
+            parser.error(
+                "automatic affordance-aware handover requires VLM or manual grasp/receive "
+                "part prompts"
+            )
+        direction = automatic_handover_values[1]
+        assert direction is not None
+        if not all(math.isfinite(value) for value in direction) or math.sqrt(
+            sum(value * value for value in direction)
+        ) <= 1e-8:
+            parser.error("handover human direction must be finite and non-zero")
+        position = automatic_handover_values[0]
+        assert position is not None
+        if not all(math.isfinite(value) for value in position):
+            parser.error("handover receiver position must be finite")
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = (
             "rigid-attachment"
-            if args.handover_goal_position_robot_base_m is not None
+            if (
+                args.handover_goal_position_robot_base_m is not None
+                or args.handover_receiver_position_robot_base_m is not None
+            )
             else "physics"
         )
     return args
@@ -212,6 +278,7 @@ def pipeline_paths(root: Path) -> PipelinePaths:
         prepared_map=root / "curobo_map",
         raw_candidates=root / "graspgenx_candidates",
         filtered_candidates=root / "graspgenx_candidates_filtered",
+        handover_candidates=root / "graspgenx_candidates_handover_ranked",
         pregrasp=root / "curobo_pregrasp",
         plan_trials=root / "curobo_grasp_lift_trials",
         replay_trials=root / "isaac_grasp_lift_trials",
@@ -369,6 +436,7 @@ def build_stages(
     grasp_candidate_segmentation_role = (
         "grasp_part" if use_grasp_part else "whole_object"
     )
+    automatic_handover = args.handover_receiver_position_robot_base_m is not None
 
     capture_command = [
         str(isaac_python),
@@ -466,6 +534,24 @@ def build_stages(
         "--collision-threshold",
         str(args.collision_threshold),
     ]
+    handover_rerank_command = None
+    pregrasp_candidates = paths.filtered_candidates
+    if automatic_handover:
+        handover_rerank_command = [
+            str(graspgenx_python),
+            str(script / "graspgenx_handover_rerank.py"),
+            "--capture",
+            str(paths.capture),
+            "--receive-segmentation",
+            str(paths.segmentation / "parts" / "receive_part"),
+            "--candidates",
+            str(paths.filtered_candidates),
+            "--output",
+            str(paths.handover_candidates),
+            "--receive-clearance",
+            str(args.handover_receive_clearance),
+        ]
+        pregrasp_candidates = paths.handover_candidates
     pregrasp_command = [
         str(graspgenx_python),
         str(script / "curobo_plan_pregrasp_a.py"),
@@ -476,7 +562,7 @@ def build_stages(
         "--capture",
         str(paths.capture),
         "--candidates",
-        str(paths.filtered_candidates),
+        str(pregrasp_candidates),
         "--output",
         str(paths.pregrasp),
         "--max-candidates",
@@ -510,6 +596,18 @@ def build_stages(
             [
                 "--handover-goal-quaternion-wxyz",
                 *[str(value) for value in args.handover_goal_quaternion_wxyz],
+            ]
+        )
+    if automatic_handover:
+        plan_trials_command.extend(
+            [
+                "--handover-receiver-position-robot-base-m",
+                *[
+                    str(value)
+                    for value in args.handover_receiver_position_robot_base_m
+                ],
+                "--handover-human-direction-robot-base",
+                *[str(value) for value in args.handover_human_direction_robot_base],
             ]
         )
 
@@ -588,6 +686,17 @@ def build_stages(
             ),
             **{name: stage for name, stage in stages.items() if name != "capture_rgbd"},
         }
+    if handover_rerank_command is not None:
+        ordered: dict[str, Stage] = {}
+        for name, stage in stages.items():
+            ordered[name] = stage
+            if name == "static_collision_filter":
+                ordered["handover_aware_rerank"] = Stage(
+                    "handover_aware_rerank",
+                    tuple(handover_rerank_command),
+                    paths.handover_candidates / "handover_rerank_check.json",
+                )
+        stages = ordered
     return stages
 
 
@@ -649,6 +758,22 @@ def main(argv: Iterable[str] | None = None) -> int:
             "handover_goal_quaternion_wxyz": (
                 list(args.handover_goal_quaternion_wxyz)
                 if args.handover_goal_quaternion_wxyz is not None
+                else None
+            ),
+            "handover_receiver_position_robot_base_m": (
+                list(args.handover_receiver_position_robot_base_m)
+                if args.handover_receiver_position_robot_base_m is not None
+                else None
+            ),
+            "handover_human_direction_robot_base": (
+                list(args.handover_human_direction_robot_base)
+                if args.handover_human_direction_robot_base is not None
+                else None
+            ),
+            "handover_receive_clearance_m": args.handover_receive_clearance,
+            "handover_candidate_policy": (
+                "receive-part clearance hard gate, then original GraspGenX score"
+                if args.handover_receiver_position_robot_base_m is not None
                 else None
             ),
             "grasp_retention_mode": args.grasp_retention_mode,
@@ -757,17 +882,19 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         for name in (
             "static_collision_filter",
+            "handover_aware_rerank",
             "curobo_pregrasp",
             "curobo_grasp_lift_trials",
             "isaac_physical_trials",
         ):
-            _run_stage(
-                stages[name],
-                project_root=project_root,
-                resume=args.resume,
-                manifest=manifest,
-                manifest_path=paths.manifest,
-            )
+            if name in stages:
+                _run_stage(
+                    stages[name],
+                    project_root=project_root,
+                    resume=args.resume,
+                    manifest=manifest,
+                    manifest_path=paths.manifest,
+                )
     except Exception as exc:
         exit_code = 2
         manifest["status"] = "failed"
