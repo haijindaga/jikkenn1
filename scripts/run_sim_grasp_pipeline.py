@@ -99,6 +99,28 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-pregrasp-candidates", type=int, default=100)
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
+        "--handover-goal-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help="Optional panda_hand transport goal in panda_link0 metres",
+    )
+    parser.add_argument(
+        "--handover-goal-quaternion-wxyz",
+        type=float,
+        nargs=4,
+        metavar=("W", "X", "Y", "Z"),
+        help="Optional transport orientation; omitted preserves grasp orientation",
+    )
+    parser.add_argument(
+        "--grasp-retention-mode",
+        choices=("physics", "rigid-attachment"),
+        help=(
+            "Replay policy. Defaults to physics for grasp/lift-only runs and "
+            "rigid-attachment when a handover goal is requested."
+        ),
+    )
+    parser.add_argument(
         "--finger-drive-scale",
         type=float,
         default=1.0,
@@ -164,6 +186,17 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--finger-drive-scale must be positive and finite")
     if args.collision_threshold <= 0:
         parser.error("--collision-threshold must be positive")
+    if (
+        args.handover_goal_quaternion_wxyz is not None
+        and args.handover_goal_position_robot_base_m is None
+    ):
+        parser.error("handover orientation requires a handover position")
+    if args.grasp_retention_mode is None:
+        args.grasp_retention_mode = (
+            "rigid-attachment"
+            if args.handover_goal_position_robot_base_m is not None
+            else "physics"
+        )
     return args
 
 
@@ -465,6 +498,20 @@ def build_stages(
     ]
     if args.allow_reviewed_support_contact_preflight:
         plan_trials_command.append("--allow-reviewed-support-contact-preflight")
+    if args.handover_goal_position_robot_base_m is not None:
+        plan_trials_command.extend(
+            [
+                "--handover-goal-position-robot-base-m",
+                *[str(value) for value in args.handover_goal_position_robot_base_m],
+            ]
+        )
+    if args.handover_goal_quaternion_wxyz is not None:
+        plan_trials_command.extend(
+            [
+                "--handover-goal-quaternion-wxyz",
+                *[str(value) for value in args.handover_goal_quaternion_wxyz],
+            ]
+        )
 
     replay_command = [
         str(isaac_python),
@@ -483,6 +530,8 @@ def build_stages(
         "isaaclab-franka",
         "--finger-drive-scale",
         str(args.finger_drive_scale),
+        "--grasp-retention-mode",
+        args.grasp_retention_mode,
         "--simulation-only",
     ]
     if args.headless:
@@ -592,6 +641,20 @@ def main(argv: Iterable[str] | None = None) -> int:
             "collision_threshold_m": args.collision_threshold,
             "max_pregrasp_candidates": args.max_pregrasp_candidates,
             "max_physical_trials": args.max_physical_trials,
+            "handover_goal_position_robot_base_m": (
+                list(args.handover_goal_position_robot_base_m)
+                if args.handover_goal_position_robot_base_m is not None
+                else None
+            ),
+            "handover_goal_quaternion_wxyz": (
+                list(args.handover_goal_quaternion_wxyz)
+                if args.handover_goal_quaternion_wxyz is not None
+                else None
+            ),
+            "grasp_retention_mode": args.grasp_retention_mode,
+            "rigid_attachment_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "rigid-attachment"
+            ),
             "finger_drive_preset": "isaaclab-franka",
             "finger_drive_diagnostic_scale": args.finger_drive_scale,
             "finger_drive_diagnostic_only": args.finger_drive_scale != 1.0,

@@ -65,6 +65,9 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         self.assertIn("--simulation-only", stages["isaac_physical_trials"].command)
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "1.0")
+        self.assertEqual(
+            replay[replay.index("--grasp-retention-mode") + 1], "physics"
+        )
         self.assertIn(
             "--allow-reviewed-support-contact-preflight",
             stages["curobo_grasp_lift_trials"].command,
@@ -188,6 +191,59 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         )
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "5.0")
+
+    def test_handover_goal_enables_attached_planning_and_rigid_replay(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-goal-position-robot-base-m",
+                "0.45",
+                "-0.25",
+                "0.65",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        planner = stages["curobo_grasp_lift_trials"].command
+        position_at = planner.index("--handover-goal-position-robot-base-m")
+        self.assertEqual(
+            planner[position_at + 1 : position_at + 4],
+            ("0.45", "-0.25", "0.65"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--grasp-retention-mode") + 1],
+            "rigid-attachment",
+        )
+
+    def test_handover_orientation_requires_position(self) -> None:
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "hammer",
+                    "--output",
+                    "outputs/e2e",
+                    "--handover-goal-quaternion-wxyz",
+                    "1",
+                    "0",
+                    "0",
+                    "0",
+                ]
+            )
 
     def test_task_instruction_is_forwarded_only_to_vlm(self) -> None:
         args = MODULE.parse_args(

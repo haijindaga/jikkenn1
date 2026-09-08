@@ -265,7 +265,16 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
-        self.assertNotIn("FixedJoint", script)
+        self.assertIn('choices=("physics", "rigid-attachment")', script)
+        self.assertIn(
+            '"transport" not in replay.phase_positions',
+            script,
+        )
+        self.assertIn("UsdPhysics.FixedJoint.Define", script)
+        self.assertIn("relative_pose(", script)
+        self.assertIn("joint.CreateCollisionEnabledAttr().Set(False)", script)
+        self.assertIn("UsdPhysics.FilteredPairsAPI.Apply", script)
+        self.assertIn('"physical_pick_evidence_is_contact_only"', script)
         self.assertNotIn("set_joint_positions(", script)
 
     def test_grasp_lift_replay_supports_generic_authored_usd_target(self):

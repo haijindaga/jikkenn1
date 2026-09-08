@@ -10,8 +10,10 @@ boundaries but executes them in order:
 4. cuRobo observed-point-cloud map preparation with the whole target removed
 5. managed GraspGenX server startup, grasp-part inference, and shutdown
 6. GraspGenX static scene collision filtering
-7. cuRobo pre-grasp and candidate-specific grasp/lift planning
-8. Isaac physical replay of at most five candidates, stopping at the first pick
+7. cuRobo pre-grasp and candidate-specific grasp/lift, plus optional attached
+   transport planning
+8. Isaac replay of at most five candidates, stopping at the first successful
+   configured retention trial
 9. generation and automatic display of `results.html`
 
 The runner must be launched with the Isaac Lab environment's Python. It invokes
@@ -72,6 +74,28 @@ python scripts/run_sim_grasp_pipeline.py \
   --output outputs/scissors_manual_e2e_v1 \
   --allow-reviewed-support-contact-preflight
 ```
+
+For a handover-transport experiment, add a reviewed `panda_hand` goal expressed
+in the Panda base frame:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/hammer_01.usda \
+  --prompt hammer \
+  --output outputs/hammer_handover_e2e_v1 \
+  --handover-goal-position-robot-base-m X Y Z \
+  --allow-reviewed-support-contact-preflight
+```
+
+Supplying a handover position makes `rigid-attachment` the replay default. The
+object's current pose relative to `panda_hand` is preserved immediately after
+gripper closure with a runtime `UsdPhysics.FixedJoint`; no friction tuning is
+used. The cuRobo transport is still planned with the whole-object attached
+collision geometry. If `--handover-goal-quaternion-wxyz W X Y Z` is omitted,
+the selected grasp orientation is preserved. Reports distinguish this explicit
+no-slip grasp assumption from contact-only physical-pick evidence. Use
+`--grasp-retention-mode physics` only when frictional retention itself is the
+quantity being evaluated.
 
 Use `--headless` to suppress Isaac windows. Defaults retain the current robust
 candidate policy: 500 generated grasps, top 300 returned, 5 mm static collision

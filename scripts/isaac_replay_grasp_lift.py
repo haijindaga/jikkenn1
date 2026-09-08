@@ -88,6 +88,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--grasp-retention-mode",
+        choices=("physics", "rigid-attachment"),
+        default="physics",
+        help=(
+            "'physics' evaluates contact-only retention. 'rigid-attachment' "
+            "creates a post-close FixedJoint and evaluates lift/transport under "
+            "the explicit assumption that a successful grasp does not slip."
+        ),
+    )
+    parser.add_argument(
         "--simulation-only",
         action="store_true",
         help="Required acknowledgement: this command controls only an Isaac Sim robot",
@@ -130,6 +140,14 @@ requested_finger_drive_values = resolve_finger_drive_values(
     diagnostic_scale=args.finger_drive_scale,
 )
 replay = load_grasp_lift_replay(args.capture, args.plan)
+if (
+    args.grasp_retention_mode == "rigid-attachment"
+    and "transport" not in replay.phase_positions
+):
+    raise ValueError(
+        "rigid-attachment mode requires an attached collision-checked transport "
+        "phase in the cuRobo plan"
+    )
 scene_usd = None
 if args.scene_usd is not None:
     scene_usd = args.scene_usd.expanduser().resolve()
@@ -171,15 +189,15 @@ try:
 
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
-    from isaacsim.core.prims import RigidPrim, SingleArticulation
+    from isaacsim.core.prims import RigidPrim, SingleArticulation, XFormPrim
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from pxr import PhysxSchema, Usd, UsdPhysics, UsdShade
+    from pxr import Gf, PhysxSchema, Sdf, Usd, UsdPhysics, UsdShade
 
-    from panda_handover.geometry import look_at_quaternion_world
+    from panda_handover.geometry import look_at_quaternion_world, relative_pose
 
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
@@ -449,6 +467,37 @@ try:
             "target_velocity": usd_attribute_value(drive.GetTargetVelocityAttr()),
         }
 
+    def unique_panda_hand_rigid_body_path() -> str:
+        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        matching = [
+            prim
+            for prim in Usd.PrimRange(panda_root)
+            if prim.GetName() == "panda_hand"
+            and prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        ]
+        if len(matching) != 1:
+            raise RuntimeError(
+                "expected one Panda hand rigid body, found: "
+                + str([str(prim.GetPath()) for prim in matching])
+            )
+        return str(matching[0].GetPath())
+
+    def world_pose_for_xform(prim_path: str) -> tuple[np.ndarray, np.ndarray]:
+        view = XFormPrim(
+            prim_paths_expr=prim_path,
+            name="runtime_grasp_attachment_frame",
+            reset_xform_properties=False,
+        )
+        positions, orientations = view.get_world_poses()
+        positions = np.asarray(positions, dtype=np.float64)
+        orientations = np.asarray(orientations, dtype=np.float64)
+        if positions.shape != (1, 3) or orientations.shape != (1, 4):
+            raise RuntimeError(
+                f"unexpected world-pose shape for {prim_path}: "
+                f"{positions.shape}, {orientations.shape}"
+            )
+        return positions[0], orientations[0]
+
     def get_target_world_pose() -> tuple[np.ndarray, np.ndarray]:
         if scene_usd is None:
             position, orientation = target.get_world_pose()
@@ -462,6 +511,84 @@ try:
                 f"{positions.shape}, {orientations.shape}"
             )
         return positions[0], orientations[0]
+
+    def create_post_close_fixed_attachment() -> dict:
+        """Lock the current target-to-hand pose without snapping either body."""
+        hand_rigid_body_path = unique_panda_hand_rigid_body_path()
+        hand_position, hand_orientation = world_pose_for_xform(hand_rigid_body_path)
+        target_position_before, target_orientation_before = get_target_world_pose()
+        relative_position, relative_orientation, T_hand_target = relative_pose(
+            hand_position,
+            hand_orientation,
+            target_position_before,
+            target_orientation_before,
+        )
+
+        joint_path = "/World/RuntimeGraspAttachment"
+        if stage.GetPrimAtPath(joint_path).IsValid():
+            raise RuntimeError(f"runtime grasp attachment already exists: {joint_path}")
+        joint = UsdPhysics.FixedJoint.Define(stage, Sdf.Path(joint_path))
+        joint.CreateBody0Rel().SetTargets([Sdf.Path(hand_rigid_body_path)])
+        joint.CreateBody1Rel().SetTargets([Sdf.Path(target_rigid_prim_path)])
+        joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*relative_position.astype(float)))
+        joint.CreateLocalRot0Attr().Set(
+            Gf.Quatf(
+                float(relative_orientation[0]),
+                Gf.Vec3f(*relative_orientation[1:].astype(float)),
+            )
+        )
+        joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
+        joint.CreateCollisionEnabledAttr().Set(False)
+        joint.CreateExcludeFromArticulationAttr().Set(True)
+        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
+        filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(target_rigid_prim)
+        if not filtered_pairs:
+            raise RuntimeError(
+                "could not apply pairwise collision filtering to attached target"
+            )
+        filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(args.panda_prim))
+        world.step(render=True)
+        record_physics_sample("attach")
+
+        target_position_after, target_orientation_after = get_target_world_pose()
+        position_jump_m = float(
+            np.linalg.norm(target_position_after - target_position_before)
+        )
+        orientation_dot = float(
+            np.clip(
+                abs(np.dot(target_orientation_after, target_orientation_before)),
+                0.0,
+                1.0,
+            )
+        )
+        orientation_jump_rad = float(2.0 * np.arccos(orientation_dot))
+        if position_jump_m > 0.005 or orientation_jump_rad > np.deg2rad(5.0):
+            raise RuntimeError(
+                "post-close attachment changed the target pose unexpectedly: "
+                f"position={position_jump_m:.6g} m, "
+                f"orientation={orientation_jump_rad:.6g} rad"
+            )
+        np.save(output / "T_panda_hand_target_at_attachment.npy", T_hand_target)
+        return {
+            "mode": "rigid-attachment",
+            "applied": True,
+            "assumption": (
+                "grasp accepted; target-to-panda_hand transform remains fixed"
+            ),
+            "joint_type": "UsdPhysics.FixedJoint",
+            "joint_prim": joint_path,
+            "hand_rigid_body_prim": hand_rigid_body_path,
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "connected_body_collision_enabled": False,
+            "target_robot_collision_filtered": True,
+            "target_robot_collision_filter_path": args.panda_prim,
+            "excluded_from_robot_articulation": True,
+            "T_panda_hand_target": T_hand_target.tolist(),
+            "transform_file": str(output / "T_panda_hand_target_at_attachment.npy"),
+            "target_pose_jump_after_attachment_m": position_jump_m,
+            "target_orientation_jump_after_attachment_rad": orientation_jump_rad,
+        }
 
     def save_rgb(label: str) -> str | None:
         frame = camera.get_current_frame()
@@ -677,6 +804,14 @@ try:
     if frame_path:
         saved_frames.append(frame_path)
 
+    attachment_report = {
+        "mode": args.grasp_retention_mode,
+        "applied": False,
+        "assumption": None,
+    }
+    if args.grasp_retention_mode == "rigid-attachment":
+        attachment_report = create_post_close_fixed_attachment()
+
     target_before_lift_position, target_before_lift_orientation = get_target_world_pose()
     target_before_lift_position = np.asarray(target_before_lift_position, dtype=np.float64)
     lift_diagnostic_start_index = len(diagnostic_phases)
@@ -777,12 +912,28 @@ try:
         phase: float(np.max(np.abs(measurements[phase] - commands[phase])))
         for phase in commands
     }
-    physical_pick_observed = bool(
+    object_lifted_and_retained = bool(
         object_lift_m >= minimum_clear_lift_m
         and held_object_lift_m >= minimum_clear_lift_m
     )
+    contact_only_physical_pick_observed = (
+        object_lifted_and_retained
+        if args.grasp_retention_mode == "physics"
+        else None
+    )
+    rigid_grasp_execution_succeeded = (
+        object_lifted_and_retained
+        if args.grasp_retention_mode == "rigid-attachment"
+        else None
+    )
+    execution_success = object_lifted_and_retained
+    failure_status = (
+        "physical_pick_not_observed"
+        if args.grasp_retention_mode == "physics"
+        else "assumed_grasp_execution_failed"
+    )
     report = {
-        "status": "success" if physical_pick_observed else "physical_pick_not_observed",
+        "status": "success" if execution_success else failure_status,
         "reference": {
             "controller": "Isaac Sim 5.1 ArticulationAction position targets",
             "dynamic_target": (
@@ -835,6 +986,20 @@ try:
             "measured_fingers_held_m": measured_fingers_held.tolist(),
             "saved_review_frames": saved_frames,
         },
+        "execution": {
+            "success_observed": execution_success,
+            "evidence_kind": (
+                "contact_only_physics"
+                if args.grasp_retention_mode == "physics"
+                else "rigid_grasp_assumption"
+            ),
+            "grasp_retention_mode": args.grasp_retention_mode,
+            "contact_only_physical_pick_observed": (
+                contact_only_physical_pick_observed
+            ),
+            "rigid_grasp_execution_succeeded": rigid_grasp_execution_succeeded,
+        },
+        "post_close_attachment": attachment_report,
         "physical_object": {
             "physics_apis": target_physics_apis,
             "settled_aabb_world_m": target_settled_aabb.tolist(),
@@ -852,7 +1017,11 @@ try:
             "lift_after_hold_m": held_object_lift_m,
             "transport_displacement_m": transport_displacement_m,
             "minimum_clear_lift_evidence_m": minimum_clear_lift_m,
-            "physical_pick_observed": physical_pick_observed,
+            "object_lifted_and_retained": object_lifted_and_retained,
+            "physical_pick_observed": contact_only_physical_pick_observed,
+            "physical_pick_evidence_is_contact_only": bool(
+                args.grasp_retention_mode == "physics"
+            ),
         },
         "physical_parameters": {
             "finger_drive_preset": args.finger_drive_preset,
@@ -929,7 +1098,9 @@ try:
                 and np.isfinite(diagnostic_target_orientation_array).all()
                 and np.isfinite(diagnostic_finger_position_array).all()
             ),
-            "object_lifted_by_at_least_one_object_height": physical_pick_observed,
+            "object_lifted_by_at_least_one_object_height": (
+                object_lifted_and_retained
+            ),
             "object_remained_lifted_after_transport": bool(
                 not transport_executed
                 or held_object_lift_m >= minimum_clear_lift_m
@@ -938,7 +1109,13 @@ try:
         "safety": {
             "simulation_only": True,
             "dynamic_target_used": True,
-            "object_not_fixed_to_gripper": True,
+            "object_not_fixed_to_gripper": bool(
+                args.grasp_retention_mode == "physics"
+            ),
+            "rigid_grasp_assumption_applied_after_close": bool(
+                attachment_report.get("applied") is True
+            ),
+            "grasp_slip_evaluated": bool(args.grasp_retention_mode == "physics"),
             "physical_gripper_close_commanded": True,
             "physical_contact_monitoring_automated": False,
             "first_lift_held_object_collision_checked_by_curobo": False,
@@ -963,7 +1140,7 @@ try:
         f"{held_object_lift_m:.6g} m"
     )
     print(f"saved: {report_path}")
-    if not physical_pick_observed:
+    if not execution_success:
         raise SystemExit(2)
 except Exception as exc:
     if isinstance(exc, SystemExit):

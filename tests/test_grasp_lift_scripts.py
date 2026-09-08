@@ -371,9 +371,11 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn(
             '"finger_drive_diagnostic_scale_for_every_candidate"', replay_runner
         )
-        self.assertIn('"stop_at_first_physical_pick": True', replay_runner)
+        self.assertIn('"stop_at_first_success": True', replay_runner)
+        self.assertIn('"grasp_retention_mode"', replay_runner)
         self.assertIn('report.get("physical_object", {})', replay_runner)
         self.assertIn('if completed.returncode == 0 and status == "success"', replay_runner)
+        self.assertIn('"--handover-goal-position-robot-base-m"', planner_runner)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay candidate-specific grasp/lift plans until one physical pick succeeds."""
+"""Replay candidate plans until one configured grasp-retention trial succeeds."""
 
 from __future__ import annotations
 
@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
         default="isaaclab-franka",
     )
     parser.add_argument("--finger-drive-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--grasp-retention-mode",
+        choices=("physics", "rigid-attachment"),
+        default="physics",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--simulation-only", action="store_true")
     args = parser.parse_args()
@@ -70,7 +75,11 @@ def main() -> int:
         },
         "policy": {
             "maximum_physical_trials": args.max_physical_trials,
-            "stop_at_first_physical_pick": True,
+            "stop_at_first_success": True,
+            "grasp_retention_mode": args.grasp_retention_mode,
+            "rigid_attachment_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "rigid-attachment"
+            ),
             "finger_drive_preset_for_every_candidate": args.finger_drive_preset,
             "finger_drive_diagnostic_scale_for_every_candidate": args.finger_drive_scale,
             "finger_drive_scaling_policy": (
@@ -104,12 +113,14 @@ def main() -> int:
             args.finger_drive_preset,
             "--finger-drive-scale",
             str(args.finger_drive_scale),
+            "--grasp-retention-mode",
+            args.grasp_retention_mode,
             "--simulation-only",
         ]
         if args.headless:
             command.append("--headless")
         print(
-            f"=== physical trial {trial_number}/{len(plan_attempts)}: "
+            f"=== replay trial {trial_number}/{len(plan_attempts)}: "
             f"candidate {source_index} ===",
             flush=True,
         )
@@ -121,8 +132,13 @@ def main() -> int:
             else {"status": "missing_report"}
         )
         status = str(report.get("status", "unknown"))
-        physical_pick = bool(
-            report.get("physical_object", {}).get("physical_pick_observed", False)
+        physical_pick = report.get("physical_object", {}).get(
+            "physical_pick_observed"
+        )
+        execution_success = bool(
+            report.get("execution", {}).get(
+                "success_observed", physical_pick is True
+            )
         )
         attempt = {
             "trial_number": trial_number,
@@ -133,17 +149,30 @@ def main() -> int:
             "return_code": completed.returncode,
             "replay_status": status,
             "physical_pick_observed": physical_pick,
+            "execution_success_observed": execution_success,
+            "execution_evidence_kind": report.get("execution", {}).get(
+                "evidence_kind"
+            ),
             "report": str(report_path) if report_path.exists() else None,
         }
         summary["attempts"].append(attempt)
-        if completed.returncode == 0 and status == "success" and physical_pick:
+        if completed.returncode == 0 and status == "success" and execution_success:
             summary["status"] = "success"
             summary["selected_success"] = attempt
             write_summary(summary_path, summary)
-            print(f"physical pick succeeded with candidate {source_index}", flush=True)
+            print(
+                f"{args.grasp_retention_mode} replay succeeded with candidate "
+                f"{source_index}",
+                flush=True,
+            )
             print(f"saved: {summary_path}", flush=True)
             return 0
-        if status != "physical_pick_not_observed":
+        expected_failure_status = (
+            "physical_pick_not_observed"
+            if args.grasp_retention_mode == "physics"
+            else "assumed_grasp_execution_failed"
+        )
+        if status != expected_failure_status:
             summary["status"] = "replay_error"
             write_summary(summary_path, summary)
             raise RuntimeError(
@@ -152,7 +181,11 @@ def main() -> int:
             )
         write_summary(summary_path, summary)
 
-    summary["status"] = "physical_pick_not_observed"
+    summary["status"] = (
+        "physical_pick_not_observed"
+        if args.grasp_retention_mode == "physics"
+        else "assumed_grasp_execution_failed"
+    )
     write_summary(summary_path, summary)
     print("all available candidate replays failed to retain the object", flush=True)
     print(f"saved: {summary_path}", flush=True)

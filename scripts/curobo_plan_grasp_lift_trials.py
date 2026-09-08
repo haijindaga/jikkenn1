@@ -24,6 +24,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument(
+        "--handover-goal-position-robot-base-m",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+    )
+    parser.add_argument(
+        "--handover-goal-quaternion-wxyz",
+        type=float,
+        nargs=4,
+        metavar=("W", "X", "Y", "Z"),
+    )
+    parser.add_argument(
         "--allow-reviewed-support-contact-preflight", action="store_true"
     )
     args = parser.parse_args()
@@ -31,6 +43,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-physical-trials must be positive")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
+    if (
+        args.handover_goal_quaternion_wxyz is not None
+        and args.handover_goal_position_robot_base_m is None
+    ):
+        parser.error("handover orientation requires a handover position")
     return args
 
 
@@ -84,6 +101,13 @@ def main() -> int:
             "maximum_physical_trials": args.max_physical_trials,
             "candidate_specific_parameter_tuning": False,
             "continue_after_planning_rejection": True,
+            "handover_transport_requested": bool(
+                args.handover_goal_position_robot_base_m is not None
+            ),
+            "handover_goal_position_robot_base_m": (
+                args.handover_goal_position_robot_base_m
+            ),
+            "handover_goal_quaternion_wxyz": args.handover_goal_quaternion_wxyz,
         },
         "candidate_pool_count": int(len(source_indices)),
         "attempts": [],
@@ -124,6 +148,23 @@ def main() -> int:
         ]
         if args.allow_reviewed_support_contact_preflight:
             command.append("--allow-reviewed-support-contact-preflight")
+        if args.handover_goal_position_robot_base_m is not None:
+            command.extend(
+                [
+                    "--handover-goal-position-robot-base-m",
+                    *[
+                        str(value)
+                        for value in args.handover_goal_position_robot_base_m
+                    ],
+                ]
+            )
+        if args.handover_goal_quaternion_wxyz is not None:
+            command.extend(
+                [
+                    "--handover-goal-quaternion-wxyz",
+                    *[str(value) for value in args.handover_goal_quaternion_wxyz],
+                ]
+            )
         print(
             f"=== planning candidate {source_index} "
             f"(score rank {original_rank}, score {float(score):.6f}) ===",

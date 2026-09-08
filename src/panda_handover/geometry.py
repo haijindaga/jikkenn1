@@ -98,6 +98,27 @@ def matrix_from_pose(position: np.ndarray, orientation_wxyz: np.ndarray) -> np.n
     return transform
 
 
+def relative_pose(
+    parent_position: np.ndarray,
+    parent_orientation_wxyz: np.ndarray,
+    child_position: np.ndarray,
+    child_orientation_wxyz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the child's rigid pose in the parent frame.
+
+    The returned transform is ``T_parent_child``. This is the fixed
+    object-to-hand relation used after a grasp has been accepted.
+    """
+    T_world_parent = matrix_from_pose(parent_position, parent_orientation_wxyz)
+    T_world_child = matrix_from_pose(child_position, child_orientation_wxyz)
+    T_parent_child = np.linalg.inv(T_world_parent) @ T_world_child
+    return (
+        T_parent_child[:3, 3].copy(),
+        quaternion_wxyz_from_rotation_matrix(T_parent_child[:3, :3]),
+        T_parent_child,
+    )
+
+
 def look_at_quaternion_world(position: np.ndarray, target: np.ndarray) -> np.ndarray:
     """Orient Isaac's world camera axes (+X forward, +Z up) at ``target``."""
     position = np.asarray(position, dtype=np.float64)
