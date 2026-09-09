@@ -388,6 +388,36 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             self.assertTrue((archived / "report.json").is_file())
             self.assertFalse(output.exists())
 
+    def test_failure_archives_stale_downstream_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            failed = root / "failed"
+            stale_plan = root / "stale_plan"
+            stale_replay = root / "stale_replay"
+            for path in (failed, stale_plan, stale_replay):
+                path.mkdir()
+                (path / "report.json").write_text(
+                    json.dumps({"status": "success"}), encoding="utf-8"
+                )
+            stages = {
+                "failed": MODULE.Stage("failed", ("python",), failed / "report.json"),
+                "plan": MODULE.Stage(
+                    "plan", ("python",), stale_plan / "report.json"
+                ),
+                "replay": MODULE.Stage(
+                    "replay", ("python",), stale_replay / "report.json"
+                ),
+            }
+
+            archived = MODULE._archive_downstream_stage_outputs(
+                stages, "failed", root / "pipeline_status.json"
+            )
+
+            self.assertEqual([item["stage"] for item in archived], ["plan", "replay"])
+            self.assertFalse(stale_plan.exists())
+            self.assertFalse(stale_replay.exists())
+            self.assertTrue(all(Path(item["archive"]).is_dir() for item in archived))
+
     def test_rejects_topk_above_generated_count(self) -> None:
         with self.assertRaises(SystemExit):
             MODULE.parse_args(

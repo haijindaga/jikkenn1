@@ -334,8 +334,13 @@ def _run_stage(
     resume: bool,
     manifest: dict[str, Any],
     manifest_path: Path,
+    force_rerun: bool = False,
 ) -> None:
-    if resume and report_succeeded(stage.report, stage.accepted_statuses):
+    if (
+        resume
+        and not force_rerun
+        and report_succeeded(stage.report, stage.accepted_statuses)
+    ):
         print(f"=== {stage.name}: already successful; skipping ===", flush=True)
         manifest["stages"].append(
             {"name": stage.name, "status": "skipped_success", "report": str(stage.report)}
@@ -345,7 +350,8 @@ def _run_stage(
 
     archived = _archive_partial_stage_output(stage, manifest_path) if resume else None
     if archived is not None:
-        print(f"archived incomplete output to {archived}", flush=True)
+        reason = "invalidated downstream" if force_rerun else "incomplete"
+        print(f"archived {reason} output to {archived}", flush=True)
 
     print(f"=== {stage.name} ===", flush=True)
     print(_display_command(stage.command), flush=True)
@@ -370,6 +376,22 @@ def _run_stage(
             f"{stage.name} failed (return code {completed.returncode}); "
             f"inspect {stage.report}"
         )
+
+
+def _archive_downstream_stage_outputs(
+    stages: dict[str, Stage], failed_stage_name: str, manifest_path: Path
+) -> list[dict[str, str]]:
+    """Move stale downstream artifacts aside after an upstream failure."""
+
+    names = list(stages)
+    if failed_stage_name not in names:
+        return []
+    archived_outputs: list[dict[str, str]] = []
+    for name in names[names.index(failed_stage_name) + 1 :]:
+        archived = _archive_partial_stage_output(stages[name], manifest_path)
+        if archived is not None:
+            archived_outputs.append({"stage": name, "archive": str(archived)})
+    return archived_outputs
 
 
 def _port_accepts_connections(host: str, port: int) -> bool:
@@ -811,20 +833,31 @@ def main(argv: Iterable[str] | None = None) -> int:
     _write_manifest(paths.manifest, manifest)
 
     exit_code = 0
+    upstream_stage_reran = False
     try:
         for name in ("capture_rgbd", "ollama_vlm", "sam3_segmentation", "curobo_map"):
             if name in stages:
+                stage = stages[name]
+                reusable = bool(
+                    args.resume
+                    and not upstream_stage_reran
+                    and report_succeeded(stage.report, stage.accepted_statuses)
+                )
                 _run_stage(
-                    stages[name],
+                    stage,
                     project_root=project_root,
                     resume=args.resume,
                     manifest=manifest,
                     manifest_path=paths.manifest,
+                    force_rerun=upstream_stage_reran,
                 )
+                upstream_stage_reran = upstream_stage_reran or not reusable
 
         infer_stage = stages["graspgenx_inference"]
-        inference_already_done = args.resume and report_succeeded(
-            infer_stage.report, infer_stage.accepted_statuses
+        inference_already_done = bool(
+            args.resume
+            and not upstream_stage_reran
+            and report_succeeded(infer_stage.report, infer_stage.accepted_statuses)
         )
         if inference_already_done:
             _run_stage(
@@ -872,13 +905,15 @@ def main(argv: Iterable[str] | None = None) -> int:
                     _run_stage(
                         infer_stage,
                         project_root=project_root,
-                        resume=False,
+                        resume=args.resume,
                         manifest=manifest,
                         manifest_path=paths.manifest,
+                        force_rerun=upstream_stage_reran,
                     )
                 finally:
                     print("=== stopping managed GraspGenX server ===", flush=True)
                     _stop_server(server_process)
+            upstream_stage_reran = True
 
         for name in (
             "static_collision_filter",
@@ -888,13 +923,21 @@ def main(argv: Iterable[str] | None = None) -> int:
             "isaac_physical_trials",
         ):
             if name in stages:
+                stage = stages[name]
+                reusable = bool(
+                    args.resume
+                    and not upstream_stage_reran
+                    and report_succeeded(stage.report, stage.accepted_statuses)
+                )
                 _run_stage(
-                    stages[name],
+                    stage,
                     project_root=project_root,
                     resume=args.resume,
                     manifest=manifest,
                     manifest_path=paths.manifest,
+                    force_rerun=upstream_stage_reran,
                 )
+                upstream_stage_reran = upstream_stage_reran or not reusable
     except Exception as exc:
         exit_code = 2
         manifest["status"] = "failed"
@@ -902,6 +945,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             "type": type(exc).__name__,
             "message": str(exc),
         }
+        failed_stage_name = (
+            str(manifest["stages"][-1].get("name"))
+            if manifest["stages"]
+            and manifest["stages"][-1].get("status") == "failed"
+            else ""
+        )
+        archived_downstream = _archive_downstream_stage_outputs(
+            stages, failed_stage_name, paths.manifest
+        )
+        if archived_downstream:
+            manifest["failure"]["archived_stale_downstream_outputs"] = (
+                archived_downstream
+            )
         print(f"pipeline failed: {exc}", file=sys.stderr, flush=True)
     else:
         manifest["status"] = "success"

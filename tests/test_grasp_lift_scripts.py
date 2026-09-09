@@ -383,6 +383,14 @@ class GraspLiftScriptTests(unittest.TestCase):
             '"--handover-receiver-position-robot-base-m"', planner_runner
         )
 
+    def test_pregrasp_accepts_handover_rerank_with_static_filter_provenance(self):
+        source = (PROJECT / "scripts" / "curobo_plan_pregrasp_a.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"handover_rerank_check.json"', source)
+        self.assertIn('"static_filtered_candidates"', source)
+        self.assertIn('"static_collision_filter_report"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

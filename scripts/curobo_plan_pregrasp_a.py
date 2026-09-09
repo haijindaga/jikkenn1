@@ -201,7 +201,26 @@ def main() -> int:
             args.prepared_map, args.capture
         )
 
-    collision_report_path = args.candidates / "collision_filter_check.json"
+    handover_report_path = args.candidates / "handover_rerank_check.json"
+    handover_report = None
+    if handover_report_path.is_file():
+        handover_report = json.loads(
+            handover_report_path.read_text(encoding="utf-8")
+        )
+        if handover_report.get("status") != "success":
+            raise ValueError("handover-aware candidate reranking did not pass")
+        static_candidates_value = handover_report.get("inputs", {}).get(
+            "static_filtered_candidates"
+        )
+        if not isinstance(static_candidates_value, str) or not static_candidates_value:
+            raise ValueError(
+                "handover-aware candidates have no static-filter provenance"
+            )
+        collision_report_path = (
+            Path(static_candidates_value) / "collision_filter_check.json"
+        )
+    else:
+        collision_report_path = args.candidates / "collision_filter_check.json"
     if not collision_report_path.is_file():
         raise FileNotFoundError(
             "pre-grasp planning requires GraspGenX collision-filtered candidates"
@@ -566,6 +585,12 @@ def main() -> int:
         "inputs": {
             "capture": str(args.capture),
             "candidates": str(args.candidates),
+            "candidate_policy_report": str(
+                handover_report_path
+                if handover_report is not None
+                else collision_report_path
+            ),
+            "static_collision_filter_report": str(collision_report_path),
             **scene_inputs,
         },
         "frames": {
