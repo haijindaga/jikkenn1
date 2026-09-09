@@ -667,7 +667,10 @@ def main() -> int:
         summarize_ik_result_arrays,
     )
     from panda_handover.geometry import transform_points
-    from panda_handover.handover import generate_affordance_handover_goals
+    from panda_handover.handover import (
+        DEFAULT_HANDOVER_ROLL_DEGREES,
+        generate_affordance_handover_goals,
+    )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
     subprocess.run(
@@ -798,11 +801,18 @@ def main() -> int:
         pitch=observed_scene.voxel_size_m,
         name="observed_scene_without_robot_or_target",
     )
+    # A candidate-specific trial narrows the grasp goalset to one pose, but
+    # automatic handover later submits all fixed roll variants to this same
+    # planner. Reserve capacity for the largest goalset used in either phase.
+    planner_max_goalset = max(
+        len(grasp_transforms),
+        len(DEFAULT_HANDOVER_ROLL_DEGREES) if automatic_handover else 1,
+    )
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
         scene_model=SceneCfg(mesh=[scene_mesh]),
         device_cfg=device_cfg,
-        max_goalset=len(grasp_transforms),
+        max_goalset=planner_max_goalset,
     )
     planner = MotionPlanner(planner_cfg)
     if planner.tool_frames != ["panda_hand"]:
@@ -1760,6 +1770,7 @@ def main() -> int:
                 requested_candidate_original_rank
             ),
             "automatic_affordance_handover": automatic_handover,
+            "planner_max_goalset": planner_max_goalset,
             "handover_receiver_position_robot_base_m": (
                 handover_receiver_position.tolist()
                 if handover_receiver_position is not None
