@@ -265,12 +265,20 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
-        self.assertIn('choices=("physics", "rigid-attachment")', script)
+        self.assertIn('"physx-auto-attachment",', script)
         self.assertIn(
             '"transport" not in replay.phase_positions',
             script,
         )
         self.assertIn("UsdPhysics.FixedJoint.Define", script)
+        self.assertIn("PhysxSchema.PhysxPhysicsAttachment.Define", script)
+        self.assertIn("PhysxSchema.PhysxAutoAttachmentAPI.Apply", script)
+        self.assertIn(
+            'output / "attachment_relative_translation_error_m.npy"', script
+        )
+        self.assertIn(
+            'output / "attachment_relative_orientation_error_rad.npy"', script
+        )
         self.assertIn("relative_pose(", script)
         self.assertIn("joint.CreateCollisionEnabledAttr().Set(False)", script)
         self.assertIn("UsdPhysics.FilteredPairsAPI.Apply", script)

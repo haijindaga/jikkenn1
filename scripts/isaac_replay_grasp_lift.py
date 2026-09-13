@@ -99,12 +99,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--grasp-retention-mode",
-        choices=("physics", "rigid-attachment"),
+        choices=(
+            "physics",
+            "physx-auto-attachment",
+            "rigid-attachment",
+            "kinematic-pose-lock",
+        ),
         default="physics",
         help=(
-            "'physics' evaluates contact-only retention. 'rigid-attachment' "
-            "creates a post-close FixedJoint and evaluates lift/transport under "
-            "the explicit assumption that a successful grasp does not slip."
+            "'physics' evaluates contact-only retention. "
+            "'physx-auto-attachment' applies the PhysX runtime attachment "
+            "recipe to the current simulated poses. 'rigid-attachment' "
+            "creates a post-close FixedJoint for legacy comparison. "
+            "'kinematic-pose-lock' preserves the measured post-close "
+            "target-to-hand transform exactly during lift/transport."
         ),
     )
     parser.add_argument(
@@ -172,12 +180,17 @@ requested_finger_drive_values = resolve_finger_drive_values(
 )
 replay = load_grasp_lift_replay(args.capture, args.plan)
 if (
-    args.grasp_retention_mode == "rigid-attachment"
+    args.grasp_retention_mode
+    in {
+        "physx-auto-attachment",
+        "rigid-attachment",
+        "kinematic-pose-lock",
+    }
     and "transport" not in replay.phase_positions
 ):
     raise ValueError(
-        "rigid-attachment mode requires an attached collision-checked transport "
-        "phase in the cuRobo plan"
+        "non-physical retention modes require an attached collision-checked "
+        "transport phase in the cuRobo plan"
     )
 scene_usd = None
 if args.scene_usd is not None:
@@ -228,7 +241,12 @@ try:
     from isaacsim.sensors.camera import Camera
     from pxr import Gf, PhysxSchema, Sdf, Usd, UsdPhysics, UsdShade
 
-    from panda_handover.geometry import look_at_quaternion_world, relative_pose
+    from panda_handover.geometry import (
+        look_at_quaternion_world,
+        matrix_from_pose,
+        quaternion_wxyz_from_rotation_matrix,
+        relative_pose,
+    )
 
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
@@ -659,10 +677,14 @@ try:
         return str(matching[0].GetPath())
 
     def world_pose_for_xform(prim_path: str) -> tuple[np.ndarray, np.ndarray]:
-        view = XFormPrim(
-            prim_paths_expr=prim_path,
-            name="runtime_grasp_attachment_frame",
-            reset_xform_properties=False,
+        view = (
+            panda_hand_pose_view
+            if prim_path == panda_hand_rigid_body_path
+            else XFormPrim(
+                prim_paths_expr=prim_path,
+                name="runtime_grasp_attachment_frame_fallback",
+                reset_xform_properties=False,
+            )
         )
         positions, orientations = view.get_world_poses()
         positions = np.asarray(positions, dtype=np.float64)
@@ -688,9 +710,88 @@ try:
             )
         return positions[0], orientations[0]
 
+    def set_target_world_pose(position: np.ndarray, orientation: np.ndarray) -> None:
+        position = np.asarray(position, dtype=np.float64)
+        orientation = np.asarray(orientation, dtype=np.float64)
+        if scene_usd is None:
+            target.set_world_pose(position=position, orientation=orientation)
+        else:
+            target.set_world_poses(
+                positions=position.reshape(1, 3),
+                orientations=orientation.reshape(1, 4),
+            )
+
+    panda_hand_rigid_body_path = unique_panda_hand_rigid_body_path()
+    panda_hand_pose_view = XFormPrim(
+        prim_paths_expr=panda_hand_rigid_body_path,
+        name="runtime_grasp_attachment_frame",
+        reset_xform_properties=False,
+    )
+    attachment_state: dict[str, object | None] = {
+        "hand_rigid_body_path": panda_hand_rigid_body_path,
+        "T_hand_target": None,
+    }
+
+    def apply_target_robot_collision_filter() -> None:
+        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
+        filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(target_rigid_prim)
+        if not filtered_pairs:
+            raise RuntimeError(
+                "could not apply pairwise collision filtering to attached target"
+            )
+        filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(args.panda_prim))
+
+    def attachment_pose_jump(
+        target_position_before: np.ndarray,
+        target_orientation_before: np.ndarray,
+    ) -> tuple[float, float]:
+        target_position_after, target_orientation_after = get_target_world_pose()
+        position_jump_m = float(
+            np.linalg.norm(target_position_after - target_position_before)
+        )
+        orientation_dot = float(
+            np.clip(
+                abs(np.dot(target_orientation_after, target_orientation_before)),
+                0.0,
+                1.0,
+            )
+        )
+        orientation_jump_rad = float(2.0 * np.arccos(orientation_dot))
+        if position_jump_m > 0.005 or orientation_jump_rad > np.deg2rad(5.0):
+            raise RuntimeError(
+                "post-close attachment changed the target pose unexpectedly: "
+                f"position={position_jump_m:.6g} m, "
+                f"orientation={orientation_jump_rad:.6g} rad"
+            )
+        return position_jump_m, orientation_jump_rad
+
+    def register_attachment_reference(T_hand_target: np.ndarray) -> str:
+        transform_path = output / "T_panda_hand_target_at_attachment.npy"
+        np.save(transform_path, T_hand_target)
+        attachment_state["T_hand_target"] = np.asarray(
+            T_hand_target, dtype=np.float64
+        ).copy()
+        return str(transform_path)
+
+    def enforce_kinematic_pose_lock() -> None:
+        if args.grasp_retention_mode != "kinematic-pose-lock":
+            return
+        T_hand_target = attachment_state["T_hand_target"]
+        if T_hand_target is None:
+            return
+        hand_position, hand_orientation = world_pose_for_xform(
+            panda_hand_rigid_body_path
+        )
+        T_world_hand = matrix_from_pose(hand_position, hand_orientation)
+        T_world_target = T_world_hand @ np.asarray(T_hand_target)
+        set_target_world_pose(
+            T_world_target[:3, 3],
+            quaternion_wxyz_from_rotation_matrix(T_world_target[:3, :3]),
+        )
+
     def create_post_close_fixed_attachment() -> dict:
         """Lock the current target-to-hand pose without snapping either body."""
-        hand_rigid_body_path = unique_panda_hand_rigid_body_path()
+        hand_rigid_body_path = panda_hand_rigid_body_path
         hand_position, hand_orientation = world_pose_for_xform(hand_rigid_body_path)
         target_position_before, target_orientation_before = get_target_world_pose()
         relative_position, relative_orientation, T_hand_target = relative_pose(
@@ -717,35 +818,13 @@ try:
         joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
         joint.CreateCollisionEnabledAttr().Set(False)
         joint.CreateExcludeFromArticulationAttr().Set(True)
-        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
-        filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(target_rigid_prim)
-        if not filtered_pairs:
-            raise RuntimeError(
-                "could not apply pairwise collision filtering to attached target"
-            )
-        filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(args.panda_prim))
+        apply_target_robot_collision_filter()
+        transform_file = register_attachment_reference(T_hand_target)
         world.step(render=True)
         record_physics_sample("attach")
-
-        target_position_after, target_orientation_after = get_target_world_pose()
-        position_jump_m = float(
-            np.linalg.norm(target_position_after - target_position_before)
+        position_jump_m, orientation_jump_rad = attachment_pose_jump(
+            target_position_before, target_orientation_before
         )
-        orientation_dot = float(
-            np.clip(
-                abs(np.dot(target_orientation_after, target_orientation_before)),
-                0.0,
-                1.0,
-            )
-        )
-        orientation_jump_rad = float(2.0 * np.arccos(orientation_dot))
-        if position_jump_m > 0.005 or orientation_jump_rad > np.deg2rad(5.0):
-            raise RuntimeError(
-                "post-close attachment changed the target pose unexpectedly: "
-                f"position={position_jump_m:.6g} m, "
-                f"orientation={orientation_jump_rad:.6g} rad"
-            )
-        np.save(output / "T_panda_hand_target_at_attachment.npy", T_hand_target)
         return {
             "mode": "rigid-attachment",
             "applied": True,
@@ -761,9 +840,114 @@ try:
             "target_robot_collision_filter_path": args.panda_prim,
             "excluded_from_robot_articulation": True,
             "T_panda_hand_target": T_hand_target.tolist(),
-            "transform_file": str(output / "T_panda_hand_target_at_attachment.npy"),
+            "transform_file": transform_file,
             "target_pose_jump_after_attachment_m": position_jump_m,
             "target_orientation_jump_after_attachment_rad": orientation_jump_rad,
+        }
+
+    def create_post_close_physx_auto_attachment() -> dict:
+        """Apply the PhysX runtime auto-attachment recipe at the current poses."""
+        if not hasattr(PhysxSchema, "PhysxPhysicsAttachment") or not hasattr(
+            PhysxSchema, "PhysxAutoAttachmentAPI"
+        ):
+            raise RuntimeError(
+                "this Isaac Sim build has no PhysxPhysicsAttachment/"
+                "PhysxAutoAttachmentAPI schema"
+            )
+        hand_position, hand_orientation = world_pose_for_xform(
+            panda_hand_rigid_body_path
+        )
+        target_position_before, target_orientation_before = get_target_world_pose()
+        _, _, T_hand_target = relative_pose(
+            hand_position,
+            hand_orientation,
+            target_position_before,
+            target_orientation_before,
+        )
+        attachment_path = Sdf.Path(panda_hand_rigid_body_path).AppendChild(
+            "runtime_target_attachment"
+        )
+        if stage.GetPrimAtPath(attachment_path).IsValid():
+            raise RuntimeError(
+                f"runtime PhysX attachment already exists: {attachment_path}"
+            )
+        attachment = PhysxSchema.PhysxPhysicsAttachment.Define(stage, attachment_path)
+        attachment.GetActor0Rel().SetTargets(
+            [Sdf.Path(panda_hand_rigid_body_path)]
+        )
+        attachment.GetActor1Rel().SetTargets([Sdf.Path(target_rigid_prim_path)])
+        auto_attachment = PhysxSchema.PhysxAutoAttachmentAPI.Apply(
+            attachment.GetPrim()
+        )
+        if not auto_attachment or not auto_attachment.GetPrim().IsValid():
+            raise RuntimeError("could not apply PhysxAutoAttachmentAPI")
+        apply_target_robot_collision_filter()
+        transform_file = register_attachment_reference(T_hand_target)
+        world.step(render=True)
+        record_physics_sample("attach")
+        position_jump_m, orientation_jump_rad = attachment_pose_jump(
+            target_position_before, target_orientation_before
+        )
+        return {
+            "mode": "physx-auto-attachment",
+            "applied": True,
+            "assumption": (
+                "grasp accepted; PhysX attachment preserves the current "
+                "target-to-panda_hand relation"
+            ),
+            "schema_type": "PhysxSchema.PhysxPhysicsAttachment",
+            "auto_attachment_api": "PhysxSchema.PhysxAutoAttachmentAPI",
+            "attachment_prim": str(attachment_path),
+            "hand_rigid_body_prim": panda_hand_rigid_body_path,
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "target_robot_collision_filtered": True,
+            "target_robot_collision_filter_path": args.panda_prim,
+            "T_panda_hand_target": T_hand_target.tolist(),
+            "transform_file": transform_file,
+            "target_pose_jump_after_attachment_m": position_jump_m,
+            "target_orientation_jump_after_attachment_rad": orientation_jump_rad,
+            "implementation_reference": (
+                "https://github.com/isaac-sim/IsaacLab/discussions/4189"
+            ),
+            "experimental_runtime_schema": True,
+        }
+
+    def create_post_close_kinematic_pose_lock() -> dict:
+        """Record the post-close transform for exact pose following after each step."""
+        hand_position, hand_orientation = world_pose_for_xform(
+            panda_hand_rigid_body_path
+        )
+        target_position_before, target_orientation_before = get_target_world_pose()
+        _, _, T_hand_target = relative_pose(
+            hand_position,
+            hand_orientation,
+            target_position_before,
+            target_orientation_before,
+        )
+        apply_target_robot_collision_filter()
+        transform_file = register_attachment_reference(T_hand_target)
+        world.step(render=True)
+        enforce_kinematic_pose_lock()
+        record_physics_sample("attach")
+        position_jump_m, orientation_jump_rad = attachment_pose_jump(
+            target_position_before, target_orientation_before
+        )
+        return {
+            "mode": "kinematic-pose-lock",
+            "applied": True,
+            "assumption": (
+                "grasp accepted; target pose is reset from the measured "
+                "target-to-panda_hand transform after every physics step"
+            ),
+            "hand_rigid_body_prim": panda_hand_rigid_body_path,
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "target_robot_collision_filtered": True,
+            "target_robot_collision_filter_path": args.panda_prim,
+            "T_panda_hand_target": T_hand_target.tolist(),
+            "transform_file": transform_file,
+            "target_pose_jump_after_attachment_m": position_jump_m,
+            "target_orientation_jump_after_attachment_rad": orientation_jump_rad,
+            "simulation_pose_override": True,
         }
 
     def save_rgb(label: str) -> str | None:
@@ -911,18 +1095,54 @@ try:
     diagnostic_target_positions: list[np.ndarray] = []
     diagnostic_target_orientations: list[np.ndarray] = []
     diagnostic_finger_positions: list[np.ndarray] = []
+    diagnostic_hand_positions: list[np.ndarray] = []
+    diagnostic_hand_orientations: list[np.ndarray] = []
+    diagnostic_attachment_translation_errors: list[float] = []
+    diagnostic_attachment_orientation_errors: list[float] = []
 
     def record_physics_sample(phase: str) -> None:
         target_position, target_orientation = get_target_world_pose()
+        hand_position, hand_orientation = world_pose_for_xform(
+            panda_hand_rigid_body_path
+        )
         finger_position = np.asarray(
             panda.get_joint_positions(), dtype=np.float64
         )[finger_indices]
         if not (
             np.isfinite(target_position).all()
             and np.isfinite(target_orientation).all()
+            and np.isfinite(hand_position).all()
+            and np.isfinite(hand_orientation).all()
             and np.isfinite(finger_position).all()
         ):
             raise RuntimeError(f"non-finite retention diagnostic during {phase}")
+        T_hand_target_reference = attachment_state["T_hand_target"]
+        if T_hand_target_reference is None:
+            attachment_translation_error_m = math.nan
+            attachment_orientation_error_rad = math.nan
+        else:
+            _, _, T_hand_target_current = relative_pose(
+                hand_position,
+                hand_orientation,
+                target_position,
+                target_orientation,
+            )
+            T_hand_target_reference = np.asarray(T_hand_target_reference)
+            attachment_translation_error_m = float(
+                np.linalg.norm(
+                    T_hand_target_current[:3, 3]
+                    - T_hand_target_reference[:3, 3]
+                )
+            )
+            rotation_delta = (
+                T_hand_target_reference[:3, :3].T
+                @ T_hand_target_current[:3, :3]
+            )
+            attachment_orientation_error_rad = float(
+                np.arccos(
+                    np.clip((np.trace(rotation_delta) - 1.0) * 0.5, -1.0, 1.0)
+                )
+            )
         diagnostic_phases.append(phase)
         diagnostic_target_positions.append(
             np.asarray(target_position, dtype=np.float64).copy()
@@ -931,6 +1151,18 @@ try:
             np.asarray(target_orientation, dtype=np.float64).copy()
         )
         diagnostic_finger_positions.append(finger_position.copy())
+        diagnostic_hand_positions.append(
+            np.asarray(hand_position, dtype=np.float64).copy()
+        )
+        diagnostic_hand_orientations.append(
+            np.asarray(hand_orientation, dtype=np.float64).copy()
+        )
+        diagnostic_attachment_translation_errors.append(
+            attachment_translation_error_m
+        )
+        diagnostic_attachment_orientation_errors.append(
+            attachment_orientation_error_rad
+        )
 
     record_physics_sample("settled")
 
@@ -950,6 +1182,7 @@ try:
                 )
             )
             world.step(render=True)
+            enforce_kinematic_pose_lock()
             record_physics_sample(phase)
             phase_measured[index] = np.asarray(
                 panda.get_joint_positions(), dtype=np.float64
@@ -982,6 +1215,7 @@ try:
             )
         )
         world.step(render=True)
+        enforce_kinematic_pose_lock()
         record_physics_sample("close")
     measured_fingers_after_close = np.asarray(
         panda.get_joint_positions(), dtype=np.float64
@@ -997,6 +1231,10 @@ try:
     }
     if args.grasp_retention_mode == "rigid-attachment":
         attachment_report = create_post_close_fixed_attachment()
+    elif args.grasp_retention_mode == "physx-auto-attachment":
+        attachment_report = create_post_close_physx_auto_attachment()
+    elif args.grasp_retention_mode == "kinematic-pose-lock":
+        attachment_report = create_post_close_kinematic_pose_lock()
 
     target_before_lift_position, target_before_lift_orientation = get_target_world_pose()
     target_before_lift_position = np.asarray(target_before_lift_position, dtype=np.float64)
@@ -1026,6 +1264,7 @@ try:
             )
         )
         world.step(render=True)
+        enforce_kinematic_pose_lock()
         record_physics_sample("hold")
     target_held_position, target_held_orientation = get_target_world_pose()
     target_held_position = np.asarray(target_held_position, dtype=np.float64)
@@ -1059,6 +1298,14 @@ try:
     diagnostic_target_orientation_array = np.stack(diagnostic_target_orientations)
     diagnostic_finger_position_array = np.stack(diagnostic_finger_positions)
     diagnostic_finger_gap_array = np.sum(diagnostic_finger_position_array, axis=1)
+    diagnostic_hand_position_array = np.stack(diagnostic_hand_positions)
+    diagnostic_hand_orientation_array = np.stack(diagnostic_hand_orientations)
+    diagnostic_attachment_translation_error_array = np.asarray(
+        diagnostic_attachment_translation_errors, dtype=np.float64
+    )
+    diagnostic_attachment_orientation_error_array = np.asarray(
+        diagnostic_attachment_orientation_errors, dtype=np.float64
+    )
     np.save(output / "retention_time_s.npy", diagnostic_time_s)
     np.save(output / "retention_phase.npy", diagnostic_phase_array)
     np.save(
@@ -1074,6 +1321,22 @@ try:
         diagnostic_finger_position_array,
     )
     np.save(output / "retention_finger_gap_m.npy", diagnostic_finger_gap_array)
+    np.save(
+        output / "retention_hand_position_world_m.npy",
+        diagnostic_hand_position_array,
+    )
+    np.save(
+        output / "retention_hand_orientation_world_wxyz.npy",
+        diagnostic_hand_orientation_array,
+    )
+    np.save(
+        output / "attachment_relative_translation_error_m.npy",
+        diagnostic_attachment_translation_error_array,
+    )
+    np.save(
+        output / "attachment_relative_orientation_error_rad.npy",
+        diagnostic_attachment_orientation_error_array,
+    )
 
     object_lift_m = float(target_after_lift_position[2] - target_before_lift_position[2])
     held_object_lift_m = float(target_held_position[2] - target_before_lift_position[2])
@@ -1112,6 +1375,31 @@ try:
         if args.grasp_retention_mode == "rigid-attachment"
         else None
     )
+    assumed_grasp_execution_succeeded = (
+        object_lifted_and_retained
+        if args.grasp_retention_mode != "physics"
+        else None
+    )
+    attachment_error_valid = np.isfinite(
+        diagnostic_attachment_translation_error_array
+    ) & np.isfinite(diagnostic_attachment_orientation_error_array)
+    if np.any(attachment_error_valid):
+        valid_translation_errors = diagnostic_attachment_translation_error_array[
+            attachment_error_valid
+        ]
+        valid_orientation_errors = diagnostic_attachment_orientation_error_array[
+            attachment_error_valid
+        ]
+        attachment_drift_summary = {
+            "sample_count": int(np.count_nonzero(attachment_error_valid)),
+            "maximum_translation_error_m": float(np.max(valid_translation_errors)),
+            "final_translation_error_m": float(valid_translation_errors[-1]),
+            "maximum_orientation_error_rad": float(np.max(valid_orientation_errors)),
+            "final_orientation_error_rad": float(valid_orientation_errors[-1]),
+        }
+    else:
+        attachment_drift_summary = None
+    attachment_report["relative_pose_drift"] = attachment_drift_summary
     execution_success = object_lifted_and_retained
     failure_status = (
         "physical_pick_not_observed"
@@ -1184,6 +1472,7 @@ try:
                 contact_only_physical_pick_observed
             ),
             "rigid_grasp_execution_succeeded": rigid_grasp_execution_succeeded,
+            "assumed_grasp_execution_succeeded": assumed_grasp_execution_succeeded,
         },
         "post_close_attachment": attachment_report,
         "physical_object": {
@@ -1251,7 +1540,20 @@ try:
                     output / "retention_finger_positions_m.npy"
                 ),
                 "finger_gap_m": str(output / "retention_finger_gap_m.npy"),
+                "hand_position_world_m": str(
+                    output / "retention_hand_position_world_m.npy"
+                ),
+                "hand_orientation_world_wxyz": str(
+                    output / "retention_hand_orientation_world_wxyz.npy"
+                ),
+                "attachment_relative_translation_error_m": str(
+                    output / "attachment_relative_translation_error_m.npy"
+                ),
+                "attachment_relative_orientation_error_rad": str(
+                    output / "attachment_relative_orientation_error_rad.npy"
+                ),
             },
+            "attachment_relative_pose_drift": attachment_drift_summary,
             "peak_object_lift_m": peak_object_lift_m,
             "peak_sample_index": peak_lift_index,
             "peak_time_s": float(diagnostic_time_s[peak_lift_index]),
@@ -1284,6 +1586,8 @@ try:
                 np.isfinite(diagnostic_target_position_array).all()
                 and np.isfinite(diagnostic_target_orientation_array).all()
                 and np.isfinite(diagnostic_finger_position_array).all()
+                and np.isfinite(diagnostic_hand_position_array).all()
+                and np.isfinite(diagnostic_hand_orientation_array).all()
             ),
             "object_lifted_by_at_least_one_object_height": (
                 object_lifted_and_retained

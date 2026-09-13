@@ -269,7 +269,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "rigid-attachment",
+            "physx-auto-attachment",
         )
 
     def test_handover_orientation_requires_position(self) -> None:
@@ -337,7 +337,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "rigid-attachment",
+            "physx-auto-attachment",
         )
 
     def test_affordance_handover_requires_part_segmentation_and_complete_geometry(self):

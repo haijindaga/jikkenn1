@@ -34,7 +34,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--grasp-retention-mode",
-        choices=("physics", "rigid-attachment"),
+        choices=(
+            "physics",
+            "physx-auto-attachment",
+            "rigid-attachment",
+            "kinematic-pose-lock",
+        ),
         default="physics",
     )
     parser.add_argument("--headless", action="store_true")
@@ -108,6 +113,12 @@ def main() -> int:
             "grasp_retention_mode": args.grasp_retention_mode,
             "rigid_attachment_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "rigid-attachment"
+            ),
+            "physx_auto_attachment_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "physx-auto-attachment"
+            ),
+            "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "kinematic-pose-lock"
             ),
             "finger_drive_preset_for_every_candidate": args.finger_drive_preset,
             "finger_drive_diagnostic_scale_for_every_candidate": args.finger_drive_scale,

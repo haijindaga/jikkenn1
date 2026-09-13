@@ -141,10 +141,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--grasp-retention-mode",
-        choices=("physics", "rigid-attachment"),
+        choices=(
+            "physics",
+            "physx-auto-attachment",
+            "rigid-attachment",
+            "kinematic-pose-lock",
+        ),
         help=(
             "Replay policy. Defaults to physics for grasp/lift-only runs and "
-            "rigid-attachment when a handover goal is requested."
+            "physx-auto-attachment when a handover goal is requested."
         ),
     )
     parser.add_argument(
@@ -264,7 +269,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             parser.error("handover receiver position must be finite")
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = (
-            "rigid-attachment"
+            "physx-auto-attachment"
             if (
                 args.handover_goal_position_robot_base_m is not None
                 or args.handover_receiver_position_robot_base_m is not None
@@ -837,6 +842,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             "grasp_retention_mode": args.grasp_retention_mode,
             "rigid_attachment_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "rigid-attachment"
+            ),
+            "physx_auto_attachment_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "physx-auto-attachment"
+            ),
+            "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "kinematic-pose-lock"
             ),
             "finger_drive_preset": "isaaclab-franka",
             "finger_drive_diagnostic_scale": args.finger_drive_scale,

@@ -113,11 +113,23 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-Supplying either handover mode makes `rigid-attachment` the replay default. The
-object's current pose relative to `panda_hand` is preserved immediately after
-gripper closure with a runtime `UsdPhysics.FixedJoint`; no friction tuning is
-used. The cuRobo transport is still planned with the whole-object attached
-collision geometry. In manual mode, if
+Supplying either handover mode makes `physx-auto-attachment` the replay
+default. Immediately after gripper closure, the runner creates a runtime
+`PhysxPhysicsAttachment` between `panda_hand` and the target and applies
+`PhysxAutoAttachmentAPI`, following the dynamic rigid-body recipe discussed in
+[IsaacLab discussion #4189](https://github.com/isaac-sim/IsaacLab/discussions/4189).
+The API derives its attachment frames from the bodies' current simulated poses,
+so neither body is deliberately snapped to a pre-authored frame. This remains
+an experimental simulation retention policy because the PhysX attachment
+schema is not the same as a calibrated physical gripper contact model.
+
+The previous `rigid-attachment` FixedJoint remains available for controlled
+A/B comparison, and `kinematic-pose-lock` is an explicit exact-following
+simulation fallback. No friction tuning is used by any attachment mode. Every
+attachment replay saves the panda-hand pose and the translational and angular
+drift of the target-to-hand transform at every physics sample. The cuRobo
+transport is still planned with the whole-object attached collision geometry.
+In manual mode, if
 `--handover-goal-quaternion-wxyz W X Y Z` is omitted, the selected grasp
 orientation is preserved. Reports distinguish this explicit
 no-slip grasp assumption from contact-only physical-pick evidence. Use
