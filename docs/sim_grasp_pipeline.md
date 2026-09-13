@@ -1,5 +1,24 @@
 # One-command RGB-D-to-grasp simulation
 
+## Isaac Sim Surface Gripper compatibility preflight
+
+Before adding another grasp-retention abstraction, inspect the exact Surface
+Gripper API and bundled example installed with Isaac Sim. This check is
+read-only: it does not create a stage, attach an object, or move the robot.
+
+```bash
+conda activate env_isaaclab
+cd /home/suzutaro/projects/jikkenn1
+python scripts/isaac_surface_gripper_preflight.py \
+  --headless \
+  --output outputs/isaac_surface_gripper_preflight.json
+```
+
+Surface Gripper is intended by NVIDIA for suction- or distance-based grippers.
+For the Panda experiment it must therefore remain an explicit simulation-only
+retention abstraction, compared against the existing FixedJoint baseline; it
+must not be presented as a calibrated parallel-jaw contact model.
+
 `scripts/run_sim_grasp_pipeline.py` preserves the existing reviewed stage
 boundaries but executes them in order:
 
