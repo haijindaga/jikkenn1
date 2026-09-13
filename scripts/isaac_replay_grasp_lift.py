@@ -390,7 +390,10 @@ try:
         if not root_prim.IsValid():
             return []
         records = []
-        for prim in Usd.PrimRange(root_prim):
+        # Franka collision meshes may live below instanceable USD prims. The
+        # default PrimRange stops at instances, so include their read-only
+        # instance proxies when resolving effective materials.
+        for prim in Usd.PrimRange(root_prim, Usd.TraverseInstanceProxies()):
             if not (
                 prim.HasAPI(UsdPhysics.CollisionAPI)
                 or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
@@ -469,14 +472,20 @@ try:
             if material_prim.HasAPI(PhysxSchema.PhysxMaterialAPI)
             else PhysxSchema.PhysxMaterialAPI.Apply(material_prim)
         )
-        physx_material_api.GetFrictionCombineModeAttr().Set("max")
+        physx_material_api.CreateFrictionCombineModeAttr().Set(
+            PhysxSchema.Tokens.max
+        )
 
         collision_prim_paths = []
+        finger_link_prim_paths = []
+        resolved_binding_relationships = []
         panda_root = stage.GetPrimAtPath(args.panda_prim)
         for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
             finger_link_prims = [
                 prim
-                for prim in Usd.PrimRange(panda_root)
+                for prim in Usd.PrimRange(
+                    panda_root, Usd.TraverseInstanceProxies()
+                )
                 if prim.GetName() == finger_link_name
             ]
             if len(finger_link_prims) != 1:
@@ -484,23 +493,75 @@ try:
                     f"expected one {finger_link_name} prim, found "
                     f"{[str(prim.GetPath()) for prim in finger_link_prims]}"
                 )
-            for prim in Usd.PrimRange(finger_link_prims[0]):
-                if not (
-                    prim.HasAPI(UsdPhysics.CollisionAPI)
-                    or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
-                ):
-                    continue
-                binding_api = (
-                    UsdShade.MaterialBindingAPI(prim)
-                    if prim.HasAPI(UsdShade.MaterialBindingAPI)
-                    else UsdShade.MaterialBindingAPI.Apply(prim)
+            finger_link_prim = finger_link_prims[0]
+            if finger_link_prim.IsInstanceProxy():
+                raise RuntimeError(
+                    f"{finger_link_name} is an uneditable instance proxy: "
+                    f"{finger_link_prim.GetPath()}"
                 )
-                binding_api.Bind(
-                    material,
-                    bindingStrength=UsdShade.Tokens.strongerThanDescendants,
-                    materialPurpose="physics",
+
+            # Instance proxies are read-only. Bind once on the editable finger
+            # link and use standard USD material inheritance. The stronger
+            # binding intentionally overrides descendant materials for this
+            # runtime diagnostic only.
+            binding_api = (
+                UsdShade.MaterialBindingAPI(finger_link_prim)
+                if finger_link_prim.HasAPI(UsdShade.MaterialBindingAPI)
+                else UsdShade.MaterialBindingAPI.Apply(finger_link_prim)
+            )
+            if not binding_api.Bind(
+                material,
+                bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+                materialPurpose="physics",
+            ):
+                raise RuntimeError(
+                    f"failed to bind fingertip physics material to "
+                    f"{finger_link_prim.GetPath()}"
                 )
-                collision_prim_paths.append(str(prim.GetPath()))
+            finger_link_prim_paths.append(str(finger_link_prim.GetPath()))
+
+            colliders = [
+                prim
+                for prim in Usd.PrimRange(
+                    finger_link_prim, Usd.TraverseInstanceProxies()
+                )
+                if prim.HasAPI(UsdPhysics.CollisionAPI)
+                or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
+            ]
+            if not colliders:
+                traversed_paths = [
+                    str(prim.GetPath())
+                    for prim in Usd.PrimRange(
+                        finger_link_prim, Usd.TraverseInstanceProxies()
+                    )
+                ]
+                raise RuntimeError(
+                    f"no collision geometry resolved below {finger_link_prim.GetPath()}; "
+                    f"traversed={traversed_paths}"
+                )
+            for collider in colliders:
+                resolved_material, binding_relationship = (
+                    UsdShade.MaterialBindingAPI(collider).ComputeBoundMaterial(
+                        "physics"
+                    )
+                )
+                resolved_prim = (
+                    resolved_material.GetPrim() if resolved_material else None
+                )
+                resolved_path = (
+                    str(resolved_prim.GetPath()) if resolved_prim else None
+                )
+                if resolved_path != material_path:
+                    raise RuntimeError(
+                        "fingertip physics material read-back failed for "
+                        f"{collider.GetPath()}: resolved {resolved_path!r}"
+                    )
+                collision_prim_paths.append(str(collider.GetPath()))
+                resolved_binding_relationships.append(
+                    str(binding_relationship.GetPath())
+                    if binding_relationship
+                    else None
+                )
         if not collision_prim_paths:
             raise RuntimeError("Panda fingertip collision geometry was not found")
         return {
@@ -511,7 +572,11 @@ try:
             "dynamic_friction": float(coefficient),
             "restitution": 0.0,
             "friction_combine_mode": "max",
+            "binding_scope": "editable finger links inherited by collision prims",
+            "finger_link_prim_paths": finger_link_prim_paths,
             "collision_prim_paths": collision_prim_paths,
+            "resolved_binding_relationships": resolved_binding_relationships,
+            "effective_material_readback_passed": True,
             "target_material_changed": False,
             "table_material_changed": False,
             "hardware_calibrated": False,

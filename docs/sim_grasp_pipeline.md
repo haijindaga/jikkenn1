@@ -146,10 +146,13 @@ For a friction-only retention diagnostic, keep `--finger-drive-scale 1`, use
 `--fingertip-friction-coefficient 5`. The runner creates a runtime physics
 material with static and dynamic friction both equal to the requested value,
 restitution zero, and PhysX friction combine mode `max`. It binds that material
-only to the two Panda fingertip collision geometries; the target and table
-materials are not changed. This prevents the object/table settling behavior
-from becoming a second experimental variable. Friction and finger-drive
-diagnostics cannot be enabled together in one controlled run.
+to the editable left and right Panda finger links. Standard USD material
+inheritance carries the binding into instance-proxy collision geometry, and the
+runner verifies the resolved material on every fingertip collider before
+starting the replay. The target and table materials are not changed, and the
+authored scene USD is not saved. This prevents the object/table settling
+behavior from becoming a second experimental variable. Friction and
+finger-drive diagnostics cannot be enabled together in one controlled run.
 
 ```bash
 python scripts/isaac_replay_grasp_lift_trials.py \
