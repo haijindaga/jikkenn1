@@ -315,6 +315,10 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"--fingertip-friction-coefficient"', script)
         self.assertIn("Usd.TraverseInstanceProxies()", script)
         self.assertIn(
+            'Sdf.Path(args.panda_prim).AppendChild(\n                finger_link_name',
+            script,
+        )
+        self.assertIn(
             'bindingStrength=UsdShade.Tokens.strongerThanDescendants', script
         )
         self.assertIn('"effective_material_readback_passed": True', script)

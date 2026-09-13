@@ -480,20 +480,21 @@ try:
         finger_link_prim_paths = []
         resolved_binding_relationships = []
         panda_root = stage.GetPrimAtPath(args.panda_prim)
+        if not panda_root.IsValid():
+            raise RuntimeError(f"Panda root prim does not exist: {args.panda_prim}")
         for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
-            finger_link_prims = [
-                prim
-                for prim in Usd.PrimRange(
-                    panda_root, Usd.TraverseInstanceProxies()
-                )
-                if prim.GetName() == finger_link_name
-            ]
-            if len(finger_link_prims) != 1:
+            # The Franka asset repeats the link name on a geometry descendant,
+            # e.g. panda_leftfinger/geometry/panda_leftfinger. Select the
+            # articulation link by its direct path below the configured Panda
+            # root instead of relying on a non-unique leaf name.
+            finger_link_path = Sdf.Path(args.panda_prim).AppendChild(
+                finger_link_name
+            )
+            finger_link_prim = stage.GetPrimAtPath(finger_link_path)
+            if not finger_link_prim.IsValid():
                 raise RuntimeError(
-                    f"expected one {finger_link_name} prim, found "
-                    f"{[str(prim.GetPath()) for prim in finger_link_prims]}"
+                    f"Panda finger link prim does not exist: {finger_link_path}"
                 )
-            finger_link_prim = finger_link_prims[0]
             if finger_link_prim.IsInstanceProxy():
                 raise RuntimeError(
                     f"{finger_link_name} is an uneditable instance proxy: "
