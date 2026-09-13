@@ -149,9 +149,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
         help=(
             "Replay policy. Defaults to physics for grasp/lift-only runs and "
-            "physx-auto-attachment when a handover goal is requested."
+            "rigid-attachment when a handover goal is requested."
         ),
     )
+    parser.add_argument("--solver-position-iterations", type=int)
+    parser.add_argument("--solver-velocity-iterations", type=int)
     parser.add_argument(
         "--finger-drive-scale",
         type=float,
@@ -269,13 +271,32 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             parser.error("handover receiver position must be finite")
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = (
-            "physx-auto-attachment"
+            "rigid-attachment"
             if (
                 args.handover_goal_position_robot_base_m is not None
                 or args.handover_receiver_position_robot_base_m is not None
             )
             else "physics"
         )
+    solver_iteration_values = (
+        args.solver_position_iterations,
+        args.solver_velocity_iterations,
+    )
+    if (solver_iteration_values[0] is None) != (solver_iteration_values[1] is None):
+        parser.error(
+            "--solver-position-iterations and --solver-velocity-iterations must "
+            "be supplied together"
+        )
+    if args.solver_position_iterations is not None:
+        if not 1 <= args.solver_position_iterations <= 255:
+            parser.error("--solver-position-iterations must be in 1..255")
+        if not 0 <= args.solver_velocity_iterations <= 255:
+            parser.error("--solver-velocity-iterations must be in 0..255")
+        if args.grasp_retention_mode != "rigid-attachment":
+            parser.error(
+                "solver-iteration diagnostics currently require "
+                "--grasp-retention-mode rigid-attachment"
+            )
     if args.fingertip_friction_coefficient is not None and (
         not math.isfinite(args.fingertip_friction_coefficient)
         or args.fingertip_friction_coefficient < 0.0
@@ -695,6 +716,15 @@ def build_stages(
                 str(args.fingertip_friction_coefficient),
             ]
         )
+    if args.solver_position_iterations is not None:
+        replay_command.extend(
+            [
+                "--solver-position-iterations",
+                str(args.solver_position_iterations),
+                "--solver-velocity-iterations",
+                str(args.solver_velocity_iterations),
+            ]
+        )
     if args.headless:
         replay_command.append("--headless")
 
@@ -848,6 +878,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             ),
             "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "kinematic-pose-lock"
+            ),
+            "solver_iteration_override": (
+                {
+                    "position": args.solver_position_iterations,
+                    "velocity": args.solver_velocity_iterations,
+                    "diagnostic_only": True,
+                }
+                if args.solver_position_iterations is not None
+                else None
             ),
             "finger_drive_preset": "isaaclab-franka",
             "finger_drive_diagnostic_scale": args.finger_drive_scale,

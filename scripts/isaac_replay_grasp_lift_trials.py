@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
         ),
         default="physics",
     )
+    parser.add_argument("--solver-position-iterations", type=int)
+    parser.add_argument("--solver-velocity-iterations", type=int)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--simulation-only", action="store_true")
     args = parser.parse_args()
@@ -74,6 +76,25 @@ def parse_args() -> argparse.Namespace:
             "do not combine fingertip friction and finger-drive diagnostics in "
             "one controlled run"
         )
+    solver_iteration_values = (
+        args.solver_position_iterations,
+        args.solver_velocity_iterations,
+    )
+    if (solver_iteration_values[0] is None) != (solver_iteration_values[1] is None):
+        parser.error(
+            "--solver-position-iterations and --solver-velocity-iterations must "
+            "be supplied together"
+        )
+    if args.solver_position_iterations is not None:
+        if not 1 <= args.solver_position_iterations <= 255:
+            parser.error("--solver-position-iterations must be in 1..255")
+        if not 0 <= args.solver_velocity_iterations <= 255:
+            parser.error("--solver-velocity-iterations must be in 0..255")
+        if args.grasp_retention_mode != "rigid-attachment":
+            parser.error(
+                "solver-iteration diagnostics currently require "
+                "--grasp-retention-mode rigid-attachment"
+            )
     return args
 
 
@@ -135,6 +156,15 @@ def main() -> int:
             ),
             "hardware_force_calibrated": False,
             "candidate_specific_parameter_tuning": False,
+            "solver_iteration_override_for_every_candidate": (
+                {
+                    "position": args.solver_position_iterations,
+                    "velocity": args.solver_velocity_iterations,
+                    "diagnostic_only": True,
+                }
+                if args.solver_position_iterations is not None
+                else None
+            ),
         },
         "attempts": [],
         "selected_success": None,
@@ -169,6 +199,15 @@ def main() -> int:
                 [
                     "--fingertip-friction-coefficient",
                     str(args.fingertip_friction_coefficient),
+                ]
+            )
+        if args.solver_position_iterations is not None:
+            command.extend(
+                [
+                    "--solver-position-iterations",
+                    str(args.solver_position_iterations),
+                    "--solver-velocity-iterations",
+                    str(args.solver_velocity_iterations),
                 ]
             )
         if args.headless:
@@ -221,12 +260,12 @@ def main() -> int:
             )
             print(f"saved: {summary_path}", flush=True)
             return 0
-        expected_failure_status = (
-            "physical_pick_not_observed"
+        expected_failure_statuses = (
+            {"physical_pick_not_observed"}
             if args.grasp_retention_mode == "physics"
-            else "assumed_grasp_execution_failed"
+            else {"assumed_grasp_execution_failed", "attachment_pose_not_retained"}
         )
-        if status != expected_failure_status:
+        if status not in expected_failure_statuses:
             summary["status"] = "replay_error"
             write_summary(summary_path, summary)
             raise RuntimeError(

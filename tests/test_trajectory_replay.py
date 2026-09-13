@@ -273,6 +273,10 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("UsdPhysics.FixedJoint.Define", script)
         self.assertIn("PhysxSchema.PhysxPhysicsAttachment.Define", script)
         self.assertIn("PhysxSchema.PhysxAutoAttachmentAPI.Apply", script)
+        self.assertIn("PhysxSchema.PhysxArticulationAPI.Get", script)
+        self.assertIn("PhysxSchema.PhysxRigidBodyAPI.Get", script)
+        self.assertIn('"--solver-position-iterations"', script)
+        self.assertIn('"--solver-velocity-iterations"', script)
         self.assertIn(
             'output / "attachment_relative_translation_error_m.npy"', script
         )
@@ -283,6 +287,8 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("joint.CreateCollisionEnabledAttr().Set(False)", script)
         self.assertIn("UsdPhysics.FilteredPairsAPI.Apply", script)
         self.assertIn('"physical_pick_evidence_is_contact_only"', script)
+        self.assertIn('"attachment_relative_pose_within_tolerance"', script)
+        self.assertIn("ATTACHMENT_TRANSLATION_TOLERANCE_M = 0.005", script)
         self.assertNotIn("set_joint_positions(", script)
 
     def test_grasp_lift_replay_supports_generic_authored_usd_target(self):

@@ -29,6 +29,8 @@ LAYOUT = DEFAULT_TABLETOP_LAYOUT
 PHYSICS_DT_S = 1.0 / 60.0
 PANDA_OPEN_FINGER_JOINT_M = 0.04
 PANDA_CLOSED_FINGER_JOINT_M = 0.0
+ATTACHMENT_TRANSLATION_TOLERANCE_M = 0.005
+ATTACHMENT_ORIENTATION_TOLERANCE_RAD = math.radians(5.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,6 +118,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--solver-position-iterations",
+        type=int,
+        help=(
+            "Simulation-only FixedJoint diagnostic: override the PhysX solver "
+            "position iterations on both the Panda articulation and target rigid body"
+        ),
+    )
+    parser.add_argument(
+        "--solver-velocity-iterations",
+        type=int,
+        help=(
+            "Simulation-only FixedJoint diagnostic: override the PhysX solver "
+            "velocity iterations on both the Panda articulation and target rigid body"
+        ),
+    )
+    parser.add_argument(
         "--simulation-only",
         action="store_true",
         help="Required acknowledgement: this command controls only an Isaac Sim robot",
@@ -168,6 +186,25 @@ def parse_args() -> argparse.Namespace:
             "do not combine fingertip friction and finger-drive diagnostics in "
             "one controlled run"
         )
+    solver_iteration_values = (
+        args.solver_position_iterations,
+        args.solver_velocity_iterations,
+    )
+    if (solver_iteration_values[0] is None) != (solver_iteration_values[1] is None):
+        parser.error(
+            "--solver-position-iterations and --solver-velocity-iterations must "
+            "be supplied together"
+        )
+    if args.solver_position_iterations is not None:
+        if not 1 <= args.solver_position_iterations <= 255:
+            parser.error("--solver-position-iterations must be in 1..255")
+        if not 0 <= args.solver_velocity_iterations <= 255:
+            parser.error("--solver-velocity-iterations must be in 0..255")
+        if args.grasp_retention_mode != "rigid-attachment":
+            parser.error(
+                "solver-iteration diagnostics currently require "
+                "--grasp-retention-mode rigid-attachment"
+            )
     return args
 
 
@@ -381,6 +418,104 @@ try:
             frequency=30,
             resolution=(640, 480),
         )
+
+    stage = stage_utils.get_current_stage()
+
+    solver_iteration_override = {
+        "applied": False,
+        "diagnostic_only": False,
+        "panda_articulation_prim": None,
+        "target_rigid_body_prim": target_rigid_prim_path,
+        "requested": None,
+        "before": None,
+        "after": None,
+    }
+    if args.solver_position_iterations is not None:
+        panda_root_prim = stage.GetPrimAtPath(args.panda_prim)
+        articulation_root_prims = tuple(
+            prim
+            for prim in Usd.PrimRange(panda_root_prim)
+            if prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+        )
+        if not articulation_root_prims:
+            raise RuntimeError(
+                f"Panda articulation root was not found below {args.panda_prim}"
+            )
+        panda_articulation_prim = next(
+            (
+                prim
+                for prim in articulation_root_prims
+                if str(prim.GetPath()) == args.panda_prim
+            ),
+            articulation_root_prims[0] if len(articulation_root_prims) == 1 else None,
+        )
+        if panda_articulation_prim is None:
+            raise RuntimeError(
+                "multiple Panda articulation roots were found: "
+                f"{[str(prim.GetPath()) for prim in articulation_root_prims]}"
+            )
+        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
+        if not target_rigid_prim.IsValid():
+            raise RuntimeError(
+                f"target rigid body prim does not exist: {target_rigid_prim_path}"
+            )
+
+        articulation_api = PhysxSchema.PhysxArticulationAPI.Get(
+            stage, panda_articulation_prim.GetPath()
+        )
+        if not articulation_api or not articulation_api.GetPrim().IsValid():
+            articulation_api = PhysxSchema.PhysxArticulationAPI.Apply(
+                panda_articulation_prim
+            )
+        target_rigid_api = PhysxSchema.PhysxRigidBodyAPI.Get(
+            stage, target_rigid_prim.GetPath()
+        )
+        if not target_rigid_api or not target_rigid_api.GetPrim().IsValid():
+            target_rigid_api = PhysxSchema.PhysxRigidBodyAPI.Apply(target_rigid_prim)
+
+        def solver_iterations(api) -> dict:
+            position = api.GetSolverPositionIterationCountAttr().Get()
+            velocity = api.GetSolverVelocityIterationCountAttr().Get()
+            return {
+                "position": int(position) if position is not None else None,
+                "velocity": int(velocity) if velocity is not None else None,
+            }
+
+        before_iterations = {
+            "panda_articulation": solver_iterations(articulation_api),
+            "target_rigid_body": solver_iterations(target_rigid_api),
+        }
+        for api in (articulation_api, target_rigid_api):
+            api.CreateSolverPositionIterationCountAttr().Set(
+                args.solver_position_iterations
+            )
+            api.CreateSolverVelocityIterationCountAttr().Set(
+                args.solver_velocity_iterations
+            )
+        after_iterations = {
+            "panda_articulation": solver_iterations(articulation_api),
+            "target_rigid_body": solver_iterations(target_rigid_api),
+        }
+        requested_iterations = {
+            "position": args.solver_position_iterations,
+            "velocity": args.solver_velocity_iterations,
+        }
+        if any(
+            values != requested_iterations for values in after_iterations.values()
+        ):
+            raise RuntimeError(
+                "requested PhysX solver iteration overrides were not applied: "
+                f"{after_iterations}"
+            )
+        solver_iteration_override = {
+            "applied": True,
+            "diagnostic_only": True,
+            "panda_articulation_prim": str(panda_articulation_prim.GetPath()),
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "requested": requested_iterations,
+            "before": before_iterations,
+            "after": after_iterations,
+        }
 
     world.reset()
     camera.initialize()
@@ -757,7 +892,10 @@ try:
             )
         )
         orientation_jump_rad = float(2.0 * np.arccos(orientation_dot))
-        if position_jump_m > 0.005 or orientation_jump_rad > np.deg2rad(5.0):
+        if (
+            position_jump_m > ATTACHMENT_TRANSLATION_TOLERANCE_M
+            or orientation_jump_rad > ATTACHMENT_ORIENTATION_TOLERANCE_RAD
+        ):
             raise RuntimeError(
                 "post-close attachment changed the target pose unexpectedly: "
                 f"position={position_jump_m:.6g} m, "
@@ -1365,21 +1503,6 @@ try:
         object_lift_m >= minimum_clear_lift_m
         and held_object_lift_m >= minimum_clear_lift_m
     )
-    contact_only_physical_pick_observed = (
-        object_lifted_and_retained
-        if args.grasp_retention_mode == "physics"
-        else None
-    )
-    rigid_grasp_execution_succeeded = (
-        object_lifted_and_retained
-        if args.grasp_retention_mode == "rigid-attachment"
-        else None
-    )
-    assumed_grasp_execution_succeeded = (
-        object_lifted_and_retained
-        if args.grasp_retention_mode != "physics"
-        else None
-    )
     attachment_error_valid = np.isfinite(
         diagnostic_attachment_translation_error_array
     ) & np.isfinite(diagnostic_attachment_orientation_error_array)
@@ -1399,13 +1522,47 @@ try:
         }
     else:
         attachment_drift_summary = None
-    attachment_report["relative_pose_drift"] = attachment_drift_summary
-    execution_success = object_lifted_and_retained
-    failure_status = (
-        "physical_pick_not_observed"
+    attachment_relative_pose_within_tolerance = (
+        None
         if args.grasp_retention_mode == "physics"
-        else "assumed_grasp_execution_failed"
+        else bool(
+            attachment_drift_summary is not None
+            and attachment_drift_summary["maximum_translation_error_m"]
+            <= ATTACHMENT_TRANSLATION_TOLERANCE_M
+            and attachment_drift_summary["maximum_orientation_error_rad"]
+            <= ATTACHMENT_ORIENTATION_TOLERANCE_RAD
+        )
     )
+    attachment_report["relative_pose_drift"] = attachment_drift_summary
+    attachment_report["relative_pose_tolerance"] = {
+        "maximum_translation_error_m": ATTACHMENT_TRANSLATION_TOLERANCE_M,
+        "maximum_orientation_error_rad": ATTACHMENT_ORIENTATION_TOLERANCE_RAD,
+        "within_tolerance": attachment_relative_pose_within_tolerance,
+    }
+    execution_success = bool(
+        object_lifted_and_retained
+        and (
+            args.grasp_retention_mode == "physics"
+            or attachment_relative_pose_within_tolerance is True
+        )
+    )
+    contact_only_physical_pick_observed = (
+        execution_success if args.grasp_retention_mode == "physics" else None
+    )
+    rigid_grasp_execution_succeeded = (
+        execution_success
+        if args.grasp_retention_mode == "rigid-attachment"
+        else None
+    )
+    assumed_grasp_execution_succeeded = (
+        execution_success if args.grasp_retention_mode != "physics" else None
+    )
+    if args.grasp_retention_mode == "physics":
+        failure_status = "physical_pick_not_observed"
+    elif attachment_relative_pose_within_tolerance is False:
+        failure_status = "attachment_pose_not_retained"
+    else:
+        failure_status = "assumed_grasp_execution_failed"
     report = {
         "status": "success" if execution_success else failure_status,
         "reference": {
@@ -1522,6 +1679,7 @@ try:
             "target_collision_materials": target_collision_materials,
             "finger_collision_materials": finger_collision_materials,
             "fingertip_friction_override": fingertip_friction_override,
+            "solver_iteration_override": solver_iteration_override,
             "null_material_coefficients_mean_no_explicit_bound_physics_material": True,
         },
         "retention_diagnostics": {
@@ -1554,6 +1712,13 @@ try:
                 ),
             },
             "attachment_relative_pose_drift": attachment_drift_summary,
+            "attachment_relative_pose_tolerance": {
+                "maximum_translation_error_m": ATTACHMENT_TRANSLATION_TOLERANCE_M,
+                "maximum_orientation_error_rad": (
+                    ATTACHMENT_ORIENTATION_TOLERANCE_RAD
+                ),
+                "within_tolerance": attachment_relative_pose_within_tolerance,
+            },
             "peak_object_lift_m": peak_object_lift_m,
             "peak_sample_index": peak_lift_index,
             "peak_time_s": float(diagnostic_time_s[peak_lift_index]),
@@ -1595,6 +1760,9 @@ try:
             "object_remained_lifted_after_transport": bool(
                 not transport_executed
                 or held_object_lift_m >= minimum_clear_lift_m
+            ),
+            "attachment_relative_pose_within_tolerance": (
+                attachment_relative_pose_within_tolerance
             ),
         },
         "safety": {

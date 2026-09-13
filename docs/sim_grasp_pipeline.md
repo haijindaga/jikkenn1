@@ -113,21 +113,20 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-Supplying either handover mode makes `physx-auto-attachment` the replay
-default. Immediately after gripper closure, the runner creates a runtime
-`PhysxPhysicsAttachment` between `panda_hand` and the target and applies
-`PhysxAutoAttachmentAPI`, following the dynamic rigid-body recipe discussed in
-[IsaacLab discussion #4189](https://github.com/isaac-sim/IsaacLab/discussions/4189).
-The API derives its attachment frames from the bodies' current simulated poses,
-so neither body is deliberately snapped to a pre-authored frame. This remains
-an experimental simulation retention policy because the PhysX attachment
-schema is not the same as a calibrated physical gripper contact model.
+Supplying either handover mode makes `rigid-attachment` the replay default.
+Immediately after gripper closure, the runner creates a standard OpenUSD
+`FixedJoint` between `panda_hand` and the target at their current simulated
+relative pose, so neither body is deliberately snapped to a pre-authored frame.
+`physx-auto-attachment` remains available only as an experimental diagnostic:
+the PhysX attachment schema is defined for an attachment containing at least
+one deformable actor and did not constrain this rigid-body-to-rigid-body case.
+`kinematic-pose-lock` is an explicit exact-following simulation fallback.
 
-The previous `rigid-attachment` FixedJoint remains available for controlled
-A/B comparison, and `kinematic-pose-lock` is an explicit exact-following
-simulation fallback. No friction tuning is used by any attachment mode. Every
-attachment replay saves the panda-hand pose and the translational and angular
-drift of the target-to-hand transform at every physics sample. The cuRobo
+No friction tuning is used by any attachment mode. Every attachment replay
+saves the panda-hand pose and the translational and angular drift of the
+target-to-hand transform at every physics sample. Attachment-mode success now
+requires both lift retention and a maximum relative-pose drift of at most 5 mm
+and 5 degrees; object height alone cannot produce a false success. The cuRobo
 transport is still planned with the whole-object attached collision geometry.
 In manual mode, if
 `--handover-goal-quaternion-wxyz W X Y Z` is omitted, the selected grasp
@@ -183,6 +182,14 @@ python scripts/isaac_replay_grasp_lift_trials.py \
 The coefficient is an intentionally nonphysical sensitivity test, not a rubber
 calibration or a real-robot setting. Compare it only with a standard-friction
 run using the same capture and candidate-plan manifest.
+
+For a controlled FixedJoint solver diagnostic, first replay the same saved
+candidate plans with the default solver settings, then use a new output name
+and repeat with `--solver-position-iterations 64` and
+`--solver-velocity-iterations 4`. The override is applied equally to the Panda
+articulation and target rigid body and is recorded with before/after readback in
+the JSON report. It does not alter the source USD, grasp candidates, or cuRobo
+trajectory, and is not the pipeline default.
 
 To generate or reopen the same report for an existing output directory:
 

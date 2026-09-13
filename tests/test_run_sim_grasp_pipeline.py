@@ -269,7 +269,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "physx-auto-attachment",
+            "rigid-attachment",
         )
 
     def test_handover_orientation_requires_position(self) -> None:
@@ -337,7 +337,42 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "physx-auto-attachment",
+            "rigid-attachment",
+        )
+
+    def test_handover_solver_iteration_diagnostic_is_forwarded(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                "scene.usda",
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-goal-position-robot-base-m",
+                "0.45",
+                "-0.25",
+                "0.65",
+                "--solver-position-iterations",
+                "64",
+                "--solver-velocity-iterations",
+                "4",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--solver-position-iterations") + 1], "64"
+        )
+        self.assertEqual(
+            replay[replay.index("--solver-velocity-iterations") + 1], "4"
         )
 
     def test_affordance_handover_requires_part_segmentation_and_complete_geometry(self):
