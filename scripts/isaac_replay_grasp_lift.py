@@ -868,6 +868,40 @@ try:
                 orientations=orientation.reshape(1, 4),
             )
 
+    def clear_target_velocities() -> None:
+        """Remove residual dynamic motion before switching to kinematic control."""
+        if scene_usd is None:
+            target.set_linear_velocity(np.zeros(3, dtype=np.float64))
+            target.set_angular_velocity(np.zeros(3, dtype=np.float64))
+        else:
+            target.set_velocities(np.zeros((1, 6), dtype=np.float64))
+
+    def set_target_kinematic_enabled(enabled: bool) -> tuple[bool, bool]:
+        """Set and verify the standard USD rigid-body kinematic flag."""
+        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
+        if not target_rigid_prim.IsValid():
+            raise RuntimeError(
+                f"target rigid body prim does not exist: {target_rigid_prim_path}"
+            )
+        rigid_body_api = UsdPhysics.RigidBodyAPI.Get(
+            stage, target_rigid_prim.GetPath()
+        )
+        if not rigid_body_api or not rigid_body_api.GetPrim().IsValid():
+            raise RuntimeError(
+                "target rigid body has no UsdPhysics.RigidBodyAPI: "
+                f"{target_rigid_prim_path}"
+            )
+        kinematic_attr = rigid_body_api.GetKinematicEnabledAttr()
+        previous_value = bool(kinematic_attr.Get()) if kinematic_attr else False
+        rigid_body_api.CreateKinematicEnabledAttr().Set(bool(enabled))
+        applied_value = bool(rigid_body_api.GetKinematicEnabledAttr().Get())
+        if applied_value != bool(enabled):
+            raise RuntimeError(
+                "requested target kinematic state was not applied: "
+                f"requested={enabled}, readback={applied_value}"
+            )
+        return previous_value, applied_value
+
     panda_hand_rigid_body_path = unique_panda_hand_rigid_body_path()
     panda_hand_pose_view = XFormPrim(
         prim_paths_expr=panda_hand_rigid_body_path,
@@ -1332,7 +1366,7 @@ try:
         }
 
     def create_post_close_kinematic_pose_lock() -> dict:
-        """Record the post-close transform for exact pose following after each step."""
+        """Switch the target to kinematic control and preserve its hand-relative pose."""
         hand_position, hand_orientation = world_pose_for_xform(
             panda_hand_rigid_body_path
         )
@@ -1345,6 +1379,11 @@ try:
         )
         apply_target_robot_collision_filter()
         transform_file = register_attachment_reference(T_hand_target)
+        clear_target_velocities()
+        kinematic_before, kinematic_after = set_target_kinematic_enabled(True)
+        # Preserve the measured attachment pose while PhysX consumes the
+        # runtime kinematic-state change. No constraint is added to the Panda.
+        enforce_kinematic_pose_lock()
         world.step(render=True)
         enforce_kinematic_pose_lock()
         record_physics_sample("attach")
@@ -1355,11 +1394,15 @@ try:
             "mode": "kinematic-pose-lock",
             "applied": True,
             "assumption": (
-                "grasp accepted; target pose is reset from the measured "
-                "target-to-panda_hand transform after every physics step"
+                "grasp accepted; target is kinematic and follows the measured "
+                "target-to-panda_hand transform without a physics joint"
             ),
             "hand_rigid_body_prim": panda_hand_rigid_body_path,
             "target_rigid_body_prim": target_rigid_prim_path,
+            "kinematic_enabled_before_attachment": kinematic_before,
+            "kinematic_enabled_after_attachment": kinematic_after,
+            "dynamic_velocity_cleared_before_attachment": True,
+            "physics_joint_created": False,
             "target_robot_collision_filtered": True,
             "target_robot_collision_filter_path": args.panda_prim,
             "T_panda_hand_target": T_hand_target.tolist(),
@@ -1905,7 +1948,11 @@ try:
             "evidence_kind": (
                 "contact_only_physics"
                 if args.grasp_retention_mode == "physics"
-                else "rigid_grasp_assumption"
+                else (
+                    "kinematic_grasp_assumption"
+                    if args.grasp_retention_mode == "kinematic-pose-lock"
+                    else "physics_attachment_assumption"
+                )
             ),
             "grasp_retention_mode": args.grasp_retention_mode,
             "contact_only_physical_pick_observed": (
@@ -2050,7 +2097,10 @@ try:
         },
         "safety": {
             "simulation_only": True,
-            "dynamic_target_used": True,
+            "target_started_as_dynamic": True,
+            "target_switched_to_kinematic_after_close": bool(
+                args.grasp_retention_mode == "kinematic-pose-lock"
+            ),
             "object_not_fixed_to_gripper": bool(
                 args.grasp_retention_mode == "physics"
             ),
