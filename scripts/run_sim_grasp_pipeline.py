@@ -145,6 +145,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             "physics",
             "physx-auto-attachment",
             "rigid-attachment",
+            "surface-gripper-attachment",
             "kinematic-pose-lock",
         ),
         help=(
@@ -875,6 +876,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             ),
             "physx_auto_attachment_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "physx-auto-attachment"
+            ),
+            "surface_gripper_attachment_means_grasp_success_is_assumed": bool(
+                args.grasp_retention_mode == "surface-gripper-attachment"
             ),
             "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "kinematic-pose-lock"

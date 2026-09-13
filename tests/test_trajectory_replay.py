@@ -266,6 +266,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
         self.assertIn('"physx-auto-attachment",', script)
+        self.assertIn('"surface-gripper-attachment",', script)
         self.assertIn(
             '"transport" not in replay.phase_positions',
             script,
@@ -273,6 +274,12 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("UsdPhysics.FixedJoint.Define", script)
         self.assertIn("PhysxSchema.PhysxPhysicsAttachment.Define", script)
         self.assertIn("PhysxSchema.PhysxAutoAttachmentAPI.Apply", script)
+        self.assertIn("robot_schema.CreateSurfaceGripper", script)
+        self.assertIn("robot_schema.ApplyAttachmentPointAPI", script)
+        self.assertIn("surface_gripper.acquire_surface_gripper_interface", script)
+        self.assertIn("gripper_interface.close_gripper", script)
+        self.assertIn("gripper_interface.get_gripped_objects", script)
+        self.assertIn("SurfaceGripper_gantry.usda", script)
         self.assertIn("PhysxSchema.PhysxArticulationAPI.Get", script)
         self.assertIn("PhysxSchema.PhysxRigidBodyAPI.Get", script)
         self.assertIn('"--solver-position-iterations"', script)

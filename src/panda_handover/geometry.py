@@ -139,6 +139,91 @@ def look_at_quaternion_world(position: np.ndarray, target: np.ndarray) -> np.nda
     return quaternion_wxyz_from_rotation_matrix(rotation)
 
 
+def rotation_matrix_align_axis_to_vector(
+    axis: str, direction: np.ndarray
+) -> np.ndarray:
+    """Return a rotation whose named local axis points along ``direction``."""
+    axis_vectors = {
+        "X": np.array([1.0, 0.0, 0.0]),
+        "Y": np.array([0.0, 1.0, 0.0]),
+        "Z": np.array([0.0, 0.0, 1.0]),
+    }
+    source = axis_vectors.get(axis.upper())
+    if source is None:
+        raise ValueError(f"axis must be X, Y, or Z, got {axis!r}")
+    target = np.asarray(direction, dtype=np.float64)
+    if target.shape != (3,):
+        raise ValueError(f"direction must have shape (3,), got {target.shape}")
+    target_norm = float(np.linalg.norm(target))
+    if target_norm <= 1e-12:
+        raise ValueError("direction norm is zero")
+    target /= target_norm
+
+    cross = np.cross(source, target)
+    cosine = float(np.clip(np.dot(source, target), -1.0, 1.0))
+    sine = float(np.linalg.norm(cross))
+    if sine <= 1e-10:
+        if cosine > 0.0:
+            return np.eye(3)
+        seed = (
+            np.array([1.0, 0.0, 0.0])
+            if abs(source[0]) < 0.9
+            else np.array([0.0, 1.0, 0.0])
+        )
+        rotation_axis = np.cross(source, seed)
+        rotation_axis /= np.linalg.norm(rotation_axis)
+        return 2.0 * np.outer(rotation_axis, rotation_axis) - np.eye(3)
+
+    skew = np.array(
+        [
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ]
+    )
+    return np.eye(3) + skew + skew @ skew * ((1.0 - cosine) / sine**2)
+
+
+def aabb_ray_origin_toward_center(
+    aabb: np.ndarray,
+    origin: np.ndarray,
+    clearance_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Place a ray origin outside an AABB, facing its center from ``origin``.
+
+    This geometry-only helper does not assert that the AABB tightly represents
+    the underlying mesh. It is used to place an inspectable virtual attachment
+    point for the Isaac Surface Gripper experiment.
+    """
+    aabb = np.asarray(aabb, dtype=np.float64)
+    origin = np.asarray(origin, dtype=np.float64)
+    if aabb.shape != (6,):
+        raise ValueError(f"aabb must have shape (6,), got {aabb.shape}")
+    if origin.shape != (3,):
+        raise ValueError(f"origin must have shape (3,), got {origin.shape}")
+    if not np.isfinite(aabb).all() or not np.isfinite(origin).all():
+        raise ValueError("aabb and origin must be finite")
+    if not np.isfinite(clearance_m) or clearance_m < 0.0:
+        raise ValueError("clearance_m must be finite and non-negative")
+    extent = aabb[3:] - aabb[:3]
+    if np.any(extent <= 0.0):
+        raise ValueError("aabb must have positive extent")
+
+    center = 0.5 * (aabb[:3] + aabb[3:])
+    half_extent = 0.5 * extent
+    direction = center - origin
+    distance = float(np.linalg.norm(direction))
+    if distance <= 1e-12:
+        raise ValueError("origin and AABB center coincide")
+    direction /= distance
+    nonzero = np.abs(direction) > 1e-12
+    center_to_surface_m = float(
+        np.min(half_extent[nonzero] / np.abs(direction[nonzero]))
+    )
+    ray_origin = center - direction * (center_to_surface_m + clearance_m)
+    return ray_origin, direction
+
+
 def transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
     """Apply a rigid homogeneous transform to an ``(N, 3)`` point cloud."""
     transform = np.asarray(transform, dtype=np.float64)

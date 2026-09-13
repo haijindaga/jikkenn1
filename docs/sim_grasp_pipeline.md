@@ -19,6 +19,23 @@ For the Panda experiment it must therefore remain an explicit simulation-only
 retention abstraction, compared against the existing FixedJoint baseline; it
 must not be presented as a calibrated parallel-jaw contact model.
 
+After the preflight succeeds, replay the same planned candidate with the
+separate experimental mode. The runtime copies the D6 attachment-point physics
+from the bundled `SurfaceGripper_gantry.usda`; it does not invent new force
+limits or gains.
+
+```bash
+python scripts/isaac_replay_grasp_lift_trials.py \
+  --capture outputs/hammer_handover_e2e_v1/capture/camera_0 \
+  --plan-trials outputs/hammer_handover_e2e_v1/curobo_grasp_lift_trials \
+  --scene-usd scenes/hammer_01.usda \
+  --output outputs/hammer_handover_e2e_v1/isaac_grasp_lift_trials_surface_gripper_v1 \
+  --max-physical-trials 1 \
+  --finger-drive-preset isaaclab-franka \
+  --grasp-retention-mode surface-gripper-attachment \
+  --simulation-only
+```
+
 `scripts/run_sim_grasp_pipeline.py` preserves the existing reviewed stage
 boundaries but executes them in order:
 

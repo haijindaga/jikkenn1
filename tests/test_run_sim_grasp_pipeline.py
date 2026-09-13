@@ -375,6 +375,37 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             replay[replay.index("--solver-velocity-iterations") + 1], "4"
         )
 
+    def test_surface_gripper_retention_mode_is_forwarded(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-goal-position-robot-base-m",
+                "0.45",
+                "-0.25",
+                "0.65",
+                "--grasp-retention-mode",
+                "surface-gripper-attachment",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--grasp-retention-mode") + 1],
+            "surface-gripper-attachment",
+        )
+
     def test_affordance_handover_requires_part_segmentation_and_complete_geometry(self):
         with self.assertRaises(SystemExit):
             MODULE.parse_args(
