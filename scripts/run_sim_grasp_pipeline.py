@@ -156,6 +156,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             "replay; max force and stiffness use scale, damping uses sqrt(scale)"
         ),
     )
+    parser.add_argument(
+        "--fingertip-friction-coefficient",
+        type=float,
+        help=(
+            "Simulation-only static/dynamic Panda fingertip friction override. "
+            "The target and table materials are left unchanged."
+        ),
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--sam3-allow-download", action="store_true")
     parser.add_argument(
@@ -262,6 +270,27 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                 or args.handover_receiver_position_robot_base_m is not None
             )
             else "physics"
+        )
+    if args.fingertip_friction_coefficient is not None and (
+        not math.isfinite(args.fingertip_friction_coefficient)
+        or args.fingertip_friction_coefficient < 0.0
+    ):
+        parser.error("--fingertip-friction-coefficient must be finite and non-negative")
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.grasp_retention_mode != "physics"
+    ):
+        parser.error(
+            "--fingertip-friction-coefficient is meaningful only with "
+            "--grasp-retention-mode physics"
+        )
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.finger_drive_scale != 1.0
+    ):
+        parser.error(
+            "do not combine fingertip friction and finger-drive diagnostics in "
+            "one controlled run"
         )
     return args
 
@@ -654,6 +683,13 @@ def build_stages(
         args.grasp_retention_mode,
         "--simulation-only",
     ]
+    if args.fingertip_friction_coefficient is not None:
+        replay_command.extend(
+            [
+                "--fingertip-friction-coefficient",
+                str(args.fingertip_friction_coefficient),
+            ]
+        )
     if args.headless:
         replay_command.append("--headless")
 

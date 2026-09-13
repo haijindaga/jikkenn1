@@ -88,6 +88,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fingertip-friction-coefficient",
+        type=float,
+        help=(
+            "Simulation-only diagnostic override applied to both static and "
+            "dynamic friction on the Panda fingertip collision geometry. The "
+            "runtime material uses PhysX friction combine mode 'max', so the "
+            "target and table materials remain unchanged."
+        ),
+    )
+    parser.add_argument(
         "--grasp-retention-mode",
         choices=("physics", "rigid-attachment"),
         default="physics",
@@ -128,6 +138,27 @@ def parse_args() -> argparse.Namespace:
     if args.finger_drive_scale != 1.0 and args.finger_drive_max_force_n is not None:
         parser.error(
             "--finger-drive-scale cannot be combined with --finger-drive-max-force-n"
+        )
+    if args.fingertip_friction_coefficient is not None and (
+        not math.isfinite(args.fingertip_friction_coefficient)
+        or args.fingertip_friction_coefficient < 0.0
+    ):
+        parser.error("--fingertip-friction-coefficient must be finite and non-negative")
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.grasp_retention_mode != "physics"
+    ):
+        parser.error(
+            "--fingertip-friction-coefficient is meaningful only with "
+            "--grasp-retention-mode physics"
+        )
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.finger_drive_scale != 1.0
+    ):
+        parser.error(
+            "do not combine fingertip friction and finger-drive diagnostics in "
+            "one controlled run"
         )
     return args
 
@@ -377,6 +408,12 @@ try:
                 and material_prim.HasAPI(UsdPhysics.MaterialAPI)
                 else None
             )
+            physx_material_api = (
+                PhysxSchema.PhysxMaterialAPI(material_prim)
+                if material_prim
+                and material_prim.HasAPI(PhysxSchema.PhysxMaterialAPI)
+                else None
+            )
             records.append(
                 {
                     "collision_prim": str(prim.GetPath()),
@@ -403,9 +440,82 @@ try:
                         if material_api
                         else None
                     ),
+                    "friction_combine_mode": (
+                        usd_attribute_value(
+                            physx_material_api.GetFrictionCombineModeAttr()
+                        )
+                        if physx_material_api
+                        else None
+                    ),
                 }
             )
         return records
+
+    def apply_fingertip_friction_override(coefficient: float) -> dict:
+        """Bind one high-friction runtime material only to fingertip colliders."""
+        material_path = "/World/RuntimePhysicsMaterials/FingertipFrictionDiagnostic"
+        material = UsdShade.Material.Define(stage, Sdf.Path(material_path))
+        material_prim = material.GetPrim()
+        material_api = (
+            UsdPhysics.MaterialAPI(material_prim)
+            if material_prim.HasAPI(UsdPhysics.MaterialAPI)
+            else UsdPhysics.MaterialAPI.Apply(material_prim)
+        )
+        material_api.CreateStaticFrictionAttr().Set(float(coefficient))
+        material_api.CreateDynamicFrictionAttr().Set(float(coefficient))
+        material_api.CreateRestitutionAttr().Set(0.0)
+        physx_material_api = (
+            PhysxSchema.PhysxMaterialAPI(material_prim)
+            if material_prim.HasAPI(PhysxSchema.PhysxMaterialAPI)
+            else PhysxSchema.PhysxMaterialAPI.Apply(material_prim)
+        )
+        physx_material_api.GetFrictionCombineModeAttr().Set("max")
+
+        collision_prim_paths = []
+        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
+            finger_link_prims = [
+                prim
+                for prim in Usd.PrimRange(panda_root)
+                if prim.GetName() == finger_link_name
+            ]
+            if len(finger_link_prims) != 1:
+                raise RuntimeError(
+                    f"expected one {finger_link_name} prim, found "
+                    f"{[str(prim.GetPath()) for prim in finger_link_prims]}"
+                )
+            for prim in Usd.PrimRange(finger_link_prims[0]):
+                if not (
+                    prim.HasAPI(UsdPhysics.CollisionAPI)
+                    or prim.HasAPI(PhysxSchema.PhysxCollisionAPI)
+                ):
+                    continue
+                binding_api = (
+                    UsdShade.MaterialBindingAPI(prim)
+                    if prim.HasAPI(UsdShade.MaterialBindingAPI)
+                    else UsdShade.MaterialBindingAPI.Apply(prim)
+                )
+                binding_api.Bind(
+                    material,
+                    bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+                    materialPurpose="physics",
+                )
+                collision_prim_paths.append(str(prim.GetPath()))
+        if not collision_prim_paths:
+            raise RuntimeError("Panda fingertip collision geometry was not found")
+        return {
+            "applied": True,
+            "diagnostic_only": True,
+            "material_path": material_path,
+            "static_friction": float(coefficient),
+            "dynamic_friction": float(coefficient),
+            "restitution": 0.0,
+            "friction_combine_mode": "max",
+            "collision_prim_paths": collision_prim_paths,
+            "target_material_changed": False,
+            "table_material_changed": False,
+            "hardware_calibrated": False,
+        }
 
     def finger_drive_configuration(joint_name: str, *, apply_requested: bool) -> dict:
         panda_root = stage.GetPrimAtPath(args.panda_prim)
@@ -703,6 +813,16 @@ try:
             raise RuntimeError(
                 f"requested Panda finger DriveAPI {attribute_name} was not applied"
             )
+    fingertip_friction_override = {
+        "applied": False,
+        "diagnostic_only": False,
+        "requested_coefficient": args.fingertip_friction_coefficient,
+    }
+    if args.fingertip_friction_coefficient is not None:
+        fingertip_friction_override = apply_fingertip_friction_override(
+            args.fingertip_friction_coefficient
+        )
+
     target_collision_materials = collision_materials_below(target_prim_path)
     finger_collision_materials = []
     for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
@@ -1046,6 +1166,7 @@ try:
             "finger_joint_drives": finger_drive_report,
             "target_collision_materials": target_collision_materials,
             "finger_collision_materials": finger_collision_materials,
+            "fingertip_friction_override": fingertip_friction_override,
             "null_material_coefficients_mean_no_explicit_bound_physics_material": True,
         },
         "retention_diagnostics": {

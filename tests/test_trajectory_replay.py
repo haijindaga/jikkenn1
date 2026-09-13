@@ -312,6 +312,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"--finger-drive-max-force-n"', script)
         self.assertIn('"--finger-drive-scale"', script)
         self.assertIn('"--finger-drive-preset"', script)
+        self.assertIn('"--fingertip-friction-coefficient"', script)
         self.assertIn('default="authored-usd"', script)
         self.assertIn('"finger_drive_preset_definition"', script)
         self.assertIn('"stiffness_before": before["stiffness"]', script)
@@ -325,7 +326,12 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("not calibrated as total", script)
         self.assertIn('"finger_drive_diagnostic_scale"', script)
         self.assertIn('"hardware_force_calibrated": False', script)
-        self.assertNotIn("GetStaticFrictionAttr().Set", script)
+        self.assertIn("apply_fingertip_friction_override", script)
+        self.assertIn("CreateStaticFrictionAttr().Set", script)
+        self.assertIn("CreateDynamicFrictionAttr().Set", script)
+        self.assertIn('GetFrictionCombineModeAttr().Set("max")', script)
+        self.assertIn('materialPurpose="physics"', script)
+        self.assertIn('"target_material_changed": False', script)
 
 
 if __name__ == "__main__":

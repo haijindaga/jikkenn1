@@ -25,6 +25,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--finger-drive-scale", type=float, default=1.0)
     parser.add_argument(
+        "--fingertip-friction-coefficient",
+        type=float,
+        help=(
+            "Simulation-only static/dynamic fingertip friction override passed "
+            "unchanged to every candidate replay"
+        ),
+    )
+    parser.add_argument(
         "--grasp-retention-mode",
         choices=("physics", "rigid-attachment"),
         default="physics",
@@ -40,6 +48,27 @@ def parse_args() -> argparse.Namespace:
         parser.error("--finger-drive-scale must be positive and finite")
     if args.finger_drive_scale != 1.0 and args.finger_drive_preset != "isaaclab-franka":
         parser.error("scaled diagnostics require --finger-drive-preset isaaclab-franka")
+    if args.fingertip_friction_coefficient is not None and (
+        not math.isfinite(args.fingertip_friction_coefficient)
+        or args.fingertip_friction_coefficient < 0.0
+    ):
+        parser.error("--fingertip-friction-coefficient must be finite and non-negative")
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.grasp_retention_mode != "physics"
+    ):
+        parser.error(
+            "--fingertip-friction-coefficient is meaningful only with "
+            "--grasp-retention-mode physics"
+        )
+    if (
+        args.fingertip_friction_coefficient is not None
+        and args.finger_drive_scale != 1.0
+    ):
+        parser.error(
+            "do not combine fingertip friction and finger-drive diagnostics in "
+            "one controlled run"
+        )
     return args
 
 
@@ -82,6 +111,13 @@ def main() -> int:
             ),
             "finger_drive_preset_for_every_candidate": args.finger_drive_preset,
             "finger_drive_diagnostic_scale_for_every_candidate": args.finger_drive_scale,
+            "fingertip_friction_coefficient_for_every_candidate": (
+                args.fingertip_friction_coefficient
+            ),
+            "fingertip_friction_policy": (
+                "same static and dynamic coefficient; PhysX max combine mode; "
+                "target and table materials unchanged; simulation diagnostic only"
+            ),
             "finger_drive_scaling_policy": (
                 "max_force and stiffness multiplied by scale; damping multiplied "
                 "by sqrt(scale); simulation diagnostic only"
@@ -117,6 +153,13 @@ def main() -> int:
             args.grasp_retention_mode,
             "--simulation-only",
         ]
+        if args.fingertip_friction_coefficient is not None:
+            command.extend(
+                [
+                    "--fingertip-friction-coefficient",
+                    str(args.fingertip_friction_coefficient),
+                ]
+            )
         if args.headless:
             command.append("--headless")
         print(

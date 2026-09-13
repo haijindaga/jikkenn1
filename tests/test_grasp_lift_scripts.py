@@ -374,8 +374,12 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"candidate_specific_parameter_tuning": False', planner_runner)
         self.assertIn('default="isaaclab-franka"', replay_runner)
         self.assertIn('"--finger-drive-scale"', replay_runner)
+        self.assertIn('"--fingertip-friction-coefficient"', replay_runner)
         self.assertIn(
             '"finger_drive_diagnostic_scale_for_every_candidate"', replay_runner
+        )
+        self.assertIn(
+            '"fingertip_friction_coefficient_for_every_candidate"', replay_runner
         )
         self.assertIn('"stop_at_first_success": True', replay_runner)
         self.assertIn('"grasp_retention_mode"', replay_runner)

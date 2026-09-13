@@ -141,6 +141,34 @@ the run receives the same values, and reports explicitly mark the condition as
 diagnostic and not hardware-force calibrated. Do not compare it to a baseline
 generated from different candidate plans.
 
+For a friction-only retention diagnostic, keep `--finger-drive-scale 1`, use
+`--grasp-retention-mode physics`, and pass (for example)
+`--fingertip-friction-coefficient 5`. The runner creates a runtime physics
+material with static and dynamic friction both equal to the requested value,
+restitution zero, and PhysX friction combine mode `max`. It binds that material
+only to the two Panda fingertip collision geometries; the target and table
+materials are not changed. This prevents the object/table settling behavior
+from becoming a second experimental variable. Friction and finger-drive
+diagnostics cannot be enabled together in one controlled run.
+
+```bash
+python scripts/isaac_replay_grasp_lift_trials.py \
+  --capture outputs/hammer_vlm_part_e2e_v1/capture/camera_0 \
+  --plan-trials outputs/hammer_vlm_part_e2e_v1/curobo_grasp_lift_trials \
+  --scene-usd scenes/hammer_01.usda \
+  --output outputs/hammer_vlm_part_e2e_v1/isaac_grasp_lift_trials_friction5_v1 \
+  --max-physical-trials 5 \
+  --finger-drive-preset isaaclab-franka \
+  --finger-drive-scale 1 \
+  --fingertip-friction-coefficient 5 \
+  --grasp-retention-mode physics \
+  --simulation-only
+```
+
+The coefficient is an intentionally nonphysical sensitivity test, not a rubber
+calibration or a real-robot setting. Compare it only with a standard-friction
+run using the same capture and candidate-plan manifest.
+
 To generate or reopen the same report for an existing output directory:
 
 ```bash

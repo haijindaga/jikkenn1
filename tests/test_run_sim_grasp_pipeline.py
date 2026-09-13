@@ -192,6 +192,51 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "5.0")
 
+    def test_fingertip_friction_diagnostic_is_forwarded_to_every_replay(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--fingertip-friction-coefficient",
+                "5",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--fingertip-friction-coefficient") + 1],
+            "5.0",
+        )
+        self.assertEqual(replay[replay.index("--finger-drive-scale") + 1], "1.0")
+
+    def test_rejects_combined_friction_and_drive_diagnostics(self) -> None:
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "hammer",
+                    "--output",
+                    "outputs/e2e",
+                    "--finger-drive-scale",
+                    "5",
+                    "--fingertip-friction-coefficient",
+                    "5",
+                ]
+            )
+
     def test_handover_goal_enables_attached_planning_and_rigid_replay(self) -> None:
         args = MODULE.parse_args(
             [
