@@ -973,6 +973,20 @@ try:
             quaternion_wxyz_from_rotation_matrix(T_world_target[:3, :3]),
         )
 
+    def step_world_with_attachment_sync() -> None:
+        """Render kinematic attachment poses only after their final frame update."""
+        if (
+            args.grasp_retention_mode == "kinematic-pose-lock"
+            and attachment_state["T_hand_target"] is not None
+        ):
+            # Pull the just-simulated Panda link pose into Fabric, update the
+            # target from that pose, and only then render the visible frame.
+            world.step(render=False, update_fabric=True)
+            enforce_kinematic_pose_lock()
+            world.render()
+        else:
+            world.step(render=True)
+
     def create_post_close_fixed_attachment() -> dict:
         """Lock the current target-to-hand pose without snapping either body."""
         hand_rigid_body_path = panda_hand_rigid_body_path
@@ -1384,8 +1398,7 @@ try:
         # Preserve the measured attachment pose while PhysX consumes the
         # runtime kinematic-state change. No constraint is added to the Panda.
         enforce_kinematic_pose_lock()
-        world.step(render=True)
-        enforce_kinematic_pose_lock()
+        step_world_with_attachment_sync()
         record_physics_sample("attach")
         position_jump_m, orientation_jump_rad = attachment_pose_jump(
             target_position_before, target_orientation_before
@@ -1643,8 +1656,7 @@ try:
                     joint_indices=all_indices,
                 )
             )
-            world.step(render=True)
-            enforce_kinematic_pose_lock()
+            step_world_with_attachment_sync()
             record_physics_sample(phase)
             phase_measured[index] = np.asarray(
                 panda.get_joint_positions(), dtype=np.float64
@@ -1676,8 +1688,7 @@ try:
                 joint_indices=all_indices,
             )
         )
-        world.step(render=True)
-        enforce_kinematic_pose_lock()
+        step_world_with_attachment_sync()
         record_physics_sample("close")
     measured_fingers_after_close = np.asarray(
         panda.get_joint_positions(), dtype=np.float64
@@ -1727,8 +1738,7 @@ try:
                 joint_indices=all_indices,
             )
         )
-        world.step(render=True)
-        enforce_kinematic_pose_lock()
+        step_world_with_attachment_sync()
         record_physics_sample("hold")
     target_held_position, target_held_orientation = get_target_world_pose()
     target_held_position = np.asarray(target_held_position, dtype=np.float64)

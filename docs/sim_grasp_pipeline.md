@@ -160,8 +160,10 @@ one deformable actor and did not constrain this rigid-body-to-rigid-body case.
 `kinematic-pose-lock` is an explicit exact-following simulation fallback. It
 clears the target's residual velocity, switches the target rigid body to the
 standard USD kinematic state, and updates its world pose from the measured
-post-close target-to-hand transform after every physics step. It creates no
-physics joint and therefore does not apply attachment forces to the Panda.
+post-close target-to-hand transform after every physics step. In this mode the
+visible frame is rendered only after that pose update, keeping the viewport and
+saved images synchronized with the measured trace. It creates no physics joint
+and therefore does not apply attachment forces to the Panda.
 This mode assumes grasp success; it is not contact-only grasp evidence.
 
 No friction tuning is used by any attachment mode. Every attachment replay
