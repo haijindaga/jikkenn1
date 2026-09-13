@@ -151,9 +151,20 @@ python scripts/run_sim_grasp_pipeline.py \
 ```
 
 Supplying either handover mode makes `rigid-attachment` the replay default.
-Immediately after gripper closure, the runner creates a standard OpenUSD
-`FixedJoint` between `panda_hand` and the target at their current simulated
-relative pose, so neither body is deliberately snapped to a pre-authored frame.
+Before reset, the runner enables Isaac Sim's standard
+`PhysxContactReportAPI` on the target. During closure it creates no attachment
+until both Panda finger rigid bodies report target contact in the same physics
+step and both finger joints have moved inward by at least 1 mm. `close_frames`
+is the maximum time allowed for that state, not an unconditional delay. A
+failed gate saves `fixed_joint_attachment_gate_failure.json` and does not lift.
+After the gate passes, the runner creates a standard OpenUSD `FixedJoint`
+between `panda_hand` and the target at their current simulated relative pose,
+so neither body is deliberately snapped to a pre-authored frame. It holds that
+state for five physics steps and verifies the relative pose before starting the
+lift; an unstable joint is reported instead of being hidden as a failed grasp.
+This ordering follows NVIDIA's recommended closure/contact-triggered runtime
+FixedJoint pattern:
+<https://forums.developer.nvidia.com/t/pick-and-place-in-space-zero-gravity-0g/370975>.
 `physx-auto-attachment` remains available only as an experimental diagnostic:
 the PhysX attachment schema is defined for an attachment containing at least
 one deformable actor and did not constrain this rigid-body-to-rigid-body case.

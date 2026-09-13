@@ -32,6 +32,8 @@ PANDA_OPEN_FINGER_JOINT_M = 0.04
 PANDA_CLOSED_FINGER_JOINT_M = 0.0
 ATTACHMENT_TRANSLATION_TOLERANCE_M = 0.005
 ATTACHMENT_ORIENTATION_TOLERANCE_RAD = math.radians(5.0)
+FIXED_JOINT_MIN_FINGER_CLOSURE_TRAVEL_M = 0.001
+FIXED_JOINT_POST_CREATE_SETTLE_FRAMES = 5
 
 
 def parse_args() -> argparse.Namespace:
@@ -281,7 +283,16 @@ try:
     from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from pxr import Gf, PhysxSchema, Sdf, Usd, UsdPhysics, UsdShade
+    from omni.physx import get_physx_simulation_interface
+    from pxr import (
+        Gf,
+        PhysicsSchemaTools,
+        PhysxSchema,
+        Sdf,
+        Usd,
+        UsdPhysics,
+        UsdShade,
+    )
 
     if args.grasp_retention_mode == "surface-gripper-attachment":
         import isaacsim.robot.surface_gripper as surface_gripper_package
@@ -432,6 +443,74 @@ try:
         )
 
     stage = stage_utils.get_current_stage()
+
+    def unique_named_rigid_body_path(prim_name: str) -> str:
+        root = stage.GetPrimAtPath(args.panda_prim)
+        matching = [
+            prim
+            for prim in Usd.PrimRange(root)
+            if prim.GetName() == prim_name
+            and prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        ]
+        if len(matching) != 1:
+            raise RuntimeError(
+                f"expected one {prim_name} rigid body, found: "
+                + str([str(prim.GetPath()) for prim in matching])
+            )
+        return str(matching[0].GetPath())
+
+    fixed_joint_contact_setup = {
+        "enabled": False,
+        "source": "Isaac Sim PhysxContactReportAPI",
+        "authored_before_world_reset": False,
+        "target_rigid_body_prim": target_rigid_prim_path,
+        "finger_rigid_body_prims": None,
+        "threshold_before": None,
+        "threshold_after": None,
+    }
+    fixed_joint_finger_paths: dict[str, str] = {}
+    physx_simulation_interface = None
+    if args.grasp_retention_mode == "rigid-attachment":
+        fixed_joint_finger_paths = {
+            "left": unique_named_rigid_body_path("panda_leftfinger"),
+            "right": unique_named_rigid_body_path("panda_rightfinger"),
+        }
+        target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
+        contact_report_was_present = target_rigid_prim.HasAPI(
+            PhysxSchema.PhysxContactReportAPI
+        )
+        contact_report_api = PhysxSchema.PhysxContactReportAPI.Get(
+            stage, target_rigid_prim.GetPath()
+        )
+        if not contact_report_api or not contact_report_api.GetPrim().IsValid():
+            contact_report_api = PhysxSchema.PhysxContactReportAPI.Apply(
+                target_rigid_prim
+            )
+        if not contact_report_api or not contact_report_api.GetPrim().IsValid():
+            raise RuntimeError(
+                "could not apply PhysxContactReportAPI to the target before reset"
+            )
+        threshold_attribute = contact_report_api.GetThresholdAttr()
+        threshold_before = (
+            threshold_attribute.Get() if threshold_attribute else None
+        )
+        contact_report_api.CreateThresholdAttr().Set(0.0)
+        threshold_after = contact_report_api.GetThresholdAttr().Get()
+        if threshold_after is None or float(threshold_after) != 0.0:
+            raise RuntimeError("target contact-report threshold was not set to zero")
+        physx_simulation_interface = get_physx_simulation_interface()
+        fixed_joint_contact_setup = {
+            "enabled": True,
+            "source": "Isaac Sim PhysxContactReportAPI",
+            "authored_before_world_reset": True,
+            "api_was_already_present": contact_report_was_present,
+            "target_rigid_body_prim": target_rigid_prim_path,
+            "finger_rigid_body_prims": fixed_joint_finger_paths,
+            "threshold_before": (
+                float(threshold_before) if threshold_before is not None else None
+            ),
+            "threshold_after": float(threshold_after),
+        }
 
     solver_iteration_override = {
         "applied": False,
@@ -809,19 +888,52 @@ try:
         }
 
     def unique_panda_hand_rigid_body_path() -> str:
-        panda_root = stage.GetPrimAtPath(args.panda_prim)
-        matching = [
-            prim
-            for prim in Usd.PrimRange(panda_root)
-            if prim.GetName() == "panda_hand"
-            and prim.HasAPI(UsdPhysics.RigidBodyAPI)
-        ]
-        if len(matching) != 1:
-            raise RuntimeError(
-                "expected one Panda hand rigid body, found: "
-                + str([str(prim.GetPath()) for prim in matching])
-            )
-        return str(matching[0].GetPath())
+        return unique_named_rigid_body_path("panda_hand")
+
+    def fixed_joint_target_contacts_for_latest_step() -> dict:
+        """Return target contact evidence for each Panda finger in this step."""
+        if physx_simulation_interface is None:
+            return {
+                "left": False,
+                "right": False,
+                "matching_headers": [],
+            }
+        contact_headers, _ = physx_simulation_interface.get_contact_report()
+        contact_by_finger = {"left": False, "right": False}
+        matching_headers = []
+        for header in contact_headers:
+            event_type = str(header.type)
+            if event_type.endswith("CONTACT_LOST"):
+                continue
+            actor0 = str(PhysicsSchemaTools.intToSdfPath(header.actor0))
+            actor1 = str(PhysicsSchemaTools.intToSdfPath(header.actor1))
+            actors = {actor0, actor1}
+            for finger_name, finger_path in fixed_joint_finger_paths.items():
+                if actors != {target_rigid_prim_path, finger_path}:
+                    continue
+                contact_count = int(header.num_contact_data)
+                if contact_count <= 0:
+                    continue
+                contact_by_finger[finger_name] = True
+                matching_headers.append(
+                    {
+                        "finger": finger_name,
+                        "event_type": event_type,
+                        "actor0": actor0,
+                        "actor1": actor1,
+                        "collider0": str(
+                            PhysicsSchemaTools.intToSdfPath(header.collider0)
+                        ),
+                        "collider1": str(
+                            PhysicsSchemaTools.intToSdfPath(header.collider1)
+                        ),
+                        "contact_count": contact_count,
+                    }
+                )
+        return {
+            **contact_by_finger,
+            "matching_headers": matching_headers,
+        }
 
     def world_pose_for_xform(prim_path: str) -> tuple[np.ndarray, np.ndarray]:
         view = (
@@ -1016,9 +1128,31 @@ try:
         joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
         joint.CreateCollisionEnabledAttr().Set(False)
         joint.CreateExcludeFromArticulationAttr().Set(True)
+        joint_readback = {
+            "body0": [str(path) for path in joint.GetBody0Rel().GetTargets()],
+            "body1": [str(path) for path in joint.GetBody1Rel().GetTargets()],
+            "collision_enabled": bool(joint.GetCollisionEnabledAttr().Get()),
+            "exclude_from_articulation": bool(
+                joint.GetExcludeFromArticulationAttr().Get()
+            ),
+        }
+        expected_readback = {
+            "body0": [hand_rigid_body_path],
+            "body1": [target_rigid_prim_path],
+            "collision_enabled": False,
+            "exclude_from_articulation": True,
+        }
+        if joint_readback != expected_readback:
+            raise RuntimeError(
+                "FixedJoint USD relationship readback did not match the request: "
+                f"{joint_readback}"
+            )
         apply_target_robot_collision_filter()
         transform_file = register_attachment_reference(T_hand_target)
         world.step(render=True)
+        joint_prim_after_step = stage.GetPrimAtPath(joint_path)
+        if not joint_prim_after_step.IsValid() or not joint_prim_after_step.IsActive():
+            raise RuntimeError("FixedJoint prim was not active after its first physics step")
         record_physics_sample("attach")
         position_jump_m, orientation_jump_rad = attachment_pose_jump(
             target_position_before, target_orientation_before
@@ -1031,6 +1165,8 @@ try:
             ),
             "joint_type": "UsdPhysics.FixedJoint",
             "joint_prim": joint_path,
+            "joint_usd_readback": joint_readback,
+            "joint_active_after_first_physics_step": True,
             "hand_rigid_body_prim": hand_rigid_body_path,
             "target_rigid_body_prim": target_rigid_prim_path,
             "connected_body_collision_enabled": False,
@@ -1681,7 +1817,29 @@ try:
     closed_finger_target = np.full(
         2, args.closed_finger_position_m, dtype=np.float64
     )
-    for _ in range(args.close_frames):
+    fixed_joint_attachment_gate = {
+        "required": args.grasp_retention_mode == "rigid-attachment",
+        "passed": None,
+        "source": (
+            "NVIDIA recommendation: finger closure threshold plus target contact "
+            "reported on both fingers"
+        ),
+        "implementation_reference": (
+            "https://forums.developer.nvidia.com/t/"
+            "pick-and-place-in-space-zero-gravity-0g/370975"
+        ),
+        "contact_monitor": fixed_joint_contact_setup,
+        "minimum_closure_travel_per_finger_m": (
+            FIXED_JOINT_MIN_FINGER_CLOSURE_TRAVEL_M
+        ),
+        "maximum_close_frames": args.close_frames,
+        "close_frames_executed": 0,
+        "final_closure_travel_m": None,
+        "final_finger_target_contacts": None,
+        "contact_frame": None,
+        "samples": [],
+    }
+    for close_index in range(args.close_frames):
         panda.apply_action(
             ArticulationAction(
                 joint_positions=np.concatenate((grasp_arm_target, closed_finger_target)),
@@ -1690,9 +1848,81 @@ try:
         )
         step_world_with_attachment_sync()
         record_physics_sample("close")
+        if args.grasp_retention_mode != "rigid-attachment":
+            continue
+        measured_close_fingers = np.asarray(
+            panda.get_joint_positions(), dtype=np.float64
+        )[finger_indices]
+        closure_travel_m = measured_fingers_before_close - measured_close_fingers
+        contact_sample = fixed_joint_target_contacts_for_latest_step()
+        closure_threshold_passed = bool(
+            np.all(
+                closure_travel_m
+                >= FIXED_JOINT_MIN_FINGER_CLOSURE_TRAVEL_M
+            )
+        )
+        bilateral_target_contact = bool(
+            contact_sample["left"] and contact_sample["right"]
+        )
+        fixed_joint_attachment_gate["samples"].append(
+            {
+                "frame": close_index + 1,
+                "measured_finger_positions_m": measured_close_fingers.tolist(),
+                "closure_travel_m": closure_travel_m.tolist(),
+                "closure_threshold_passed": closure_threshold_passed,
+                "left_target_contact": bool(contact_sample["left"]),
+                "right_target_contact": bool(contact_sample["right"]),
+                "bilateral_target_contact": bilateral_target_contact,
+                "matching_contact_headers": contact_sample["matching_headers"],
+            }
+        )
+        if closure_threshold_passed and bilateral_target_contact:
+            fixed_joint_attachment_gate["passed"] = True
+            fixed_joint_attachment_gate["contact_frame"] = close_index + 1
+            break
     measured_fingers_after_close = np.asarray(
         panda.get_joint_positions(), dtype=np.float64
     )[finger_indices]
+    if args.grasp_retention_mode == "rigid-attachment":
+        final_contacts = fixed_joint_target_contacts_for_latest_step()
+        fixed_joint_attachment_gate["close_frames_executed"] = len(
+            fixed_joint_attachment_gate["samples"]
+        )
+        fixed_joint_attachment_gate["final_closure_travel_m"] = (
+            measured_fingers_before_close - measured_fingers_after_close
+        ).tolist()
+        fixed_joint_attachment_gate["final_finger_target_contacts"] = {
+            "left": bool(final_contacts["left"]),
+            "right": bool(final_contacts["right"]),
+            "matching_headers": final_contacts["matching_headers"],
+        }
+        if fixed_joint_attachment_gate["passed"] is not True:
+            fixed_joint_attachment_gate["passed"] = False
+            gate_failure_path = output / "fixed_joint_attachment_gate_failure.json"
+            gate_failure_path.write_text(
+                json.dumps(
+                    {
+                        "status": "fixed_joint_attachment_gate_failed",
+                        "grasp_retention_mode": args.grasp_retention_mode,
+                        "gate": fixed_joint_attachment_gate,
+                        "safety": {
+                            "fixed_joint_created": False,
+                            "lift_executed": False,
+                            "simulation_only": True,
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            raise RuntimeError(
+                "refusing to create FixedJoint: finger closure and bilateral "
+                "target contact were not observed together; inspect "
+                f"{gate_failure_path}"
+            )
+    else:
+        fixed_joint_attachment_gate["close_frames_executed"] = args.close_frames
     frame_path = save_rgb("03_gripper_closed")
     if frame_path:
         saved_frames.append(frame_path)
@@ -1704,6 +1934,67 @@ try:
     }
     if args.grasp_retention_mode == "rigid-attachment":
         attachment_report = create_post_close_fixed_attachment()
+        attachment_report["creation_gate"] = fixed_joint_attachment_gate
+        settle_start_index = len(diagnostic_phases)
+        for _ in range(FIXED_JOINT_POST_CREATE_SETTLE_FRAMES):
+            panda.apply_action(
+                ArticulationAction(
+                    joint_positions=np.concatenate(
+                        (grasp_arm_target, closed_finger_target)
+                    ),
+                    joint_indices=all_indices,
+                )
+            )
+            step_world_with_attachment_sync()
+            record_physics_sample("post_attach_settle")
+        settle_translation_errors = np.asarray(
+            diagnostic_attachment_translation_errors[settle_start_index:],
+            dtype=np.float64,
+        )
+        settle_orientation_errors = np.asarray(
+            diagnostic_attachment_orientation_errors[settle_start_index:],
+            dtype=np.float64,
+        )
+        post_create_settle = {
+            "frames": FIXED_JOINT_POST_CREATE_SETTLE_FRAMES,
+            "arm_command": "hold final grasp joint positions",
+            "finger_command": "hold closed finger target positions",
+            "maximum_relative_translation_error_m": float(
+                np.max(settle_translation_errors)
+            ),
+            "maximum_relative_orientation_error_rad": float(
+                np.max(settle_orientation_errors)
+            ),
+        }
+        post_create_settle["relative_pose_within_tolerance"] = bool(
+            post_create_settle["maximum_relative_translation_error_m"]
+            <= ATTACHMENT_TRANSLATION_TOLERANCE_M
+            and post_create_settle["maximum_relative_orientation_error_rad"]
+            <= ATTACHMENT_ORIENTATION_TOLERANCE_RAD
+        )
+        attachment_report["post_create_settle"] = post_create_settle
+        if post_create_settle["relative_pose_within_tolerance"] is not True:
+            settle_failure_path = output / "fixed_joint_post_create_failure.json"
+            settle_failure_path.write_text(
+                json.dumps(
+                    {
+                        "status": "fixed_joint_not_stable_before_lift",
+                        "post_close_attachment": attachment_report,
+                        "safety": {
+                            "lift_executed": False,
+                            "simulation_only": True,
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            raise RuntimeError(
+                "FixedJoint did not retain the measured target-to-hand pose "
+                "during the post-create hold; refusing to lift; inspect "
+                f"{settle_failure_path}"
+            )
     elif args.grasp_retention_mode == "physx-auto-attachment":
         attachment_report = create_post_close_physx_auto_attachment()
     elif args.grasp_retention_mode == "surface-gripper-attachment":
@@ -1941,7 +2232,10 @@ try:
                 phase: int(value.shape[0]) for phase, value in commands.items()
             },
             "phase_maximum_tracking_error_rad": phase_max_errors,
-            "close_frames": args.close_frames,
+            "maximum_close_frames": args.close_frames,
+            "close_frames_executed": fixed_joint_attachment_gate[
+                "close_frames_executed"
+            ],
             "hold_frames": args.hold_frames,
             "transport_executed": transport_executed,
             "final_hold_phase": final_phase,
@@ -1972,6 +2266,7 @@ try:
             "assumed_grasp_execution_succeeded": assumed_grasp_execution_succeeded,
         },
         "post_close_attachment": attachment_report,
+        "fixed_joint_attachment_gate": fixed_joint_attachment_gate,
         "physical_object": {
             "physics_apis": target_physics_apis,
             "settled_aabb_world_m": target_settled_aabb.tolist(),
@@ -2119,7 +2414,12 @@ try:
             ),
             "grasp_slip_evaluated": bool(args.grasp_retention_mode == "physics"),
             "physical_gripper_close_commanded": True,
-            "physical_contact_monitoring_automated": False,
+            "physical_contact_monitoring_automated": bool(
+                args.grasp_retention_mode == "rigid-attachment"
+            ),
+            "bilateral_target_contact_required_before_fixed_joint": bool(
+                args.grasp_retention_mode == "rigid-attachment"
+            ),
             "first_lift_held_object_collision_checked_by_curobo": False,
             "attached_transport_planned_and_collision_checked": bool(
                 transport_executed

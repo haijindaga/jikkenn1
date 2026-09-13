@@ -385,6 +385,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"grasp_retention_mode"', replay_runner)
         self.assertIn('report.get("physical_object", {})', replay_runner)
         self.assertIn('if completed.returncode == 0 and status == "success"', replay_runner)
+        self.assertIn('"fixed_joint_attachment_gate_failure.json"', replay_runner)
+        self.assertIn('"fixed_joint_attachment_gate_failed"', replay_runner)
         self.assertIn('"--handover-goal-position-robot-base-m"', planner_runner)
         self.assertIn(
             '"--handover-receiver-position-robot-base-m"', planner_runner

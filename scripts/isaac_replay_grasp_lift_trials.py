@@ -223,11 +223,20 @@ def main() -> int:
         )
         completed = subprocess.run(command, check=False)
         report_path = trial_output / "grasp_lift_replay_check.json"
-        report = (
-            json.loads(report_path.read_text(encoding="utf-8"))
-            if report_path.exists()
-            else {"status": "missing_report"}
+        attachment_gate_failure_path = (
+            trial_output / "fixed_joint_attachment_gate_failure.json"
         )
+        if report_path.exists():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            effective_report_path = report_path
+        elif attachment_gate_failure_path.exists():
+            report = json.loads(
+                attachment_gate_failure_path.read_text(encoding="utf-8")
+            )
+            effective_report_path = attachment_gate_failure_path
+        else:
+            report = {"status": "missing_report"}
+            effective_report_path = None
         status = str(report.get("status", "unknown"))
         physical_pick = report.get("physical_object", {}).get(
             "physical_pick_observed"
@@ -250,7 +259,11 @@ def main() -> int:
             "execution_evidence_kind": report.get("execution", {}).get(
                 "evidence_kind"
             ),
-            "report": str(report_path) if report_path.exists() else None,
+            "report": (
+                str(effective_report_path)
+                if effective_report_path is not None
+                else None
+            ),
         }
         summary["attempts"].append(attempt)
         if completed.returncode == 0 and status == "success" and execution_success:
@@ -267,7 +280,11 @@ def main() -> int:
         expected_failure_statuses = (
             {"physical_pick_not_observed"}
             if args.grasp_retention_mode == "physics"
-            else {"assumed_grasp_execution_failed", "attachment_pose_not_retained"}
+            else {
+                "assumed_grasp_execution_failed",
+                "attachment_pose_not_retained",
+                "fixed_joint_attachment_gate_failed",
+            }
         )
         if status not in expected_failure_statuses:
             summary["status"] = "replay_error"
