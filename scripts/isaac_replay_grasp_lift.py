@@ -1104,17 +1104,34 @@ try:
         if source_stage is None:
             raise RuntimeError(f"could not open official Surface Gripper USD: {source_path}")
         attachment_relation_name = robot_schema.Relations.ATTACHMENT_POINTS.name
-        source_grippers = []
-        for prim in source_stage.Traverse():
-            relation = prim.GetRelationship(attachment_relation_name)
-            if relation and relation.GetTargets():
-                source_grippers.append((prim, relation.GetTargets()))
-        if not source_grippers:
+        # NVIDIA's example USD stores the D6 joints, while the Surface Gripper
+        # prim and its attachment-points relationship are added by example code.
+        # This exact joint-root path is documented in the 5.1 code example.
+        source_joint_root = source_stage.GetPrimAtPath(
+            "/World/Surface_Gripper_Joints"
+        )
+        source_joint_candidates = (
+            [
+                prim
+                for prim in source_joint_root.GetChildren()
+                if prim.IsA(UsdPhysics.Joint)
+            ]
+            if source_joint_root.IsValid()
+            else []
+        )
+        if not source_joint_candidates:
+            source_joint_candidates = [
+                prim
+                for prim in source_stage.Traverse()
+                if prim.IsA(UsdPhysics.Joint)
+                and "gripper" in str(prim.GetPath()).lower()
+            ]
+        if not source_joint_candidates:
             raise RuntimeError(
-                "official Surface Gripper USD contains no attachment-points relation"
+                "official Surface Gripper USD contains no gripper D6 joints"
             )
-        source_gripper_prim, source_attachment_paths = source_grippers[0]
-        source_joint_path = source_attachment_paths[0]
+        source_joint_prim = source_joint_candidates[0]
+        source_joint_path = source_joint_prim.GetPath()
         source_joint_prim = source_stage.GetPrimAtPath(source_joint_path)
         if not source_joint_prim.IsValid():
             raise RuntimeError(
@@ -1207,23 +1224,18 @@ try:
         runtime_gripper_prim.GetRelationship(attachment_relation_name).SetTargets(
             [runtime_joint_path]
         )
+        # These are the values in NVIDIA's Isaac Sim 5.1 "Creating a Surface
+        # Gripper fully on code" example. They are not candidate-specific tuning.
+        documented_gripper_properties = {
+            robot_schema.Attributes.MAX_GRIP_DISTANCE.name: 0.011,
+            robot_schema.Attributes.COAXIAL_FORCE_LIMIT.name: 0.005,
+            robot_schema.Attributes.SHEAR_FORCE_LIMIT.name: 5.0,
+            robot_schema.Attributes.RETRY_INTERVAL.name: 1.0,
+        }
         copied_gripper_properties = {}
-        for attribute_enum in (
-            robot_schema.Attributes.MAX_GRIP_DISTANCE,
-            robot_schema.Attributes.COAXIAL_FORCE_LIMIT,
-            robot_schema.Attributes.SHEAR_FORCE_LIMIT,
-            robot_schema.Attributes.RETRY_INTERVAL,
-        ):
-            attribute_name = attribute_enum.name
-            value = source_gripper_prim.GetAttribute(attribute_name).Get()
-            if value is None:
-                raise RuntimeError(
-                    f"official Surface Gripper property is unset: {attribute_name}"
-                )
+        for attribute_name, value in documented_gripper_properties.items():
             runtime_gripper_prim.GetAttribute(attribute_name).Set(value)
-            copied_gripper_properties[attribute_name] = (
-                float(value) if isinstance(value, (int, float)) else str(value)
-            )
+            copied_gripper_properties[attribute_name] = float(value)
 
         gripper_interface = surface_gripper.acquire_surface_gripper_interface()
         write_to_usd_enabled = bool(gripper_interface.set_write_to_usd(True))
@@ -1297,11 +1309,12 @@ try:
                 "close_wait_frames": close_wait_frames,
             },
             "official_template": str(source_path),
-            "official_template_surface_gripper": str(
-                source_gripper_prim.GetPath()
-            ),
+            "official_template_surface_gripper": None,
             "official_template_attachment_point": str(source_joint_path),
             "copied_gripper_properties": copied_gripper_properties,
+            "gripper_property_source": (
+                "Isaac Sim 5.1 documented Creating a Surface Gripper fully on code example"
+            ),
             "forward_axis": forward_axis,
             "template_clearance_offset_m": clearance_offset_m,
             "ray_origin_clearance_m": ray_origin_clearance_m,

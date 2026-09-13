@@ -280,6 +280,12 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("gripper_interface.close_gripper", script)
         self.assertIn("gripper_interface.get_gripped_objects", script)
         self.assertIn("SurfaceGripper_gantry.usda", script)
+        self.assertIn('"/World/Surface_Gripper_Joints"', script)
+        self.assertIn("MAX_GRIP_DISTANCE.name: 0.011", script)
+        self.assertNotIn(
+            "official Surface Gripper USD contains no attachment-points relation",
+            script,
+        )
         self.assertIn("PhysxSchema.PhysxArticulationAPI.Get", script)
         self.assertIn("PhysxSchema.PhysxRigidBodyAPI.Get", script)
         self.assertIn('"--solver-position-iterations"', script)

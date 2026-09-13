@@ -21,8 +21,9 @@ must not be presented as a calibrated parallel-jaw contact model.
 
 After the preflight succeeds, replay the same planned candidate with the
 separate experimental mode. The runtime copies the D6 attachment-point physics
-from the bundled `SurfaceGripper_gantry.usda`; it does not invent new force
-limits or gains.
+from the bundled `SurfaceGripper_gantry.usda` and uses the Surface Gripper
+properties from NVIDIA's Isaac Sim 5.1 code example. It does not introduce
+candidate-specific force limits or gains.
 
 ```bash
 python scripts/isaac_replay_grasp_lift_trials.py \
