@@ -17,6 +17,7 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.robot_profiles import get_robot_profile
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
@@ -55,7 +56,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Open an authored USD scene instead of generating the legacy block scene",
     )
-    parser.add_argument("--panda-prim", default="/World/Panda")
+    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot-prim")
+    parser.add_argument("--panda-prim", help="Deprecated alias for --robot-prim")
     parser.add_argument("--table-prim", default="/World/Table")
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--camera-prim", default="/World/camera_0")
@@ -81,6 +84,14 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
+profile = get_robot_profile(args.robot_profile)
+if args.robot_prim and args.panda_prim and args.robot_prim != args.panda_prim:
+    raise ValueError("--robot-prim and --panda-prim disagree")
+args.robot_prim = args.robot_prim or args.panda_prim or profile.default_robot_prim
+if args.scene_usd is None and profile.name != "franka_panda":
+    raise ValueError(
+        "non-Franka profiles require --scene-usd with an authored, assembled robot"
+    )
 
 # Isaac requires SimulationApp construction before importing other Isaac modules.
 from isaacsim import SimulationApp
@@ -93,7 +104,7 @@ try:
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import FixedCuboid
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
-    from isaacsim.core.prims import SingleArticulation
+    from isaacsim.core.prims import SingleArticulation, XFormPrim
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
     from isaacsim.core.experimental.utils import stage as stage_utils
@@ -117,8 +128,23 @@ try:
         stage_opened, stage = stage_utils.open_stage(str(scene_usd))
         if not stage_opened or stage is None:
             raise RuntimeError(f"Isaac Sim could not open authored scene: {scene_usd}")
+        world_prim = stage.GetPrimAtPath("/World")
+        authored_profile = (
+            world_prim.GetCustomDataByKey("panda_handover:robot_profile")
+            if world_prim.IsValid()
+            else None
+        )
+        if authored_profile is not None and authored_profile != profile.name:
+            raise RuntimeError(
+                f"authored scene robot profile {authored_profile!r} does not match "
+                f"requested {profile.name!r}"
+            )
+        if profile.name != "franka_panda" and authored_profile != profile.name:
+            raise RuntimeError(
+                "non-Franka authored scenes must record their exact robot profile"
+            )
         required_prim_paths = (
-            args.panda_prim,
+            args.robot_prim,
             args.table_prim,
             args.target_prim,
             args.camera_prim,
@@ -138,7 +164,7 @@ try:
         world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
         panda = world.scene.add(
             Franka(
-                prim_path=args.panda_prim,
+                prim_path=args.robot_prim,
                 name="panda",
                 position=np.asarray(LAYOUT.robot_base_position_m),
             )
@@ -184,8 +210,8 @@ try:
     else:
         panda = world.scene.add(
             SingleArticulation(
-                prim_path=args.panda_prim,
-                name="panda",
+                prim_path=args.robot_prim,
+                name="robot",
             )
         )
         target_prim_path = args.target_prim
@@ -248,6 +274,30 @@ try:
 
     for _ in range(args.warmup_frames):
         world.step(render=True)
+
+    stage = stage_utils.get_current_stage()
+    robot_root_prim = stage.GetPrimAtPath(args.robot_prim)
+    tool_prims = [
+        prim
+        for prim in Usd.PrimRange(robot_root_prim)
+        if prim.GetName() == profile.tool_frame
+        and prim.HasAPI(UsdPhysics.RigidBodyAPI)
+    ]
+    if len(tool_prims) != 1:
+        raise RuntimeError(
+            f"expected one rigid-body tool frame {profile.tool_frame!r}, found "
+            f"{[str(prim.GetPath()) for prim in tool_prims]}"
+        )
+    tool_view = XFormPrim(
+        prim_paths_expr=str(tool_prims[0].GetPath()),
+        name="observed_robot_tool_frame",
+        reset_xform_properties=False,
+    )
+    tool_position, tool_orientation = tool_view.get_world_poses()
+    T_world_tool = matrix_from_pose(
+        np.asarray(tool_position[0], dtype=np.float64),
+        np.asarray(tool_orientation[0], dtype=np.float64),
+    )
 
     target_aabb = np.asarray(
         compute_aabb(create_bbox_cache(), target_prim_path, include_children=True),
@@ -364,7 +414,8 @@ try:
             "scene_source": {
                 "kind": "authored_usd_scene",
                 "scene_usd": str(scene_usd),
-                "panda_prim": args.panda_prim,
+                "robot_prim": args.robot_prim,
+                "robot_profile": profile.name,
                 "table_prim": args.table_prim,
                 "target_prim": target_prim_path,
                 "camera_prim": args.camera_prim,
@@ -396,7 +447,10 @@ try:
         joint_names=tuple(str(name) for name in panda.dof_names),
         joint_positions=np.asarray(panda.get_joint_positions(), dtype=np.float64),
         T_world_robot_base=matrix_from_pose(robot_base_position, robot_base_orientation),
-        prim_path=args.panda_prim,
+        prim_path=args.robot_prim,
+        robot_profile=profile.name,
+        tool_frame=profile.tool_frame,
+        T_world_tool=T_world_tool,
     )
     robot_state_path = robot_state.save(saved, T_world_camera)
 
@@ -518,7 +572,7 @@ try:
     print(f"rgb={rgb.shape} depth={depth_m.shape} valid_depth={valid.sum()}", flush=True)
     print(f"intrinsics=\n{intrinsics}", flush=True)
     print(f"T_world_camera=\n{T_world_camera}", flush=True)
-    print(f"saved Panda state to {robot_state_path}", flush=True)
+    print(f"saved {profile.name} state to {robot_state_path}", flush=True)
     print(f"saved validated tabletop layout to {scene_layout_path}", flush=True)
     print(
         f"camera validation max errors: {max_pixel_error:.6g} px, {max_world_error_m:.6g} m",

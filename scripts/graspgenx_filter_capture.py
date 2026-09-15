@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--viser-port", type=int, default=8081)
     parser.add_argument("--max-visualized-grasps", type=int, default=20)
+    parser.add_argument("--robot-profile", default="franka_panda")
     return parser.parse_args()
 
 
@@ -63,6 +64,9 @@ def main() -> int:
         save_collision_filter_results,
         split_target_from_scene,
     )
+    from panda_handover.robot_profiles import get_robot_profile
+
+    profile = get_robot_profile(args.robot_profile)
 
     points_camera = np.load(args.capture / "points_camera.npy")
     rgb = np.load(args.capture / "rgb.npy")
@@ -89,7 +93,7 @@ def main() -> int:
     else:
         collision_scene = surrounding
 
-    gripper = resolve_gripper_info("franka_panda")
+    gripper = resolve_gripper_info(profile.gripper_name)
     surface_points, _ = trimesh.sample.sample_surface(
         gripper.collision_mesh, args.num_collision_samples
     )
@@ -124,6 +128,9 @@ def main() -> int:
         collision_scene_camera=collision_scene,
         scene_point_count_before_downsampling=scene_count_before,
         parameters=parameters,
+        robot_profile=profile.name,
+        tool_frame=profile.tool_frame,
+        grasp_to_tool_transform=np.asarray(profile.grasp_to_tool_transform),
     )
     print(
         "collision filter: "

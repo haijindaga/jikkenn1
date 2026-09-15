@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Physically close the Panda gripper and replay a cuRobo grasp/lift in Isaac Sim."""
+"""Physically close a profiled gripper and replay a cuRobo grasp/lift in Isaac Sim."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from panda_handover.trajectory_replay import (
     load_grasp_lift_replay,
     sample_positions_at_physics_rate,
 )
+from panda_handover.robot_profiles import get_robot_profile
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
@@ -46,7 +47,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Open the authored USD used by capture instead of the legacy block scene",
     )
-    parser.add_argument("--panda-prim", default="/World/Panda")
+    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot-prim")
+    parser.add_argument("--panda-prim", help="Deprecated alias for --robot-prim")
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--camera-prim", default="/World/camera_0")
     parser.add_argument("--headless", action="store_true")
@@ -56,12 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--open-finger-position-m",
         type=float,
-        default=PANDA_OPEN_FINGER_JOINT_M,
+        default=None,
     )
     parser.add_argument(
         "--closed-finger-position-m",
         type=float,
-        default=PANDA_CLOSED_FINGER_JOINT_M,
+        default=None,
     )
     parser.add_argument(
         "--finger-drive-preset",
@@ -149,15 +152,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--simulation-only is required")
     if min(args.settle_frames, args.close_frames, args.hold_frames) < 0:
         parser.error("frame counts must be non-negative")
-    if not (
-        0.0
-        <= args.closed_finger_position_m
-        <= args.open_finger_position_m
-        <= PANDA_OPEN_FINGER_JOINT_M
-    ):
-        parser.error(
-            "finger positions must satisfy 0 <= closed <= open <= 0.04 metres"
-        )
     if args.finger_drive_max_force_n is not None and (
         not math.isfinite(args.finger_drive_max_force_n)
         or args.finger_drive_max_force_n <= 0.0
@@ -215,6 +209,31 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
+profile = get_robot_profile(args.robot_profile)
+if args.robot_prim and args.panda_prim and args.robot_prim != args.panda_prim:
+    raise ValueError("--robot-prim and --panda-prim disagree")
+args.robot_prim = args.robot_prim or args.panda_prim or profile.default_robot_prim
+if args.open_finger_position_m is None:
+    args.open_finger_position_m = profile.gripper_open[0]
+if args.closed_finger_position_m is None:
+    args.closed_finger_position_m = profile.gripper_closed[0]
+if not all(
+    math.isfinite(value)
+    for value in (args.open_finger_position_m, args.closed_finger_position_m)
+):
+    raise ValueError("gripper positions must be finite")
+if args.finger_drive_preset != profile.replay_drive_preset:
+    raise ValueError(
+        f"{profile.name} requires --finger-drive-preset {profile.replay_drive_preset}"
+    )
+if profile.name != "franka_panda" and (
+    args.finger_drive_scale != 1.0
+    or args.finger_drive_max_force_n is not None
+    or args.fingertip_friction_coefficient is not None
+):
+    raise ValueError("Panda-only drive/friction diagnostics are not valid for this profile")
+if args.scene_usd is None and profile.name != "franka_panda":
+    raise ValueError("non-Franka replay requires an authored --scene-usd")
 finger_drive_preset = FINGER_DRIVE_PRESETS[args.finger_drive_preset]
 requested_finger_drive_values = resolve_finger_drive_values(
     args.finger_drive_preset,
@@ -222,6 +241,13 @@ requested_finger_drive_values = resolve_finger_drive_values(
     diagnostic_scale=args.finger_drive_scale,
 )
 replay = load_grasp_lift_replay(args.capture, args.plan)
+if replay.plan_report.get("robot_profile", "franka_panda") != profile.name:
+    raise ValueError("plan uses a different robot profile")
+capture_robot_report = json.loads(
+    (args.capture / "robot_state.json").read_text(encoding="utf-8")
+)
+if capture_robot_report.get("robot", "franka_panda") != profile.name:
+    raise ValueError("capture uses a different robot profile")
 if (
     args.grasp_retention_mode
     in {
@@ -318,7 +344,7 @@ try:
         if not stage_opened or stage is None:
             raise RuntimeError(f"Isaac Sim could not open authored scene: {scene_usd}")
         required_prim_paths = (
-            args.panda_prim,
+            args.robot_prim,
             args.target_prim,
             args.camera_prim,
         )
@@ -372,7 +398,7 @@ try:
         world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
         panda = world.scene.add(
             Franka(
-                prim_path=args.panda_prim,
+                prim_path=args.robot_prim,
                 name="panda",
                 position=np.asarray(LAYOUT.robot_base_position_m),
             )
@@ -424,7 +450,7 @@ try:
     else:
         panda = world.scene.add(
             SingleArticulation(
-                prim_path=args.panda_prim,
+                prim_path=args.robot_prim,
                 name="panda",
             )
         )
@@ -445,7 +471,7 @@ try:
     stage = stage_utils.get_current_stage()
 
     def unique_named_rigid_body_path(prim_name: str) -> str:
-        root = stage.GetPrimAtPath(args.panda_prim)
+        root = stage.GetPrimAtPath(args.robot_prim)
         matching = [
             prim
             for prim in Usd.PrimRange(root)
@@ -472,8 +498,10 @@ try:
     physx_simulation_interface = None
     if args.grasp_retention_mode == "rigid-attachment":
         fixed_joint_finger_paths = {
-            "left": unique_named_rigid_body_path("panda_leftfinger"),
-            "right": unique_named_rigid_body_path("panda_rightfinger"),
+            side: unique_named_rigid_body_path(link_name)
+            for side, link_name in zip(
+                ("left", "right"), profile.contact_link_names, strict=True
+            )
         }
         target_rigid_prim = stage.GetPrimAtPath(target_rigid_prim_path)
         contact_report_was_present = target_rigid_prim.HasAPI(
@@ -522,7 +550,7 @@ try:
         "after": None,
     }
     if args.solver_position_iterations is not None:
-        panda_root_prim = stage.GetPrimAtPath(args.panda_prim)
+        panda_root_prim = stage.GetPrimAtPath(args.robot_prim)
         articulation_root_prims = tuple(
             prim
             for prim in Usd.PrimRange(panda_root_prim)
@@ -530,13 +558,13 @@ try:
         )
         if not articulation_root_prims:
             raise RuntimeError(
-                f"Panda articulation root was not found below {args.panda_prim}"
+                f"robot articulation root was not found below {args.robot_prim}"
             )
         panda_articulation_prim = next(
             (
                 prim
                 for prim in articulation_root_prims
-                if str(prim.GetPath()) == args.panda_prim
+                if str(prim.GetPath()) == args.robot_prim
             ),
             articulation_root_prims[0] if len(articulation_root_prims) == 1 else None,
         )
@@ -723,15 +751,15 @@ try:
         collision_prim_paths = []
         finger_link_prim_paths = []
         resolved_binding_relationships = []
-        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        panda_root = stage.GetPrimAtPath(args.robot_prim)
         if not panda_root.IsValid():
-            raise RuntimeError(f"Panda root prim does not exist: {args.panda_prim}")
+            raise RuntimeError(f"robot root prim does not exist: {args.robot_prim}")
         for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
             # The Franka asset repeats the link name on a geometry descendant,
             # e.g. panda_leftfinger/geometry/panda_leftfinger. Select the
             # articulation link by its direct path below the configured Panda
             # root instead of relying on a non-unique leaf name.
-            finger_link_path = Sdf.Path(args.panda_prim).AppendChild(
+            finger_link_path = Sdf.Path(args.robot_prim).AppendChild(
                 finger_link_name
             )
             finger_link_prim = stage.GetPrimAtPath(finger_link_path)
@@ -828,7 +856,7 @@ try:
         }
 
     def finger_drive_configuration(joint_name: str, *, apply_requested: bool) -> dict:
-        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        panda_root = stage.GetPrimAtPath(args.robot_prim)
         matching_prims = [
             prim
             for prim in Usd.PrimRange(panda_root)
@@ -841,13 +869,17 @@ try:
                 "matching_prim_paths": [str(prim.GetPath()) for prim in matching_prims],
             }
         joint_prim = matching_prims[0]
-        drive = UsdPhysics.DriveAPI.Get(joint_prim, "linear")
+        drive_axis = "linear"
+        drive = UsdPhysics.DriveAPI.Get(joint_prim, drive_axis)
+        if not drive:
+            drive_axis = "angular"
+            drive = UsdPhysics.DriveAPI.Get(joint_prim, drive_axis)
         if not drive:
             return {
                 "joint_name": joint_name,
                 "joint_prim": str(joint_prim.GetPath()),
                 "found": False,
-                "reason": "linear DriveAPI is absent",
+                "reason": "linear and angular DriveAPI are absent",
             }
         drive_attributes = {
             "max_force": drive.GetMaxForceAttr(),
@@ -870,6 +902,7 @@ try:
             "joint_name": joint_name,
             "joint_prim": str(joint_prim.GetPath()),
             "found": True,
+            "drive_axis": drive_axis,
             "drive_type": usd_attribute_value(drive.GetTypeAttr()),
             "max_force_before": before["max_force"],
             "max_force_after": after["max_force"],
@@ -888,7 +921,7 @@ try:
         }
 
     def unique_panda_hand_rigid_body_path() -> str:
-        return unique_named_rigid_body_path("panda_hand")
+        return unique_named_rigid_body_path(profile.hand_rigid_body_link)
 
     def fixed_joint_target_contacts_for_latest_step() -> dict:
         """Return target contact evidence for each Panda finger in this step."""
@@ -1032,7 +1065,7 @@ try:
             raise RuntimeError(
                 "could not apply pairwise collision filtering to attached target"
             )
-        filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(args.panda_prim))
+        filtered_pairs.CreateFilteredPairsRel().AddTarget(Sdf.Path(args.robot_prim))
 
     def attachment_pose_jump(
         target_position_before: np.ndarray,
@@ -1171,7 +1204,7 @@ try:
             "target_rigid_body_prim": target_rigid_prim_path,
             "connected_body_collision_enabled": False,
             "target_robot_collision_filtered": True,
-            "target_robot_collision_filter_path": args.panda_prim,
+            "target_robot_collision_filter_path": args.robot_prim,
             "excluded_from_robot_articulation": True,
             "T_panda_hand_target": T_hand_target.tolist(),
             "transform_file": transform_file,
@@ -1245,7 +1278,7 @@ try:
             "hand_rigid_body_prim": panda_hand_rigid_body_path,
             "target_rigid_body_prim": target_rigid_prim_path,
             "target_robot_collision_filtered": True,
-            "target_robot_collision_filter_path": args.panda_prim,
+            "target_robot_collision_filter_path": args.robot_prim,
             "T_panda_hand_target": T_hand_target.tolist(),
             "transform_file": transform_file,
             "target_pose_jump_after_attachment_m": position_jump_m,
@@ -1481,7 +1514,7 @@ try:
             "target_rigid_body_prim": target_rigid_prim_path,
             "target_robot_collision_filtered": target_gripped,
             "target_robot_collision_filter_path": (
-                args.panda_prim if target_gripped else None
+                args.robot_prim if target_gripped else None
             ),
             "interface": {
                 "set_write_to_usd_returned": write_to_usd_enabled,
@@ -1553,7 +1586,7 @@ try:
             "dynamic_velocity_cleared_before_attachment": True,
             "physics_joint_created": False,
             "target_robot_collision_filtered": True,
-            "target_robot_collision_filter_path": args.panda_prim,
+            "target_robot_collision_filter_path": args.robot_prim,
             "T_panda_hand_target": T_hand_target.tolist(),
             "transform_file": transform_file,
             "target_pose_jump_after_attachment_m": position_jump_m,
@@ -1602,17 +1635,19 @@ try:
 
     isaac_names = tuple(str(name) for name in panda.dof_names)
     if len(set(isaac_names)) != len(isaac_names):
-        raise RuntimeError("Isaac Panda DOF names are not unique")
+        raise RuntimeError("Isaac robot DOF names are not unique")
     index_by_name = {name: index for index, name in enumerate(isaac_names)}
     missing = [name for name in replay.joint_names if name not in index_by_name]
     if missing:
-        raise RuntimeError(f"planned joints are missing from Isaac Panda: {missing}")
+        raise RuntimeError(f"planned joints are missing from Isaac robot: {missing}")
     arm_indices = np.asarray(
         [index_by_name[name] for name in replay.joint_names], dtype=np.int64
     )
-    finger_names = ("panda_finger_joint1", "panda_finger_joint2")
+    finger_names = profile.gripper_joint_names
     if any(name not in index_by_name for name in finger_names):
-        raise RuntimeError("Isaac Panda finger joint names changed")
+        raise RuntimeError(
+            f"Isaac {profile.name} gripper joint names changed: {finger_names}"
+        )
     finger_indices = np.asarray([index_by_name[name] for name in finger_names], dtype=np.int64)
     capture_by_name = {
         name: replay.capture_joint_positions[index]
@@ -1624,12 +1659,13 @@ try:
     captured_fingers = np.asarray(
         [capture_by_name[name] for name in finger_names], dtype=np.float64
     )
-    open_fingers = np.full(2, args.open_finger_position_m, dtype=np.float64)
+    open_fingers = np.asarray(profile.gripper_open, dtype=np.float64).copy()
+    open_fingers[:] = args.open_finger_position_m
     actual_start = np.asarray(panda.get_joint_positions(), dtype=np.float64)[arm_indices]
     start_error = np.abs(actual_start - expected_start)
     if not np.all(start_error <= 2e-3):
         raise RuntimeError(
-            "Isaac Panda did not reproduce the capture start state; "
+            "Isaac robot did not reproduce the capture start state; "
             f"maximum error={float(start_error.max()):.6g}"
         )
 
@@ -1662,7 +1698,7 @@ try:
         item for item in finger_drive_report if item.get("found") is True
     ]
     if not configured_finger_drives:
-        raise RuntimeError("Panda has no configurable linear finger DriveAPI")
+        raise RuntimeError("robot has no configurable gripper DriveAPI")
     for attribute_name, requested_value in requested_finger_drive_values.items():
         if requested_value is None:
             continue
@@ -1672,7 +1708,7 @@ try:
             for item in configured_finger_drives
         ):
             raise RuntimeError(
-                f"requested Panda finger DriveAPI {attribute_name} was not applied"
+                f"requested gripper DriveAPI {attribute_name} was not applied"
             )
     fingertip_friction_override = {
         "applied": False,
@@ -1686,10 +1722,10 @@ try:
 
     target_collision_materials = collision_materials_below(target_prim_path)
     finger_collision_materials = []
-    for finger_link_name in ("panda_leftfinger", "panda_rightfinger"):
+    for finger_link_name in profile.contact_link_names:
         finger_link_prims = [
             prim
-            for prim in Usd.PrimRange(stage.GetPrimAtPath(args.panda_prim))
+            for prim in Usd.PrimRange(stage.GetPrimAtPath(args.robot_prim))
             if prim.GetName() == finger_link_name
         ]
         for finger_link_prim in finger_link_prims:
@@ -1814,9 +1850,8 @@ try:
 
     grasp_arm_target = commands["grasp"][-1]
     all_indices = np.concatenate((arm_indices, finger_indices))
-    closed_finger_target = np.full(
-        2, args.closed_finger_position_m, dtype=np.float64
-    )
+    closed_finger_target = np.asarray(profile.gripper_closed, dtype=np.float64).copy()
+    closed_finger_target[:] = args.closed_finger_position_m
     fixed_joint_attachment_gate = {
         "required": args.grasp_retention_mode == "rigid-attachment",
         "passed": None,
@@ -1867,7 +1902,8 @@ try:
         fixed_joint_attachment_gate["samples"].append(
             {
                 "frame": close_index + 1,
-                "measured_finger_positions_m": measured_close_fingers.tolist(),
+                "measured_gripper_joint_positions": measured_close_fingers.tolist(),
+                "gripper_joint_position_unit": profile.gripper_joint_position_unit,
                 "closure_travel_m": closure_travel_m.tolist(),
                 "closure_threshold_passed": closure_threshold_passed,
                 "left_target_contact": bool(contact_sample["left"]),
@@ -2082,10 +2118,17 @@ try:
         diagnostic_target_orientation_array,
     )
     np.save(
-        output / "retention_finger_positions_m.npy",
+        output / "retention_gripper_joint_positions.npy",
         diagnostic_finger_position_array,
     )
-    np.save(output / "retention_finger_gap_m.npy", diagnostic_finger_gap_array)
+    if profile.gripper_joint_position_unit == "metre":
+        # Legacy Franka analysis artifacts. A Robotiq revolute master joint is
+        # not a metric finger gap, so these names must never be emitted for UR.
+        np.save(
+            output / "retention_finger_positions_m.npy",
+            diagnostic_finger_position_array,
+        )
+        np.save(output / "retention_finger_gap_m.npy", diagnostic_finger_gap_array)
     np.save(
         output / "retention_hand_position_world_m.npy",
         diagnostic_hand_position_array,
@@ -2203,9 +2246,9 @@ try:
                 "Isaac Sim compute_aabb with include_children=True"
             ),
             "finger_close": (
-                "Isaac Sim 5.1 articulation controller example: finger joints 7 and 8 to 0"
+                "Isaac Sim 5.1 ArticulationAction on profiled gripper master joints"
             ),
-            "finger_open": "cuRobo franka.yml locked finger joints at 0.04 metres",
+            "finger_open": "selected robot profile open joint targets",
             "source_plan": str(args.plan / "grasp_lift_plan_check.json"),
             "physics_diagnostics": (
                 "Isaac Sim RigidPrim runtime mass and OpenUSD DriveAPI/MaterialAPI"
@@ -2218,7 +2261,7 @@ try:
             "scene_kind": (
                 "authored_usd_scene" if scene_usd is not None else "legacy_block_scene"
             ),
-            "panda_prim": args.panda_prim,
+            "robot_prim": args.robot_prim,
             "target_prim": target_prim_path,
             "target_rigid_body_prim": target_rigid_prim_path,
             "camera_prim": (
@@ -2239,12 +2282,47 @@ try:
             "hold_frames": args.hold_frames,
             "transport_executed": transport_executed,
             "final_hold_phase": final_phase,
-            "captured_finger_positions_m": captured_fingers.tolist(),
-            "open_finger_targets_m": open_fingers.tolist(),
-            "measured_fingers_before_close_m": measured_fingers_before_close.tolist(),
-            "closed_finger_targets_m": closed_finger_target.tolist(),
-            "measured_fingers_after_close_m": measured_fingers_after_close.tolist(),
-            "measured_fingers_held_m": measured_fingers_held.tolist(),
+            "captured_finger_positions_m": (
+                captured_fingers.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "open_finger_targets_m": (
+                open_fingers.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "measured_fingers_before_close_m": (
+                measured_fingers_before_close.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "closed_finger_targets_m": (
+                closed_finger_target.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "measured_fingers_after_close_m": (
+                measured_fingers_after_close.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "measured_fingers_held_m": (
+                measured_fingers_held.tolist()
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "captured_gripper_joint_positions": captured_fingers.tolist(),
+            "open_gripper_joint_targets": open_fingers.tolist(),
+            "measured_gripper_joints_before_close": (
+                measured_fingers_before_close.tolist()
+            ),
+            "closed_gripper_joint_targets": closed_finger_target.tolist(),
+            "measured_gripper_joints_after_close": (
+                measured_fingers_after_close.tolist()
+            ),
+            "measured_gripper_joints_held": measured_fingers_held.tolist(),
+            "gripper_joint_position_unit": profile.gripper_joint_position_unit,
             "saved_review_frames": saved_frames,
         },
         "execution": {
@@ -2329,10 +2407,20 @@ try:
                 "target_orientation_world_wxyz": str(
                     output / "retention_target_orientation_world_wxyz.npy"
                 ),
-                "finger_positions_m": str(
-                    output / "retention_finger_positions_m.npy"
+                "gripper_joint_positions": str(
+                    output / "retention_gripper_joint_positions.npy"
                 ),
-                "finger_gap_m": str(output / "retention_finger_gap_m.npy"),
+                "gripper_joint_position_unit": profile.gripper_joint_position_unit,
+                "finger_positions_m": (
+                    str(output / "retention_finger_positions_m.npy")
+                    if profile.gripper_joint_position_unit == "metre"
+                    else None
+                ),
+                "finger_gap_m": (
+                    str(output / "retention_finger_gap_m.npy")
+                    if profile.gripper_joint_position_unit == "metre"
+                    else None
+                ),
                 "hand_position_world_m": str(
                     output / "retention_hand_position_world_m.npy"
                 ),
@@ -2358,11 +2446,31 @@ try:
             "peak_sample_index": peak_lift_index,
             "peak_time_s": float(diagnostic_time_s[peak_lift_index]),
             "peak_phase": str(diagnostic_phase_array[peak_lift_index]),
-            "finger_gap_at_lift_start_m": float(post_close_finger_gaps[0]),
-            "finger_gap_at_peak_lift_m": float(
+            "finger_gap_at_lift_start_m": (
+                float(post_close_finger_gaps[0])
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "finger_gap_at_peak_lift_m": (
+                float(post_close_finger_gaps[peak_lift_local_index])
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "finger_gap_at_final_hold_m": (
+                float(post_close_finger_gaps[-1])
+                if profile.gripper_joint_position_unit == "metre"
+                else None
+            ),
+            "gripper_joint_position_sum_at_lift_start": float(
+                post_close_finger_gaps[0]
+            ),
+            "gripper_joint_position_sum_at_peak_lift": float(
                 post_close_finger_gaps[peak_lift_local_index]
             ),
-            "finger_gap_at_final_hold_m": float(post_close_finger_gaps[-1]),
+            "gripper_joint_position_sum_at_final_hold": float(
+                post_close_finger_gaps[-1]
+            ),
+            "gripper_joint_position_unit": profile.gripper_joint_position_unit,
             "lift_lost_from_peak_to_final_m": lift_lost_from_peak_to_final_m,
         },
         "automatic_checks": {
@@ -2400,6 +2508,8 @@ try:
                 attachment_relative_pose_within_tolerance
             ),
         },
+        "robot_profile": profile.name,
+        "robot_profile_definition": profile.report(),
         "safety": {
             "simulation_only": True,
             "target_started_as_dynamic": True,

@@ -25,6 +25,8 @@ from typing import Any, Iterable
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
+from panda_handover.robot_profiles import get_robot_profile, robot_profile_names
+
 
 @dataclass(frozen=True)
 class PipelinePaths:
@@ -65,6 +67,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--scene-usd", type=Path, required=True)
+    parser.add_argument(
+        "--robot-profile", choices=robot_profile_names(), default="franka_panda"
+    )
+    parser.add_argument("--robot-prim")
     prompt_source = parser.add_mutually_exclusive_group(required=True)
     prompt_source.add_argument(
         "--prompt", help="Manual SAM3 whole-object prompt; bypasses the VLM"
@@ -110,7 +116,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         type=float,
         nargs=3,
         metavar=("X", "Y", "Z"),
-        help="Optional panda_hand transport goal in panda_link0 metres",
+        help="Optional tool-frame transport goal in robot-base metres",
     )
     parser.add_argument(
         "--handover-goal-quaternion-wxyz",
@@ -126,7 +132,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         metavar=("X", "Y", "Z"),
         help=(
             "Automatic affordance-aware mode: desired receive-part representative "
-            "point in panda_link0 metres"
+            "point in robot-base metres"
         ),
     )
     parser.add_argument(
@@ -168,7 +174,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--fingertip-friction-coefficient",
         type=float,
         help=(
-            "Simulation-only static/dynamic Panda fingertip friction override. "
+            "Simulation-only static/dynamic Franka fingertip friction override. "
             "The target and table materials are left unchanged."
         ),
     )
@@ -318,6 +324,16 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error(
             "do not combine fingertip friction and finger-drive diagnostics in "
             "one controlled run"
+        )
+    profile = get_robot_profile(args.robot_profile)
+    if profile.name != "franka_panda" and (
+        args.finger_drive_scale != 1.0
+        or args.fingertip_friction_coefficient is not None
+        or args.solver_position_iterations is not None
+    ):
+        parser.error(
+            "Franka drive/friction/solver diagnostics are not transferable to "
+            f"{profile.name}; use the profile's authored settings"
         )
     return args
 
@@ -515,6 +531,9 @@ def build_stages(
         "grasp_part" if use_grasp_part else "whole_object"
     )
     automatic_handover = args.handover_receiver_position_robot_base_m is not None
+    profile = get_robot_profile(args.robot_profile)
+    robot_config = profile.resolve_curobo_config(args.graspgenx_root)
+    robot_prim = args.robot_prim or profile.default_robot_prim
 
     capture_command = [
         str(isaac_python),
@@ -523,6 +542,10 @@ def build_stages(
         str(scene_usd),
         "--output",
         str(paths.capture_root),
+        "--robot-profile",
+        profile.name,
+        "--robot-prim",
+        robot_prim,
     ]
     if args.headless:
         capture_command.append("--headless")
@@ -577,6 +600,10 @@ def build_stages(
         str(paths.segmentation),
         "--output",
         str(paths.prepared_map),
+        "--robot-profile",
+        profile.name,
+        "--robot",
+        robot_config,
     ]
     infer_command = [
         str(graspgenx_python),
@@ -597,6 +624,8 @@ def build_stages(
         str(args.num_grasps),
         "--topk",
         str(args.topk),
+        "--robot-profile",
+        profile.name,
     ]
     filter_command = [
         str(graspgenx_python),
@@ -611,6 +640,8 @@ def build_stages(
         str(paths.filtered_candidates),
         "--collision-threshold",
         str(args.collision_threshold),
+        "--robot-profile",
+        profile.name,
     ]
     handover_rerank_command = None
     pregrasp_candidates = paths.filtered_candidates
@@ -628,6 +659,8 @@ def build_stages(
             str(paths.handover_candidates),
             "--receive-clearance",
             str(args.handover_receive_clearance),
+            "--robot-profile",
+            profile.name,
         ]
         pregrasp_candidates = paths.handover_candidates
     pregrasp_command = [
@@ -645,6 +678,10 @@ def build_stages(
         str(paths.pregrasp),
         "--max-candidates",
         str(args.max_pregrasp_candidates),
+        "--robot-profile",
+        profile.name,
+        "--robot",
+        robot_config,
     ]
     plan_trials_command = [
         str(graspgenx_python),
@@ -659,6 +696,10 @@ def build_stages(
         str(paths.plan_trials),
         "--max-physical-trials",
         str(args.max_physical_trials),
+        "--robot-profile",
+        profile.name,
+        "--robot",
+        robot_config,
     ]
     if args.allow_reviewed_support_contact_preflight:
         plan_trials_command.append("--allow-reviewed-support-contact-preflight")
@@ -702,8 +743,12 @@ def build_stages(
         str(paths.replay_trials),
         "--max-physical-trials",
         str(args.max_physical_trials),
+        "--robot-profile",
+        profile.name,
+        "--robot-prim",
+        robot_prim,
         "--finger-drive-preset",
-        "isaaclab-franka",
+        profile.replay_drive_preset,
         "--finger-drive-scale",
         str(args.finger_drive_scale),
         "--grasp-retention-mode",
@@ -802,6 +847,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     graspgenx_root = args.graspgenx_root.expanduser().resolve()
     graspgenx_python = _resolve_graspgenx_python(args)
     isaac_python = Path(sys.executable).resolve()
+    profile = get_robot_profile(args.robot_profile)
+    robot_config = profile.resolve_curobo_config(graspgenx_root)
 
     if not scene_usd.is_file():
         raise FileNotFoundError(f"scene USD does not exist: {scene_usd}")
@@ -809,6 +856,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise FileNotFoundError(f"GraspGenX root does not exist: {graspgenx_root}")
     if not graspgenx_python.is_file():
         raise FileNotFoundError(f"GraspGenX Python does not exist: {graspgenx_python}")
+    if Path(robot_config).is_absolute() and not Path(robot_config).is_file():
+        raise FileNotFoundError(
+            f"prepared cuRobo profile does not exist: {robot_config}; run "
+            "scripts/prepare_ur10e_robot_profile.py in the GraspGenX environment"
+        )
     if paths.root.exists() and not paths.root.is_dir():
         raise NotADirectoryError(f"pipeline output is not a directory: {paths.root}")
     if paths.root.exists() and any(paths.root.iterdir()) and not args.resume:
@@ -816,6 +868,17 @@ def main(argv: Iterable[str] | None = None) -> int:
             f"pipeline output already contains files: {paths.root}; "
             "use a new --output or pass --resume"
         )
+    if args.resume and paths.manifest.is_file():
+        previous_manifest = _load_json(paths.manifest)
+        previous_profile = (
+            previous_manifest.get("robot_profile", "franka_panda")
+            if previous_manifest is not None
+            else None
+        )
+        if previous_profile != profile.name:
+            raise ValueError(
+                f"cannot resume {previous_profile!r} artifacts as {profile.name!r}"
+            )
     paths.root.mkdir(parents=True, exist_ok=True)
 
     stages = build_stages(
@@ -828,6 +891,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     manifest: dict[str, Any] = {
         "status": "running",
         "simulation_only": True,
+        "robot_profile": profile.name,
+        "robot_profile_definition": profile.report(
+            resolved_curobo_config=robot_config
+        ),
         "inputs": {
             "scene_usd": str(scene_usd),
             "prompt": args.prompt,
@@ -892,7 +959,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 if args.solver_position_iterations is not None
                 else None
             ),
-            "finger_drive_preset": "isaaclab-franka",
+            "finger_drive_preset": profile.replay_drive_preset,
             "finger_drive_diagnostic_scale": args.finger_drive_scale,
             "finger_drive_diagnostic_only": args.finger_drive_scale != 1.0,
             "finger_drive_hardware_force_calibrated": False,
@@ -974,7 +1041,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "--port",
                 str(args.port),
                 "--default_gripper",
-                "franka_panda",
+                profile.gripper_name,
             ]
             print("=== starting managed GraspGenX server ===", flush=True)
             print(_display_command(server_command), flush=True)

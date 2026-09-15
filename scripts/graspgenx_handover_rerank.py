@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    parser.add_argument("--robot-profile", default="franka_panda")
     return parser.parse_args()
 
 
@@ -52,12 +53,17 @@ def main() -> int:
 
     from panda_handover.grasp_candidates import pose_quality, transform_grasp_poses
     from panda_handover.handover import receive_clear_score_order
+    from panda_handover.robot_profiles import get_robot_profile
+
+    profile = get_robot_profile(args.robot_profile)
 
     source_report = json.loads(
         (args.candidates / "collision_filter_check.json").read_text(encoding="utf-8")
     )
     if source_report.get("status") != "success":
         raise ValueError("source candidates did not pass static collision filtering")
+    if source_report.get("robot_profile", "franka_panda") != profile.name:
+        raise ValueError("source candidates use a different robot profile")
     receive_report = json.loads(
         (args.receive_segmentation / "segmentation_check.json").read_text(
             encoding="utf-8"
@@ -96,7 +102,7 @@ def main() -> int:
         raise ValueError("receive-part point cloud is too small or non-finite")
 
     np.random.seed(args.random_seed)
-    gripper = resolve_gripper_info("franka_panda")
+    gripper = resolve_gripper_info(profile.gripper_name)
     surface_points, _ = trimesh.sample.sample_surface(
         gripper.collision_mesh, args.num_collision_samples
     )
@@ -123,8 +129,10 @@ def main() -> int:
     ordered_scores = scores[order]
     ordered_source_indices = source_indices[order].astype(np.int32, copy=False)
     ordered_tags = [branch_tags[int(index)] for index in order]
-    ordered_world, ordered_hands = transform_grasp_poses(
-        ordered_grasps, T_world_camera
+    ordered_world, ordered_tools = transform_grasp_poses(
+        ordered_grasps,
+        T_world_camera,
+        np.asarray(profile.grasp_to_tool_transform),
     )
 
     output = args.output
@@ -135,7 +143,10 @@ def main() -> int:
     np.save(output / "grasps_camera.npy", ordered_grasps)
     np.save(output / "scores.npy", ordered_scores)
     np.save(output / "grasps_world.npy", ordered_world)
-    np.save(output / "panda_hand_world.npy", ordered_hands)
+    np.save(output / "tool_world.npy", ordered_tools)
+    np.save(output / "T_grasp_tool.npy", np.asarray(profile.grasp_to_tool_transform))
+    if profile.name == "franka_panda":
+        np.save(output / "panda_hand_world.npy", ordered_tools)
     np.save(output / "receive_part_points_camera.npy", receive_points)
     (output / "branch_tags.json").write_text(
         json.dumps(ordered_tags, indent=2) + "\n", encoding="utf-8"
@@ -150,7 +161,9 @@ def main() -> int:
                 "and Quality of Robot-to-Human Object Handover"
             ),
             "checker": "NVIDIA GraspGenX official filter_colliding_grasps",
-            "gripper_geometry": "NVIDIA GraspGenX official franka_panda collision mesh",
+            "gripper_geometry": (
+                f"NVIDIA GraspGenX official {profile.gripper_name} collision mesh"
+            ),
         },
         "inputs": {
             "capture": str(args.capture),
@@ -158,6 +171,8 @@ def main() -> int:
             "static_filtered_candidates": str(args.candidates),
             "receive_part_point_count": int(len(receive_points)),
         },
+        "robot_profile": profile.name,
+        "tool_frame": profile.tool_frame,
         "policy": {
             "ordering": (
                 "hard gate on receive-part clearance, then original GraspGenX "
@@ -190,7 +205,7 @@ def main() -> int:
             ),
             "camera_pose_quality": pose_quality(ordered_grasps),
             "world_pose_quality": pose_quality(ordered_world),
-            "panda_hand_pose_quality": pose_quality(ordered_hands),
+            "tool_pose_quality": pose_quality(ordered_tools),
         },
         "next_gate": (
             "For each surviving grasp, generate affordance-aligned handover roll "

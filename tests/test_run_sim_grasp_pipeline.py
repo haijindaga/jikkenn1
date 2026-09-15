@@ -18,6 +18,51 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RunSimGraspPipelineTests(unittest.TestCase):
+    def test_ur10e_profile_is_forwarded_without_franka_controls(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "ur10e_scene.usda"),
+                "--robot-profile",
+                "ur10e_robotiq_2f_140",
+                "--prompt",
+                "hammer",
+                "--output",
+                str(PROJECT / "outputs" / "ur10e_e2e"),
+                "--graspgenx-root",
+                "/opt/GraspGenX",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        for stage in stages.values():
+            if "--robot-profile" in stage.command:
+                self.assertEqual(
+                    stage.command[stage.command.index("--robot-profile") + 1],
+                    "ur10e_robotiq_2f_140",
+                )
+        for stage_name in (
+            "curobo_map",
+            "curobo_pregrasp",
+            "curobo_grasp_lift_trials",
+        ):
+            command = stages[stage_name].command
+            robot = command[command.index("--robot") + 1]
+            self.assertTrue(robot.endswith("ur10e_robotiq_2f_140.jikkenn1.yml"))
+        capture = stages["capture_rgbd"].command
+        self.assertEqual(capture[capture.index("--robot-prim") + 1], "/World/UR10e")
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--finger-drive-preset") + 1], "authored-usd"
+        )
+        self.assertNotIn("--fingertip-friction-coefficient", replay)
+
     def test_builds_complete_ordered_pipeline_with_isolated_pythons(self) -> None:
         args = MODULE.parse_args(
             [

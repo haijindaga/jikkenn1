@@ -2,7 +2,7 @@
 
 Grasp generation itself stays in NVIDIA's official GraspGenX server.  This
 module only validates the saved Isaac/SAM3 arrays, preserves their camera
-frame, and converts returned poses into Isaac world and Panda tool frames.
+frame, and converts returned poses into Isaac world and robot tool frames.
 """
 
 from __future__ import annotations
@@ -87,21 +87,30 @@ def split_target_from_scene(
 
 
 def transform_grasp_poses(
-    grasps_camera: np.ndarray, T_world_camera: np.ndarray
+    grasps_camera: np.ndarray,
+    T_world_camera: np.ndarray,
+    grasp_to_tool_transform: np.ndarray = T_GRASP_PANDA_HAND,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Convert canonical GraspGenX poses to world and Panda tool poses."""
+    """Convert canonical GraspGenX poses to world and configured tool poses."""
     grasps = np.asarray(grasps_camera, dtype=np.float64)
     transform = np.asarray(T_world_camera, dtype=np.float64)
     if grasps.ndim != 3 or grasps.shape[1:] != (4, 4):
         raise ValueError(f"grasps_camera must have shape (N, 4, 4), got {grasps.shape}")
     if transform.shape != (4, 4):
         raise ValueError(f"T_world_camera must have shape (4, 4), got {transform.shape}")
-    if not np.all(np.isfinite(grasps)) or not np.all(np.isfinite(transform)):
-        raise ValueError("grasp poses and T_world_camera must be finite")
+    grasp_to_tool = np.asarray(grasp_to_tool_transform, dtype=np.float64)
+    if grasp_to_tool.shape != (4, 4):
+        raise ValueError("grasp_to_tool_transform must have shape (4, 4)")
+    if not (
+        np.all(np.isfinite(grasps))
+        and np.all(np.isfinite(transform))
+        and np.all(np.isfinite(grasp_to_tool))
+    ):
+        raise ValueError("grasp poses and transforms must be finite")
 
     grasps_world = np.einsum("ij,njk->nik", transform, grasps)
-    panda_hand_world = np.einsum("nij,jk->nik", grasps_world, T_GRASP_PANDA_HAND)
-    return grasps_world.astype(np.float32), panda_hand_world.astype(np.float32)
+    tool_world = np.einsum("nij,jk->nik", grasps_world, grasp_to_tool)
+    return grasps_world.astype(np.float32), tool_world.astype(np.float32)
 
 
 def pose_quality(poses: np.ndarray) -> dict[str, float | bool]:
@@ -155,6 +164,9 @@ def save_grasp_candidates(
     parameters: dict[str, Any],
     server_health: dict[str, Any],
     server_metadata: dict[str, Any],
+    robot_profile: str = "franka_panda",
+    tool_frame: str = "panda_hand",
+    grasp_to_tool_transform: np.ndarray = T_GRASP_PANDA_HAND,
 ) -> dict[str, Any]:
     """Save raw and transformed candidates plus an explicit safety report."""
     output = Path(output)
@@ -166,14 +178,17 @@ def save_grasp_candidates(
     if branch_tags and len(branch_tags) != grasps_camera.shape[0]:
         raise ValueError("branch_tags and grasps_camera have different lengths")
 
-    grasps_world, panda_hand_world = transform_grasp_poses(
-        grasps_camera, T_world_camera
+    grasps_world, tool_world = transform_grasp_poses(
+        grasps_camera, T_world_camera, grasp_to_tool_transform
     )
     np.save(output / "grasps_camera.npy", grasps_camera)
     np.save(output / "scores.npy", scores)
     np.save(output / "grasps_world.npy", grasps_world)
-    np.save(output / "panda_hand_world.npy", panda_hand_world)
-    np.save(output / "T_grasp_panda_hand.npy", T_GRASP_PANDA_HAND)
+    np.save(output / "tool_world.npy", tool_world)
+    np.save(output / "T_grasp_tool.npy", grasp_to_tool_transform)
+    if robot_profile == "franka_panda":
+        np.save(output / "panda_hand_world.npy", tool_world)
+        np.save(output / "T_grasp_panda_hand.npy", grasp_to_tool_transform)
     (output / "branch_tags.json").write_text(
         json.dumps(list(branch_tags), indent=2) + "\n", encoding="utf-8"
     )
@@ -183,7 +198,7 @@ def save_grasp_candidates(
         "reference": {
             "implementation": "NVIDIA GraspGenX official ZMQ infer_scene_pc",
             "url": "https://github.com/NVlabs/GraspGenX/tree/main/client-server",
-            "panda_frame_offset": "GraspGenX end2end/robots/franka_panda.yaml",
+            "tool_frame_offset": "selected robot profile",
         },
         "input": {
             "frame": "opencv_optical_x_right_y_down_z_forward",
@@ -191,6 +206,8 @@ def save_grasp_candidates(
             "valid_instance_points": int(input_point_count),
         },
         "parameters": _json_compatible(parameters),
+        "robot_profile": robot_profile,
+        "tool_frame": tool_frame,
         "server": {
             "health": _json_compatible(server_health),
             "metadata": _json_compatible(server_metadata),
@@ -201,12 +218,14 @@ def save_grasp_candidates(
             "score_max": float(scores.max()) if scores.size else None,
             "camera_pose_quality": pose_quality(grasps_camera),
             "world_pose_quality": pose_quality(grasps_world),
-            "panda_hand_pose_quality": pose_quality(panda_hand_world),
+            "tool_pose_quality": pose_quality(tool_world),
         },
         "frames": {
             "grasps_camera.npy": "T_camera_graspgenx_grasp",
             "grasps_world.npy": "T_world_graspgenx_grasp",
-            "panda_hand_world.npy": "T_world_panda_hand = T_world_graspgenx_grasp @ T_grasp_panda_hand",
+            "tool_world.npy": (
+                f"T_world_{tool_frame} = T_world_graspgenx_grasp @ T_grasp_tool"
+            ),
         },
         "safety": {
             "reachability_checked": False,
@@ -233,6 +252,9 @@ def save_collision_filter_results(
     collision_scene_camera: np.ndarray,
     scene_point_count_before_downsampling: int,
     parameters: dict[str, Any],
+    robot_profile: str = "franka_panda",
+    tool_frame: str = "panda_hand",
+    grasp_to_tool_transform: np.ndarray = T_GRASP_PANDA_HAND,
 ) -> dict[str, Any]:
     """Persist the official point-cloud collision filter's exact inputs/results."""
     output = Path(output)
@@ -256,8 +278,8 @@ def save_collision_filter_results(
     filtered_camera = grasps[keep]
     filtered_scores = scores[keep]
     filtered_tags = [tag for tag, accepted in zip(branch_tags, keep) if accepted]
-    filtered_world, filtered_panda_hand = transform_grasp_poses(
-        filtered_camera, T_world_camera
+    filtered_world, filtered_tool = transform_grasp_poses(
+        filtered_camera, T_world_camera, grasp_to_tool_transform
     )
     best_filtered_index = (
         int(np.argmax(filtered_scores)) if filtered_scores.size else None
@@ -274,7 +296,10 @@ def save_collision_filter_results(
     np.save(output / "grasps_camera.npy", filtered_camera)
     np.save(output / "scores.npy", filtered_scores)
     np.save(output / "grasps_world.npy", filtered_world)
-    np.save(output / "panda_hand_world.npy", filtered_panda_hand)
+    np.save(output / "tool_world.npy", filtered_tool)
+    np.save(output / "T_grasp_tool.npy", grasp_to_tool_transform)
+    if robot_profile == "franka_panda":
+        np.save(output / "panda_hand_world.npy", filtered_tool)
     (output / "branch_tags.json").write_text(
         json.dumps(filtered_tags, indent=2) + "\n", encoding="utf-8"
     )
@@ -287,6 +312,8 @@ def save_collision_filter_results(
             "url": "https://github.com/NVlabs/GraspGenX/blob/main/scripts/demo_scene_pc.py",
         },
         "frame": "opencv_optical_x_right_y_down_z_forward",
+        "robot_profile": robot_profile,
+        "tool_frame": tool_frame,
         "parameters": _json_compatible(parameters),
         "scene": {
             "target_pixels_removed": True,
@@ -305,7 +332,7 @@ def save_collision_filter_results(
             ),
             "camera_pose_quality": pose_quality(filtered_camera),
             "world_pose_quality": pose_quality(filtered_world),
-            "panda_hand_pose_quality": pose_quality(filtered_panda_hand),
+            "tool_pose_quality": pose_quality(filtered_tool),
         },
         "safety": {
             "static_gripper_pose_vs_observed_scene_checked": True,

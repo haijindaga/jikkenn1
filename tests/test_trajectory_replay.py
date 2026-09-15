@@ -256,9 +256,9 @@ class TrajectoryReplayTests(unittest.TestCase):
             / "isaac_replay_grasp_lift.py"
         ).read_text(encoding="utf-8")
         self.assertIn("DynamicCuboid(", script)
-        self.assertIn('finger_names = ("panda_finger_joint1", "panda_finger_joint2")', script)
+        self.assertIn("finger_names = profile.gripper_joint_names", script)
         self.assertIn("PANDA_OPEN_FINGER_JOINT_M = 0.04", script)
-        self.assertIn("open_fingers = np.full(2, args.open_finger_position_m", script)
+        self.assertIn("open_fingers = np.asarray(profile.gripper_open", script)
         self.assertIn("args.closed_finger_position_m", script)
         self.assertIn('execute_phase("transport", closed_finger_target)', script)
         self.assertIn('final_phase = "transport" if transport_executed else "lift"', script)
@@ -344,12 +344,15 @@ class TrajectoryReplayTests(unittest.TestCase):
             / "isaac_replay_grasp_lift.py"
         ).read_text(encoding="utf-8")
         self.assertIn("target.get_masses()", script)
-        self.assertIn('UsdPhysics.DriveAPI.Get(joint_prim, "linear")', script)
+        self.assertIn('drive_axis = "linear"', script)
+        self.assertIn("UsdPhysics.DriveAPI.Get(joint_prim, drive_axis)", script)
         self.assertIn("ComputeBoundMaterial(", script)
         self.assertIn('ComputeBoundMaterial(\n                    "physics"', script)
         self.assertIn('record_physics_sample("close")', script)
         self.assertIn('record_physics_sample("hold")', script)
         self.assertIn('output / "retention_finger_gap_m.npy"', script)
+        self.assertIn('output / "retention_gripper_joint_positions.npy"', script)
+        self.assertIn('profile.gripper_joint_position_unit == "metre"', script)
         self.assertIn('"peak_object_lift_m": peak_object_lift_m', script)
         self.assertIn('"--finger-drive-max-force-n"', script)
         self.assertIn('"--finger-drive-scale"', script)
@@ -357,7 +360,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"--fingertip-friction-coefficient"', script)
         self.assertIn("Usd.TraverseInstanceProxies()", script)
         self.assertIn(
-            'Sdf.Path(args.panda_prim).AppendChild(\n                finger_link_name',
+            'Sdf.Path(args.robot_prim).AppendChild(\n                finger_link_name',
             script,
         )
         self.assertIn(

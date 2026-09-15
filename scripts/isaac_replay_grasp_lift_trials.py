@@ -17,11 +17,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plan-trials", type=Path, required=True)
     parser.add_argument("--scene-usd", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot-prim")
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
         "--finger-drive-preset",
         choices=("authored-usd", "isaaclab-franka"),
-        default="isaaclab-franka",
     )
     parser.add_argument("--finger-drive-scale", type=float, default=1.0)
     parser.add_argument(
@@ -54,7 +55,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-physical-trials must be positive")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
         parser.error("--finger-drive-scale must be positive and finite")
-    if args.finger_drive_scale != 1.0 and args.finger_drive_preset != "isaaclab-franka":
+    if (
+        args.finger_drive_scale != 1.0
+        and args.finger_drive_preset not in (None, "isaaclab-franka")
+    ):
         parser.error("scaled diagnostics require --finger-drive-preset isaaclab-franka")
     if args.fingertip_friction_coefficient is not None and (
         not math.isfinite(args.fingertip_friction_coefficient)
@@ -105,8 +109,31 @@ def write_summary(path: Path, summary: dict) -> None:
 
 def main() -> int:
     args = parse_args()
+    project_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(project_root / "src"))
+    from panda_handover.robot_profiles import get_robot_profile
+
+    profile = get_robot_profile(args.robot_profile)
+    if args.finger_drive_preset is None:
+        args.finger_drive_preset = profile.replay_drive_preset
+    if args.finger_drive_preset != profile.replay_drive_preset:
+        raise ValueError(
+            f"{profile.name} requires --finger-drive-preset "
+            f"{profile.replay_drive_preset}"
+        )
+    if profile.name != "franka_panda" and (
+        args.finger_drive_scale != 1.0
+        or args.fingertip_friction_coefficient is not None
+        or args.solver_position_iterations is not None
+    ):
+        raise ValueError(
+            "Franka drive/friction/solver diagnostics are not valid for "
+            f"{profile.name}"
+        )
     plan_manifest_path = args.plan_trials / "grasp_lift_trial_plans.json"
     plan_manifest = json.loads(plan_manifest_path.read_text(encoding="utf-8"))
+    if plan_manifest.get("robot_profile", "franka_panda") != args.robot_profile:
+        raise ValueError("planning manifest uses a different robot profile")
     plan_attempts = [
         attempt
         for attempt in plan_manifest.get("attempts", [])
@@ -129,6 +156,7 @@ def main() -> int:
             "plan_trials": str(args.plan_trials),
             "scene_usd": str(args.scene_usd),
         },
+        "robot_profile": args.robot_profile,
         "policy": {
             "maximum_physical_trials": args.max_physical_trials,
             "stop_at_first_success": True,
@@ -190,6 +218,8 @@ def main() -> int:
             str(args.scene_usd),
             "--output",
             str(trial_output),
+            "--robot-profile",
+            args.robot_profile,
             "--finger-drive-preset",
             args.finger_drive_preset,
             "--finger-drive-scale",
@@ -198,6 +228,8 @@ def main() -> int:
             args.grasp_retention_mode,
             "--simulation-only",
         ]
+        if args.robot_prim is not None:
+            command.extend(["--robot-prim", args.robot_prim])
         if args.fingertip_friction_coefficient is not None:
             command.extend(
                 [

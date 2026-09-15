@@ -53,3 +53,23 @@ class RobotStateCaptureTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unique"):
             state.validate()
+
+    def test_save_records_observed_tool_pose_in_robot_base(self):
+        state = make_robot_state()
+        T_world_tool = np.eye(4)
+        T_world_tool[:3, 3] = [0.4, 0.2, 0.8]
+        state = RobotStateCapture(
+            joint_names=state.joint_names,
+            joint_positions=state.joint_positions,
+            T_world_robot_base=state.T_world_robot_base,
+            tool_frame="panda_hand",
+            T_world_tool=T_world_tool,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory)
+            report = json.loads(state.save(output, np.eye(4)).read_text())
+            np.testing.assert_allclose(
+                np.load(output / "T_robot_base_tool.npy"),
+                np.linalg.inv(state.T_world_robot_base) @ T_world_tool,
+            )
+            self.assertEqual(report["tool_frame"], "panda_hand")

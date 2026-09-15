@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-grasps", type=int, default=200)
     parser.add_argument("--grasp-threshold", type=float, default=-1.0)
     parser.add_argument("--topk", type=int, default=100)
+    parser.add_argument("--robot-profile", default="franka_panda")
     return parser.parse_args()
 
 
@@ -55,6 +56,9 @@ def main() -> int:
         prepare_scene_point_cloud,
         save_grasp_candidates,
     )
+    from panda_handover.robot_profiles import get_robot_profile
+
+    profile = get_robot_profile(args.robot_profile)
 
     points_camera = np.load(args.capture / "points_camera.npy")
     T_world_camera = np.load(args.capture / "T_world_camera.npy")
@@ -68,7 +72,7 @@ def main() -> int:
             f"--min-object-points={args.min_object_points}"
         )
 
-    sweep_params = SweepVolumeParams.from_gripper_config("franka_panda")
+    sweep_params = SweepVolumeParams.from_gripper_config(profile.gripper_name)
     started = time.monotonic()
     with GraspGenXClient(
         host=args.host, port=args.port, timeout_ms=args.timeout_ms
@@ -103,7 +107,7 @@ def main() -> int:
         "segmentation_role": args.segmentation_role,
         "fallback_to_whole_object": False,
         "planner": args.planner,
-        "gripper": "franka_panda",
+        "gripper": profile.gripper_name,
         "min_object_points": args.min_object_points,
         "num_grasps": args.num_grasps,
         "grasp_threshold": args.grasp_threshold,
@@ -121,6 +125,9 @@ def main() -> int:
         parameters=parameters,
         server_health=health,
         server_metadata=metadata,
+        robot_profile=profile.name,
+        tool_frame=profile.tool_frame,
+        grasp_to_tool_transform=np.asarray(profile.grasp_to_tool_transform),
     )
     print(f"valid instance points: {instance_count}", flush=True)
     print(f"GraspGenX candidates: {report['candidates']['count']}", flush=True)
