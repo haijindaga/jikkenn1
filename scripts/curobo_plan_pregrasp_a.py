@@ -380,7 +380,11 @@ def main() -> int:
     }
     if observed_tool_path.is_file():
         observed_tool = np.load(observed_tool_path, allow_pickle=False)
-        ee_pose = start_kinematics.ee_pose
+        # MotionPlanner.compute_kinematics returns a KinematicsState whose
+        # frame-indexed poses live in ToolPose.  Query the configured tool
+        # frame explicitly; KinematicsState.ee_pose belongs to cuRobo's older
+        # CudaRobotModelState API and is not present in this planner API.
+        ee_pose = start_kinematics.tool_poses.get_link_pose(profile.tool_frame)
         curobo_tool = matrix_from_pose(
             _cpu_numpy(ee_pose.position).reshape(-1, 3)[0],
             _cpu_numpy(ee_pose.quaternion).reshape(-1, 4)[0],

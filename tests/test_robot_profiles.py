@@ -56,7 +56,9 @@ class RobotProfileTests(unittest.TestCase):
             Path(__file__).parents[1] / "scripts" / "curobo_plan_pregrasp_a.py"
         ).read_text(encoding="utf-8")
         self.assertIn('args.capture / "T_robot_base_tool.npy"', script)
-        self.assertIn("start_kinematics.ee_pose", script)
+        self.assertIn(
+            "start_kinematics.tool_poses.get_link_pose(profile.tool_frame)", script
+        )
         self.assertIn('"robot_model_alignment": model_alignment', script)
         self.assertIn("Isaac and cuRobo tool frames disagree", script)
 
