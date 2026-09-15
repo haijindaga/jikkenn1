@@ -177,6 +177,7 @@ def main() -> int:
         load_backend_a_esdf,
         load_singleview_observed_pointcloud,
         prepare_pregrasp_goalset,
+        rotation_offset_diagnostics,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
         validate_voxel_fix_report,
@@ -393,6 +394,7 @@ def main() -> int:
             np.linalg.norm(observed_tool[:3, 3] - curobo_tool[:3, 3])
         )
         rotation_delta = observed_tool[:3, :3].T @ curobo_tool[:3, :3]
+        rotation_diagnostics = rotation_offset_diagnostics(rotation_delta)
         rotation_error_rad = float(
             np.arccos(np.clip((np.trace(rotation_delta) - 1.0) / 2.0, -1.0, 1.0))
         )
@@ -405,6 +407,9 @@ def main() -> int:
                 "checked": True,
                 "translation_error_m": translation_error_m,
                 "rotation_error_rad": rotation_error_rad,
+                "observed_transform_matrix": observed_tool.tolist(),
+                "curobo_transform_matrix": curobo_tool.tolist(),
+                "rotation_delta_observed_to_curobo": rotation_diagnostics,
                 "passed": alignment_passed,
             }
         )

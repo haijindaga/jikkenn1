@@ -510,3 +510,41 @@ def rotation_matrix_to_quaternion_wxyz(rotations: np.ndarray) -> np.ndarray:
             quaternion *= -1.0
         output[index] = quaternion
     return output.reshape(*values.shape[:-2], 4).astype(np.float32)
+
+
+def rotation_offset_diagnostics(rotation: np.ndarray) -> dict[str, object]:
+    """Describe a frame rotation without silently choosing a correction."""
+    matrix = np.asarray(rotation, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("rotation must have shape (3,3)")
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = matrix
+    _require_rigid_transform(transform, label="rotation_offset")
+
+    quaternion = rotation_matrix_to_quaternion_wxyz(matrix).astype(np.float64)
+    half_sine = float(np.linalg.norm(quaternion[1:]))
+    angle = float(2.0 * np.arctan2(half_sine, abs(float(quaternion[0]))))
+    axis = (
+        (quaternion[1:] / half_sine).tolist()
+        if half_sine > 1e-12
+        else [1.0, 0.0, 0.0]
+    )
+    principal_half_turns = {
+        "x": np.diag([1.0, -1.0, -1.0]),
+        "y": np.diag([-1.0, 1.0, -1.0]),
+        "z": np.diag([-1.0, -1.0, 1.0]),
+    }
+    residuals = {
+        name: float(np.linalg.norm(matrix - candidate, ord="fro"))
+        for name, candidate in principal_half_turns.items()
+    }
+    nearest_axis = min(residuals, key=residuals.get)
+    return {
+        "matrix": matrix.tolist(),
+        "quaternion_wxyz": quaternion.tolist(),
+        "axis": axis,
+        "angle_rad": angle,
+        "principal_half_turn_frobenius_residuals": residuals,
+        "nearest_principal_half_turn_axis": nearest_axis,
+        "nearest_principal_half_turn_residual": residuals[nearest_axis],
+    }
