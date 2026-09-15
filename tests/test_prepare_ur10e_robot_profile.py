@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -13,6 +14,42 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PrepareUr10eRobotProfileTests(unittest.TestCase):
+    def test_reviewed_mount_matches_isaac_assembler_orientation(self) -> None:
+        self.assertEqual(MODULE.REVIEWED_MOUNT_RPY[:2], (0.0, 0.0))
+        self.assertAlmostEqual(MODULE.REVIEWED_MOUNT_RPY[2], 1.5707963267948966)
+        self.assertEqual(MODULE.REVIEWED_MOUNT_XYZ, (0.0, 0.0, 0.0))
+
+    def test_generated_urdf_mount_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "robot.urdf"
+            path.write_text(
+                """<robot name="test">
+<link name="tool0"/><link name="robotiq_arg2f_base_link"/>
+<joint name="mount" type="fixed">
+  <parent link="tool0"/><child link="robotiq_arg2f_base_link"/>
+  <origin rpy="0 0 1.5707963267948966" xyz="0 0 0"/>
+</joint></robot>""",
+                encoding="utf-8",
+            )
+            report = MODULE.verify_reviewed_tool_mount(path)
+            self.assertTrue(report["passed"])
+            self.assertLessEqual(report["maximum_error"], report["tolerance"])
+
+    def test_stale_first_guess_mount_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "robot.urdf"
+            path.write_text(
+                """<robot name="test">
+<link name="tool0"/><link name="robotiq_arg2f_base_link"/>
+<joint name="mount" type="fixed">
+  <parent link="tool0"/><child link="robotiq_arg2f_base_link"/>
+  <origin rpy="-1.5707963267948966 0 -1.5707963267948966" xyz="0 0 0"/>
+</joint></robot>""",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Isaac-compatible"):
+                MODULE.verify_reviewed_tool_mount(path)
+
     def test_adapter_preserves_official_fields_and_adds_attached_object_contract(self) -> None:
         links = [
             "shoulder_link",

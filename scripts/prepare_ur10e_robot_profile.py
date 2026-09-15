@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 
 ARM_LINKS = {
@@ -29,6 +31,13 @@ ARM_LINKS = {
 TOOL_FRAME = "robotiq_arg2f_base_link"
 CONTACT_LINKS = ("left_inner_finger_pad", "right_inner_finger_pad")
 SOURCE_STEM = "ur10e_robotiq_2f_140"
+# Isaac Sim 5.1's official Robot Assembler recipe rotates the attached
+# Robotiq 2F-140 by Z +90 degrees.  The GraspGenX builder default is explicitly
+# documented as a first guess and produced a measured 180-degree frame error
+# against the assembled Isaac asset.  Composing that measured offset with the
+# builder default gives this exact URDF RPY (Rz @ Ry @ Rx convention).
+REVIEWED_MOUNT_RPY = (0.0, 0.0, math.pi / 2.0)
+REVIEWED_MOUNT_XYZ = (0.0, 0.0, 0.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +56,56 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_tool_mount(urdf_path: Path) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Read the unique fixed tool0-to-Robotiq mount from a generated URDF."""
+    root = ET.parse(urdf_path).getroot()
+    matches = []
+    for joint in root.findall("joint"):
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if (
+            joint.get("type") == "fixed"
+            and parent is not None
+            and parent.get("link") == "tool0"
+            and child is not None
+            and child.get("link") == TOOL_FRAME
+        ):
+            matches.append(joint)
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected one fixed tool0-to-{TOOL_FRAME} joint, found {len(matches)}"
+        )
+    origin = matches[0].find("origin")
+    if origin is None:
+        raise ValueError("reviewed tool mount joint has no origin")
+    rpy = tuple(float(value) for value in origin.get("rpy", "").split())
+    xyz = tuple(float(value) for value in origin.get("xyz", "").split())
+    if len(rpy) != 3 or len(xyz) != 3:
+        raise ValueError(f"invalid tool mount origin: rpy={rpy}, xyz={xyz}")
+    return rpy, xyz
+
+
+def verify_reviewed_tool_mount(urdf_path: Path) -> dict[str, object]:
+    rpy, xyz = read_tool_mount(urdf_path)
+    tolerance = 1e-8
+    rpy_error = max(abs(a - b) for a, b in zip(rpy, REVIEWED_MOUNT_RPY))
+    xyz_error = max(abs(a - b) for a, b in zip(xyz, REVIEWED_MOUNT_XYZ))
+    if rpy_error > tolerance or xyz_error > tolerance:
+        raise ValueError(
+            "generated URDF does not contain the reviewed Isaac-compatible "
+            f"Robotiq mount: rpy={rpy}, xyz={xyz}"
+        )
+    return {
+        "parent_link": "tool0",
+        "child_link": TOOL_FRAME,
+        "rpy_rad": list(rpy),
+        "xyz_m": list(xyz),
+        "maximum_error": max(rpy_error, xyz_error),
+        "tolerance": tolerance,
+        "passed": True,
+    }
 
 
 def adapt_config(source: dict) -> dict:
@@ -109,6 +168,7 @@ def main() -> int:
     root = args.graspgenx_root.expanduser().resolve()
     builder = root / "end2end" / "build_ur10e_gripper.py"
     assets = root / "end2end" / "curobo_assets"
+    urdf = assets / f"{SOURCE_STEM}.urdf"
     source = assets / f"{SOURCE_STEM}.yml"
     output = assets / f"{SOURCE_STEM}.jikkenn1.yml"
     report_path = assets / f"{SOURCE_STEM}.jikkenn1.json"
@@ -120,10 +180,22 @@ def main() -> int:
         )
     if not args.skip_official_build:
         subprocess.run(
-            [sys.executable, str(builder), "--gripper", "robotiq_2f_140"],
+            [
+                sys.executable,
+                str(builder),
+                "--gripper",
+                "robotiq_2f_140",
+                "--mount_rpy",
+                *(f"{value:.17g}" for value in REVIEWED_MOUNT_RPY),
+                "--mount_xyz",
+                *(f"{value:.17g}" for value in REVIEWED_MOUNT_XYZ),
+            ],
             cwd=root,
             check=True,
         )
+    if not urdf.is_file():
+        raise FileNotFoundError(f"official builder URDF does not exist: {urdf}")
+    mount_check = verify_reviewed_tool_mount(urdf)
     if not source.is_file():
         raise FileNotFoundError(f"official builder output does not exist: {source}")
 
@@ -143,8 +215,13 @@ def main() -> int:
         "reference": {
             "builder": str(builder),
             "builder_repository": "https://github.com/NVlabs/GraspGenX",
+            "isaac_mount_reference": (
+                "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/"
+                "robot_setup_tutorials/tutorial_import_assemble_manipulator.html"
+            ),
             "curobo_contract": "pinned cuRobo franka.yml attached-object fields",
         },
+        "generated_urdf": {"path": str(urdf), "sha256": _sha256(urdf)},
         "source": {"path": str(source), "sha256": _sha256(source)},
         "output": {"path": str(output), "sha256": _sha256(output)},
         "adaptations": {
@@ -152,7 +229,9 @@ def main() -> int:
             "contact_links": list(CONTACT_LINKS),
             "attached_object_spheres": 4,
             "attached_object_parent": TOOL_FRAME,
-            "builder_geometry_or_mount_modified": False,
+            "builder_geometry_modified": False,
+            "builder_default_mount_overridden": True,
+            "reviewed_mount": mount_check,
         },
     }
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

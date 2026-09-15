@@ -26,9 +26,13 @@ Isaac Lab's `UR10e_ROBOTIQ_GRIPPER_CFG`:
 This is an observation pose, not a replacement for cuRobo's retract/seed
 configuration. The captured joint state remains the trajectory start state.
 
-The local adapter adds only the attached-object collision proxy contract used
-by this project's handover planner. It does not edit the official meshes,
-mount, joint limits, or Isaac drive gains.
+The local adapter adds the attached-object collision proxy contract used by
+this project's handover planner. It does not edit the official meshes, joint
+limits, or Isaac drive gains. It explicitly supplies the Isaac-compatible
+Robotiq mount RPY `[0, 0, pi/2]` to the GraspGenX builder because that
+builder documents its default mount as a first guess. The value matches Isaac
+Sim 5.1's official Robot Assembler instruction to rotate the gripper Z +90
+degrees and is verified in the generated URDF before planning.
 
 UR10 (non-e) is intentionally not aliased to UR10e. It needs a separate
 profile and matching official robot model because its kinematics and assets
@@ -45,7 +49,8 @@ cd /home/suzutaro/GraspGenX
 
 uv run python \
   /home/suzutaro/projects/jikkenn1/scripts/prepare_ur10e_robot_profile.py \
-  --graspgenx-root /home/suzutaro/GraspGenX
+  --graspgenx-root /home/suzutaro/GraspGenX \
+  --overwrite
 ```
 
 Expected files:
