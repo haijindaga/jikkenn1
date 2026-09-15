@@ -110,6 +110,7 @@ try:
     from isaacsim.core.prims import SingleArticulation
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from isaacsim.core.utils.prims import create_prim
+    from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
     from isaacsim.storage.native import get_assets_root_path
@@ -204,6 +205,25 @@ try:
         raise RuntimeError(
             f"official {profile.name} asset is missing profiled joints: {missing_dofs}"
         )
+    observation_pose = None
+    if profile.observation_arm_joint_positions is not None:
+        arm_indices = np.asarray(
+            [dof_names.index(name) for name in profile.arm_joint_names], dtype=np.int64
+        )
+        observation_pose = np.asarray(
+            profile.observation_arm_joint_positions, dtype=np.float64
+        )
+        robot.set_joint_positions(observation_pose, joint_indices=arm_indices)
+        robot.set_joint_velocities(
+            np.zeros_like(observation_pose), joint_indices=arm_indices
+        )
+        robot.apply_action(
+            ArticulationAction(
+                joint_positions=observation_pose,
+                joint_indices=arm_indices,
+            )
+        )
+        simulation_app.update()
     camera.initialize()
     camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
     camera.set_clipping_range(0.05, 3.0)
@@ -385,6 +405,17 @@ try:
             "gripper_variant_set": robot_variant,
             "gripper_variant": profile.isaac_gripper_variant,
             "dof_names": list(dof_names),
+            "observation_pose": {
+                "source": (
+                    "Isaac Lab UR10e_ROBOTIQ_GRIPPER_CFG initial joint_pos"
+                    if observation_pose is not None
+                    else "official authored USD default"
+                ),
+                "arm_joint_names": list(profile.arm_joint_names),
+                "arm_joint_positions_rad": (
+                    observation_pose.tolist() if observation_pose is not None else None
+                ),
+            },
         },
         "target_authoring": target_authoring,
         "authoring_contract": {

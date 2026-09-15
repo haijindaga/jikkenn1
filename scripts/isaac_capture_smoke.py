@@ -105,6 +105,7 @@ try:
     from isaacsim.core.api.objects import FixedCuboid
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from isaacsim.core.prims import SingleArticulation, XFormPrim
+    from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
     from isaacsim.core.experimental.utils import stage as stage_utils
@@ -264,6 +265,30 @@ try:
 
     world.reset()
     camera.initialize()
+    dof_names = tuple(str(name) for name in panda.dof_names)
+    required_dofs = set(profile.arm_joint_names + profile.gripper_joint_names)
+    missing_dofs = sorted(required_dofs - set(dof_names))
+    if missing_dofs:
+        raise RuntimeError(
+            f"official {profile.name} asset is missing profiled joints: {missing_dofs}"
+        )
+    if profile.observation_arm_joint_positions is not None:
+        arm_indices = np.asarray(
+            [dof_names.index(name) for name in profile.arm_joint_names], dtype=np.int64
+        )
+        observation_pose = np.asarray(
+            profile.observation_arm_joint_positions, dtype=np.float64
+        )
+        panda.set_joint_positions(observation_pose, joint_indices=arm_indices)
+        panda.set_joint_velocities(
+            np.zeros_like(observation_pose), joint_indices=arm_indices
+        )
+        panda.apply_action(
+            ArticulationAction(
+                joint_positions=observation_pose,
+                joint_indices=arm_indices,
+            )
+        )
     if scene_usd is None:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
         camera.set_clipping_range(0.05, 3.0)

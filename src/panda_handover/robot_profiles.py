@@ -29,6 +29,7 @@ class RobotProfile:
     gripper_open: tuple[float, ...]
     gripper_closed: tuple[float, ...]
     gripper_joint_position_unit: str
+    observation_arm_joint_positions: tuple[float, ...] | None
     hand_rigid_body_link: str
     contact_link_names: tuple[str, ...]
     grasp_to_tool_transform: tuple[tuple[float, float, float, float], ...]
@@ -54,6 +55,12 @@ class RobotProfile:
             self.gripper_closed
         ) != len(self.gripper_joint_names):
             raise ValueError("gripper positions must match gripper_joint_names")
+        if self.observation_arm_joint_positions is not None and len(
+            self.observation_arm_joint_positions
+        ) != len(self.arm_joint_names):
+            raise ValueError(
+                "observation_arm_joint_positions must match arm_joint_names"
+            )
         if self.gripper_joint_position_unit not in {"metre", "radian"}:
             raise ValueError("unsupported gripper_joint_position_unit")
         if len(self.contact_link_names) != 2:
@@ -84,6 +91,11 @@ class RobotProfile:
             "gripper_open": list(self.gripper_open),
             "gripper_closed": list(self.gripper_closed),
             "gripper_joint_position_unit": self.gripper_joint_position_unit,
+            "observation_arm_joint_positions": (
+                list(self.observation_arm_joint_positions)
+                if self.observation_arm_joint_positions is not None
+                else None
+            ),
             "hand_rigid_body_link": self.hand_rigid_body_link,
             "contact_link_names": list(self.contact_link_names),
             "replay_drive_preset": self.replay_drive_preset,
@@ -105,6 +117,7 @@ FRANKA_PANDA = RobotProfile(
     gripper_open=(0.04, 0.04),
     gripper_closed=(0.0, 0.0),
     gripper_joint_position_unit="metre",
+    observation_arm_joint_positions=None,
     hand_rigid_body_link="panda_hand",
     contact_link_names=("panda_leftfinger", "panda_rightfinger"),
     grasp_to_tool_transform=(
@@ -148,6 +161,17 @@ UR10E_ROBOTIQ_2F_140 = RobotProfile(
     gripper_open=(0.0,),
     gripper_closed=(0.7,),
     gripper_joint_position_unit="radian",
+    # Isaac Lab's official UR10e configuration uses this initial arm pose.
+    # With this project's table on robot-base +X, shoulder_pan=pi parks the
+    # arm away from the RGB-D observation region.
+    observation_arm_joint_positions=(
+        3.141592653589793,
+        -1.5707963267948966,
+        1.5707963267948966,
+        -1.5707963267948966,
+        -1.5707963267948966,
+        0.0,
+    ),
     hand_rigid_body_link="robotiq_arg2f_base_link",
     contact_link_names=("left_inner_finger_pad", "right_inner_finger_pad"),
     grasp_to_tool_transform=(

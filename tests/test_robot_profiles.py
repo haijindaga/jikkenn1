@@ -32,12 +32,24 @@ class RobotProfileTests(unittest.TestCase):
         self.assertEqual(resolved_path.parent.parent.name, "end2end")
         self.assertEqual(profile.isaac_gripper_variant, "robotiq_2f_140")
         self.assertEqual(profile.gripper_joint_position_unit, "radian")
+        self.assertEqual(
+            profile.observation_arm_joint_positions,
+            (
+                3.141592653589793,
+                -1.5707963267948966,
+                1.5707963267948966,
+                -1.5707963267948966,
+                -1.5707963267948966,
+                0.0,
+            ),
+        )
 
 
     def test_franka_keeps_bundled_curobo_config_name(self) -> None:
         profile = get_robot_profile("franka_panda")
         self.assertEqual(profile.resolve_curobo_config(Path("/unused")), "franka.yml")
         self.assertEqual(profile.gripper_joint_position_unit, "metre")
+        self.assertIsNone(profile.observation_arm_joint_positions)
 
     def test_pregrasp_checks_isaac_and_curobo_tool_frame_alignment(self) -> None:
         script = (

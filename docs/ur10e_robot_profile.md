@@ -16,6 +16,16 @@ This profile reuses:
 - cuRobo's standard IK, trajectory optimization, robot segmentation, and
   collision checking.
 
+For RGB-D capture, the arm is parked at the initial joint pose published by
+Isaac Lab's `UR10e_ROBOTIQ_GRIPPER_CFG`:
+
+```text
+[pi, -pi/2, pi/2, -pi/2, -pi/2, 0]
+```
+
+This is an observation pose, not a replacement for cuRobo's retract/seed
+configuration. The captured joint state remains the trajectory start state.
+
 The local adapter adds only the attached-object collision proxy contract used
 by this project's handover planner. It does not edit the official meshes,
 mount, joint limits, or Isaac drive gains.
