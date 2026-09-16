@@ -93,3 +93,10 @@ The local Windows environment cannot execute Isaac Sim. Pure-Python tests cover
 control contracts and CLI defaults; additional real-USD composition tests run
 when `pxr` is available and otherwise skip. Runtime and grasp compatibility remain
 unverified until the Linux test is performed.
+
+Metadata enumeration uses the root layer's `pseudoRoot.ListInfoKeys()` /
+`GetInfo()` and copies values using `SetInfo()`, excluding composition/child
+fields. `Usd.Stage.GetAllMetadata()` is not an available API. Regression tests
+exercise a stage without that method, as well as real-USD variant composition,
+metadata preservation and relative object references. A separate Windows
+`usd-core` installation validates USD composition only, not Isaac Sim/PhysX.

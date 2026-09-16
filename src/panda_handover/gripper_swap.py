@@ -9,6 +9,18 @@ GRIPPER_VARIANT = "Robotiq_2F_85"
 ARM_JOINTS = tuple(f"panda_joint{i}" for i in range(1, 8))
 
 
+def authored_stage_metadata(stage):
+    """Read authored root-layer metadata using SdfSpec's supported API.
+
+    Usd.Stage does not expose GetAllMetadata. Pseudo-root structural fields
+    describe layer contents/composition and must not be copied as metadata.
+    """
+    root = stage.GetRootLayer().pseudoRoot
+    excluded = {"primChildren", "propertyChildren", "subLayers", "subLayerOffsets"}
+    return {str(key): root.GetInfo(key) for key in root.ListInfoKeys()
+            if str(key) not in excluded}
+
+
 def create_variant_scene(source_stage, scene_path):
     """Author only stage metadata and a variant opinion over the original scene.
 
@@ -30,10 +42,8 @@ def create_variant_scene(source_stage, scene_path):
     layer.subLayerPaths = [source_stage.GetRootLayer().realPath]
     stage = Usd.Stage.Open(layer)
     # Stage metadata is read from the root/session layer, not from sublayers.
-    for key, value in source_stage.GetAllMetadata().items():
-        if key not in ("subLayers", "subLayerOffsets"):
-            if not stage.SetMetadata(key, value):
-                raise RuntimeError(f"Could not preserve source stage metadata: {key}")
+    for key, value in authored_stage_metadata(source_stage).items():
+        layer.pseudoRoot.SetInfo(key, value)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.GetStageUpAxis(source_stage))
     UsdGeom.SetStageMetersPerUnit(stage, UsdGeom.GetStageMetersPerUnit(source_stage))
     available = select_official_gripper(stage.GetPrimAtPath(robot_path))
@@ -59,8 +69,7 @@ def scene_invariants(stage):
     return {
         "up_axis": str(UsdGeom.GetStageUpAxis(stage)),
         "meters_per_unit": UsdGeom.GetStageMetersPerUnit(stage),
-        "stage_metadata": {k: str(v) for k, v in stage.GetAllMetadata().items()
-                           if k not in ("subLayers", "subLayerOffsets")},
+        "stage_metadata": {k: str(v) for k, v in authored_stage_metadata(stage).items()},
         "non_robot_scene": rows,
     }
 

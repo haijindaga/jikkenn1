@@ -9,7 +9,7 @@ import numpy as np
 
 from panda_handover.gripper_swap import (
     ARM_JOINTS, GRIPPER_VARIANT, bounded_gripper_velocity,
-    captured_arm_positions, create_variant_scene, gripper_control_spec,
+    authored_stage_metadata, captured_arm_positions, create_variant_scene, gripper_control_spec,
     scene_invariants, select_official_gripper,
 )
 
@@ -29,6 +29,20 @@ class VariantSet:
 
 
 class GripperSwapTests(unittest.TestCase):
+    def test_metadata_uses_sdf_pseudo_root_not_nonexistent_stage_api(self):
+        from types import SimpleNamespace
+
+        values = {"upAxis": "Z", "metersPerUnit": 1.0, "defaultPrim": "World",
+                  "customLayerData": {"experiment": "unchanged"},
+                  "primChildren": ["World"], "subLayers": ["source.usda"],
+                  "subLayerOffsets": ["offset"]}
+        root = SimpleNamespace(ListInfoKeys=lambda: list(values), GetInfo=values.__getitem__)
+        # Deliberately no Stage.GetAllMetadata: the user's installed API failure.
+        stage = SimpleNamespace(GetRootLayer=lambda: SimpleNamespace(pseudoRoot=root))
+        result = authored_stage_metadata(stage)
+        self.assertEqual(result, {k: v for k, v in values.items()
+                                  if k not in ("primChildren", "subLayers", "subLayerOffsets")})
+
     def properties(self, stiffness=0, damping=5000):
         dtype = [(name, float) for name in (
             "type", "lower", "upper", "stiffness", "damping", "maxVelocity", "maxEffort"
