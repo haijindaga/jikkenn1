@@ -226,6 +226,28 @@ class TrajectoryReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "discontinuous"):
                 load_grasp_lift_replay(capture, plan)
 
+    def test_rejects_duplicate_grasp_lift_capture_joint_names(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, plan = self._write_grasp_lift_inputs(root)
+            report_path = capture / "robot_state.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["joint_names"][1] = report["joint_names"][0]
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty and unique"):
+                load_grasp_lift_replay(capture, plan)
+
+    def test_rejects_nonfinite_grasp_lift_capture_joint_positions(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            capture, plan = self._write_grasp_lift_inputs(root)
+            positions_path = capture / "panda_joint_positions.npy"
+            positions = np.load(positions_path)
+            positions[0] = np.nan
+            np.save(positions_path, positions)
+            with self.assertRaisesRegex(ValueError, "must all be finite"):
+                load_grasp_lift_replay(capture, plan)
+
     def test_isaac_replay_uses_position_targets_not_joint_teleportation(self):
         script = (
             Path(__file__).resolve().parents[1]
@@ -234,6 +256,9 @@ class TrajectoryReplayTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ArticulationAction(", script)
         self.assertIn("panda.apply_action(", script)
+        self.assertIn("panda.set_joints_default_state(", script)
+        self.assertIn("select_named_joint_positions(", script)
+        self.assertIn("maximum_arm_start_state_error_rad", script)
         self.assertNotIn("set_joint_positions(", script)
 
     def test_isaac_pregrasp_replay_supports_matching_authored_scene(self):
@@ -265,6 +290,10 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
+        self.assertIn("panda.set_joints_default_state(", script)
+        self.assertIn("select_named_joint_positions(", script)
+        self.assertIn("settle_pose_held_with_position_targets", script)
+        self.assertIn("maximum_arm_start_state_error_rad", script)
         self.assertIn('"physx-auto-attachment",', script)
         self.assertIn('"surface-gripper-attachment",', script)
         self.assertIn(

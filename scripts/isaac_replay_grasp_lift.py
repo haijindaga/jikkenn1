@@ -15,6 +15,7 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.curobo_bridge import select_named_joint_positions
 from panda_handover.physics_baselines import (
     FINGER_DRIVE_PRESETS,
     drive_value_matches_float_storage,
@@ -636,8 +637,51 @@ try:
             "after": after_iterations,
         }
 
+    # Initialize once so Isaac exposes the authoritative DOF order, then make
+    # the measured capture state the articulation's reset state. The saved
+    # cuRobo trajectory is already gated to begin at this same state.
+    world.reset()
+    isaac_names = tuple(str(name) for name in panda.dof_names)
+    if not isaac_names or len(set(isaac_names)) != len(isaac_names):
+        raise RuntimeError("Isaac robot DOF names must be non-empty and unique")
+    restored_capture_positions = select_named_joint_positions(
+        replay.capture_joint_names,
+        replay.capture_joint_positions,
+        isaac_names,
+    ).astype(np.float64, copy=False)
+    panda.set_joints_default_state(
+        positions=restored_capture_positions,
+        velocities=np.zeros_like(restored_capture_positions),
+    )
     world.reset()
     camera.initialize()
+    index_by_name = {name: index for index, name in enumerate(isaac_names)}
+    missing = [name for name in replay.joint_names if name not in index_by_name]
+    if missing:
+        raise RuntimeError(f"planned joints are missing from Isaac robot: {missing}")
+    arm_indices = np.asarray(
+        [index_by_name[name] for name in replay.joint_names], dtype=np.int64
+    )
+    finger_names = profile.gripper_joint_names
+    if any(name not in index_by_name for name in finger_names):
+        raise RuntimeError(
+            f"Isaac {profile.name} gripper joint names changed: {finger_names}"
+        )
+    finger_indices = np.asarray(
+        [index_by_name[name] for name in finger_names], dtype=np.int64
+    )
+    expected_start = select_named_joint_positions(
+        replay.capture_joint_names,
+        replay.capture_joint_positions,
+        replay.joint_names,
+    ).astype(np.float64, copy=False)
+    captured_fingers = select_named_joint_positions(
+        replay.capture_joint_names,
+        replay.capture_joint_positions,
+        finger_names,
+    ).astype(np.float64, copy=False)
+    capture_hold_indices = np.concatenate((arm_indices, finger_indices))
+    capture_hold_positions = np.concatenate((expected_start, captured_fingers))
     if scene_usd is None:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
@@ -1611,7 +1655,12 @@ try:
         Image.fromarray(rgb).save(path)
         return str(path)
 
+    capture_hold_action = ArticulationAction(
+        joint_positions=capture_hold_positions,
+        joint_indices=capture_hold_indices,
+    )
     for _ in range(args.settle_frames):
+        panda.apply_action(capture_hold_action)
         world.step(render=True)
     target_settled_position, target_settled_orientation = get_target_world_pose()
     target_settled_position = np.asarray(target_settled_position, dtype=np.float64)
@@ -1633,32 +1682,6 @@ try:
     if first_frame:
         saved_frames.append(first_frame)
 
-    isaac_names = tuple(str(name) for name in panda.dof_names)
-    if len(set(isaac_names)) != len(isaac_names):
-        raise RuntimeError("Isaac robot DOF names are not unique")
-    index_by_name = {name: index for index, name in enumerate(isaac_names)}
-    missing = [name for name in replay.joint_names if name not in index_by_name]
-    if missing:
-        raise RuntimeError(f"planned joints are missing from Isaac robot: {missing}")
-    arm_indices = np.asarray(
-        [index_by_name[name] for name in replay.joint_names], dtype=np.int64
-    )
-    finger_names = profile.gripper_joint_names
-    if any(name not in index_by_name for name in finger_names):
-        raise RuntimeError(
-            f"Isaac {profile.name} gripper joint names changed: {finger_names}"
-        )
-    finger_indices = np.asarray([index_by_name[name] for name in finger_names], dtype=np.int64)
-    capture_by_name = {
-        name: replay.capture_joint_positions[index]
-        for index, name in enumerate(replay.capture_joint_names)
-    }
-    expected_start = np.asarray(
-        [capture_by_name[name] for name in replay.joint_names], dtype=np.float64
-    )
-    captured_fingers = np.asarray(
-        [capture_by_name[name] for name in finger_names], dtype=np.float64
-    )
     open_fingers = np.asarray(profile.gripper_open, dtype=np.float64).copy()
     open_fingers[:] = args.open_finger_position_m
     actual_start = np.asarray(panda.get_joint_positions(), dtype=np.float64)[arm_indices]
@@ -2269,6 +2292,20 @@ try:
             ),
         },
         "replay": {
+            "initialization": {
+                "source": str(args.capture),
+                "joint_mapping": "capture names to Isaac DOF names",
+                "method": "Isaac set_joints_default_state followed by world.reset",
+                "all_isaac_dofs_restored": True,
+                "settle_pose_held_with_position_targets": True,
+                "restored_joint_names": list(isaac_names),
+                "settle_held_joint_names": list(replay.joint_names + finger_names),
+                "captured_arm_start_positions_rad": expected_start.tolist(),
+                "measured_arm_start_positions_after_settle_rad": actual_start.tolist(),
+                "maximum_arm_start_state_error_rad": float(
+                    start_error.max(initial=0.0)
+                ),
+            },
             "physics_dt_s": PHYSICS_DT_S,
             "phase_duration_s": durations,
             "phase_command_count": {

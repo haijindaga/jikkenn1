@@ -27,6 +27,12 @@ Isaac Lab's `UR10e_ROBOTIQ_GRIPPER_CFG`:
 
 This is an observation pose, not a replacement for cuRobo's retract/seed
 configuration. The captured joint state remains the trajectory start state.
+Before either pre-grasp replay or a physical grasp/lift trial, Isaac restores
+every articulation DOF from that named capture state through its default-state
+reset API. During settling, position targets hold only the planned arm joints
+and the profiled gripper master joint; passive Robotiq joints remain governed
+by the asset's coupling. The replay then verifies the measured arm state
+against the capture before issuing the first trajectory command.
 
 The official XRDF supplies the arm/gripper collision spheres, self-collision
 exclusions, `grasp_frame`, and `attached_object` frame. The local adapter does

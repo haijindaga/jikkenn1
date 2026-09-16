@@ -17,6 +17,7 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.curobo_bridge import select_named_joint_positions
 from panda_handover.trajectory_replay import (
     load_pregrasp_replay,
     sample_positions_at_physics_rate,
@@ -194,8 +195,37 @@ try:
             resolution=(640, 480),
         )
 
+    # Initialize once so Isaac exposes the authoritative DOF order, then make
+    # the measured capture state the articulation's reset state. This keeps
+    # capture, cuRobo planning, and replay on one named-joint initial condition
+    # without teleporting any waypoint of the planned trajectory.
+    world.reset()
+    isaac_names = tuple(str(name) for name in panda.dof_names)
+    if not isaac_names or len(set(isaac_names)) != len(isaac_names):
+        raise RuntimeError("Isaac robot DOF names must be non-empty and unique")
+    restored_capture_positions = select_named_joint_positions(
+        replay.capture_joint_names,
+        replay.capture_joint_positions,
+        isaac_names,
+    ).astype(np.float64, copy=False)
+    panda.set_joints_default_state(
+        positions=restored_capture_positions,
+        velocities=np.zeros_like(restored_capture_positions),
+    )
     world.reset()
     camera.initialize()
+    name_to_isaac_index = {name: index for index, name in enumerate(isaac_names)}
+    missing = [name for name in replay.joint_names if name not in name_to_isaac_index]
+    if missing:
+        raise RuntimeError(f"planned joints are missing from Isaac robot: {missing}")
+    active_indices = np.asarray(
+        [name_to_isaac_index[name] for name in replay.joint_names], dtype=np.int64
+    )
+    expected_start = select_named_joint_positions(
+        replay.capture_joint_names,
+        replay.capture_joint_positions,
+        replay.joint_names,
+    ).astype(np.float64, copy=False)
     if scene_usd is None:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
@@ -215,26 +245,14 @@ try:
         Image.fromarray(rgb, mode="RGB").save(path)
         return True
 
+    capture_hold_action = ArticulationAction(
+        joint_positions=expected_start,
+        joint_indices=active_indices,
+    )
     for _ in range(args.settle_frames):
+        panda.apply_action(capture_hold_action)
         world.step(render=True)
 
-    isaac_names = tuple(str(name) for name in panda.dof_names)
-    if len(set(isaac_names)) != len(isaac_names):
-        raise RuntimeError("Isaac Panda DOF names are not unique")
-    name_to_isaac_index = {name: index for index, name in enumerate(isaac_names)}
-    missing = [name for name in replay.joint_names if name not in name_to_isaac_index]
-    if missing:
-        raise RuntimeError(f"planned joints are missing from Isaac Panda: {missing}")
-    active_indices = np.asarray(
-        [name_to_isaac_index[name] for name in replay.joint_names], dtype=np.int64
-    )
-    capture_by_name = {
-        name: replay.capture_joint_positions[index]
-        for index, name in enumerate(replay.capture_joint_names)
-    }
-    expected_start = np.asarray(
-        [capture_by_name[name] for name in replay.joint_names], dtype=np.float64
-    )
     actual_start = np.asarray(panda.get_joint_positions(), dtype=np.float64)[active_indices]
     start_error = np.abs(actual_start - expected_start)
     if not np.all(start_error <= 2e-3):
@@ -313,6 +331,20 @@ try:
             "source_waypoints": int(replay.positions.shape[0]),
         },
         "replay": {
+            "initialization": {
+                "source": str(args.capture),
+                "joint_mapping": "capture names to Isaac DOF names",
+                "method": "Isaac set_joints_default_state followed by world.reset",
+                "all_isaac_dofs_restored": True,
+                "settle_pose_held_with_position_targets": True,
+                "restored_joint_names": list(isaac_names),
+                "settle_held_joint_names": list(replay.joint_names),
+                "captured_arm_start_positions_rad": expected_start.tolist(),
+                "measured_arm_start_positions_after_settle_rad": actual_start.tolist(),
+                "maximum_arm_start_state_error_rad": float(
+                    start_error.max(initial=0.0)
+                ),
+            },
             "physics_dt_s": PHYSICS_DT_S,
             "duration_s": float(replay_time[-1]),
             "command_count": int(commanded.shape[0]),
