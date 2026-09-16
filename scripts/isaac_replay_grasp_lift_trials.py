@@ -46,6 +46,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-position-iterations", type=int)
     parser.add_argument("--solver-velocity-iterations", type=int)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--replay-physics", choices=("default", "cpu"), default="default",
+        help="Replay-only CPU PhysX + Fabric OFF diagnostic",
+    )
     parser.add_argument("--simulation-only", action="store_true")
     args = parser.parse_args()
     if not args.simulation_only:
@@ -130,6 +134,7 @@ def main() -> int:
             "scene_usd": str(args.scene_usd),
         },
         "policy": {
+            "replay_physics": args.replay_physics,
             "maximum_physical_trials": args.max_physical_trials,
             "stop_at_first_success": True,
             "grasp_retention_mode": args.grasp_retention_mode,
@@ -196,6 +201,8 @@ def main() -> int:
             str(args.finger_drive_scale),
             "--grasp-retention-mode",
             args.grasp_retention_mode,
+            "--replay-physics",
+            args.replay_physics,
             "--simulation-only",
         ]
         if args.fingertip_friction_coefficient is not None:

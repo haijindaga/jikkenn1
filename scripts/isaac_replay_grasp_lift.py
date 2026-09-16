@@ -15,6 +15,11 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.replay_physics import (
+    configure_replay_physics,
+    replay_physics_state,
+    validate_replay_physics,
+)
 from panda_handover.physics_baselines import (
     FINGER_DRIVE_PRESETS,
     drive_value_matches_float_storage,
@@ -50,6 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--camera-prim", default="/World/camera_0")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--replay-physics",
+        choices=("default", "cpu"),
+        default="default",
+        help="Opt-in CPU PhysX + Fabric OFF diagnostic; default leaves settings unchanged",
+    )
     parser.add_argument("--settle-frames", type=int, default=60)
     parser.add_argument("--close-frames", type=int, default=60)
     parser.add_argument("--hold-frames", type=int, default=180)
@@ -276,6 +287,7 @@ try:
     from PIL import Image
 
     from isaacsim.core.api import World
+    from isaacsim.core.simulation_manager import SimulationManager
     from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
     from isaacsim.core.prims import RigidPrim, SingleArticulation, XFormPrim
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
@@ -368,6 +380,11 @@ try:
         physics_dt=PHYSICS_DT_S,
         rendering_dt=1.0 / 30.0,
     )
+    physics_context = world.get_physics_context()
+    replay_physics_report = configure_replay_physics(
+        physics_context, SimulationManager, args.replay_physics
+    )
+    print("replay physics: " + json.dumps(replay_physics_report), flush=True)
     if scene_usd is None:
         world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
         panda = world.scene.add(
@@ -609,6 +626,11 @@ try:
         }
 
     world.reset()
+    replay_physics_report["after_reset"] = replay_physics_state(physics_context)
+    validate_replay_physics(args.replay_physics, replay_physics_report["after_reset"])
+    (output / "replay_physics_check.json").write_text(
+        json.dumps(replay_physics_report, indent=2) + "\n", encoding="utf-8"
+    )
     camera.initialize()
     if scene_usd is None:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
@@ -2226,6 +2248,7 @@ try:
             ),
         },
         "replay": {
+            "physics_backend": replay_physics_report,
             "physics_dt_s": PHYSICS_DT_S,
             "phase_duration_s": durations,
             "phase_command_count": {
