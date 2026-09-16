@@ -13,7 +13,6 @@ from panda_handover.curobo_planning import (
     load_conservative_esdf,
     load_singleview_observed_pointcloud,
     prepare_pregrasp_goalset,
-    rotation_offset_diagnostics,
     rotation_matrix_to_quaternion_wxyz,
     summarize_ik_result_arrays,
     validate_voxel_fix_report,
@@ -337,16 +336,6 @@ class CuroboPlanningTests(unittest.TestCase):
         quaternions = rotation_matrix_to_quaternion_wxyz(rotations)
         np.testing.assert_allclose(quaternions[0], [1.0, 0.0, 0.0, 0.0])
         np.testing.assert_allclose(quaternions[1], [0.0, 1.0, 0.0, 0.0])
-
-    def test_rotation_offset_diagnostics_identifies_principal_half_turn(self):
-        rotation = np.diag([-1.0, 1.0, -1.0])
-        diagnostics = rotation_offset_diagnostics(rotation)
-        self.assertAlmostEqual(diagnostics["angle_rad"], np.pi)
-        np.testing.assert_allclose(diagnostics["axis"], [0.0, 1.0, 0.0])
-        self.assertEqual(diagnostics["nearest_principal_half_turn_axis"], "y")
-        self.assertAlmostEqual(
-            diagnostics["nearest_principal_half_turn_residual"], 0.0
-        )
 
     def test_voxel_fix_report_requires_exact_source_hash(self):
         report = {

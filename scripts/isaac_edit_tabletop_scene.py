@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and interactively edit a reusable profiled-robot tabletop scene.
+"""Create and interactively edit a reusable Panda tabletop USD scene.
 
 The saved stage is intentionally a scene-authoring artifact.  Physics-ready
 objects can be referenced or dragged below ``/World/Objects`` in Isaac Sim,
@@ -21,7 +21,6 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
-from panda_handover.robot_profiles import get_robot_profile, robot_profile_names
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
@@ -34,9 +33,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("scenes/tabletop_base.usda"),
         help="Local USD/USDA stage to create and keep open in Isaac Sim",
-    )
-    parser.add_argument(
-        "--robot-profile", choices=robot_profile_names(), default="franka_panda"
     )
     parser.add_argument(
         "--exit-after-save",
@@ -91,7 +87,6 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
-profile = get_robot_profile(args.robot_profile)
 
 # Isaac requires SimulationApp construction before importing omni/pxr modules.
 from isaacsim import SimulationApp
@@ -107,13 +102,10 @@ try:
     from isaacsim.core.api import World
     from isaacsim.core.api.objects import FixedCuboid
     from isaacsim.core.experimental.utils import stage as stage_utils
-    from isaacsim.core.prims import SingleArticulation
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from isaacsim.core.utils.prims import create_prim
-    from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.robot.manipulators.examples.franka import Franka
     from isaacsim.sensors.camera import Camera
-    from isaacsim.storage.native import get_assets_root_path
     from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
 
     from panda_handover.geometry import look_at_quaternion_world
@@ -127,54 +119,13 @@ try:
         rendering_dt=1.0 / 30.0,
     )
     world.scene.add_default_ground_plane(z_position=LAYOUT.ground_z_m)
-    robot_asset_url = None
-    robot_variant = None
-    if profile.name == "franka_panda":
-        robot = world.scene.add(
-            Franka(
-                prim_path=profile.default_robot_prim,
-                name="robot",
-                position=np.asarray(LAYOUT.robot_base_position_m),
-            )
+    world.scene.add(
+        Franka(
+            prim_path="/World/Panda",
+            name="panda",
+            position=np.asarray(LAYOUT.robot_base_position_m),
         )
-    else:
-        if profile.isaac_asset_relative_path is None:
-            raise RuntimeError(f"{profile.name} has no reviewed Isaac asset")
-        assets_root = get_assets_root_path()
-        robot_asset_url = (
-            assets_root.rstrip("/") + "/" + profile.isaac_asset_relative_path
-        )
-        stage = omni.usd.get_context().get_stage()
-        robot_prim = stage.DefinePrim(profile.default_robot_prim, "Xform")
-        if not robot_prim.GetReferences().AddReference(robot_asset_url):
-            raise RuntimeError(f"failed to reference official robot USD: {robot_asset_url}")
-        simulation_app.update()
-        if profile.isaac_gripper_variant is not None:
-            variant_sets = robot_prim.GetVariantSets()
-            candidate_sets = [
-                name
-                for name in variant_sets.GetNames()
-                if profile.isaac_gripper_variant
-                in variant_sets.GetVariantSet(name).GetVariantNames()
-            ]
-            if len(candidate_sets) != 1:
-                raise RuntimeError(
-                    "official assembled robot did not expose exactly one reviewed "
-                    f"{profile.isaac_gripper_variant} variant: {candidate_sets}"
-                )
-            robot_variant = candidate_sets[0]
-            if not variant_sets.GetVariantSet(robot_variant).SetVariantSelection(
-                profile.isaac_gripper_variant
-            ):
-                raise RuntimeError("failed to select official gripper variant")
-            simulation_app.update()
-        robot = world.scene.add(
-            SingleArticulation(
-                prim_path=profile.default_robot_prim,
-                name="robot",
-                position=np.asarray(LAYOUT.robot_base_position_m),
-            )
-        )
+    )
     world.scene.add(
         FixedCuboid(
             prim_path="/World/Table",
@@ -198,32 +149,6 @@ try:
     )
 
     world.reset()
-    dof_names = tuple(str(name) for name in robot.dof_names)
-    required_dofs = set(profile.arm_joint_names + profile.gripper_joint_names)
-    missing_dofs = sorted(required_dofs - set(dof_names))
-    if missing_dofs:
-        raise RuntimeError(
-            f"official {profile.name} asset is missing profiled joints: {missing_dofs}"
-        )
-    observation_pose = None
-    if profile.observation_arm_joint_positions is not None:
-        arm_indices = np.asarray(
-            [dof_names.index(name) for name in profile.arm_joint_names], dtype=np.int64
-        )
-        observation_pose = np.asarray(
-            profile.observation_arm_joint_positions, dtype=np.float64
-        )
-        robot.set_joint_positions(observation_pose, joint_indices=arm_indices)
-        robot.set_joint_velocities(
-            np.zeros_like(observation_pose), joint_indices=arm_indices
-        )
-        robot.apply_action(
-            ArticulationAction(
-                joint_positions=observation_pose,
-                joint_indices=arm_indices,
-            )
-        )
-        simulation_app.update()
     camera.initialize()
     camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
     camera.set_clipping_range(0.05, 3.0)
@@ -239,10 +164,7 @@ try:
     stage = omni.usd.get_context().get_stage()
     world_prim = stage.GetPrimAtPath("/World")
     world_prim.SetCustomDataByKey("panda_handover:schema_version", 1)
-    world_prim.SetCustomDataByKey(
-        "panda_handover:robot_prim", profile.default_robot_prim
-    )
-    world_prim.SetCustomDataByKey("panda_handover:robot_profile", profile.name)
+    world_prim.SetCustomDataByKey("panda_handover:panda_prim", "/World/Panda")
     world_prim.SetCustomDataByKey("panda_handover:table_prim", "/World/Table")
     world_prim.SetCustomDataByKey("panda_handover:camera_prim", "/World/camera_0")
     world_prim.SetCustomDataByKey("panda_handover:target_prim", "/World/Objects/Target")
@@ -378,7 +300,7 @@ try:
     saved = bool(stage_utils.save_stage(str(output)))
     required_prims = [
         "/World",
-        profile.default_robot_prim,
+        "/World/Panda",
         "/World/Table",
         "/World/Objects",
         "/World/camera_0",
@@ -398,25 +320,6 @@ try:
             "composition": "OpenUSD referenced assets edited in a separate scene stage",
         },
         "scene_usd": str(output),
-        "robot_profile": profile.name,
-        "robot": {
-            "prim": profile.default_robot_prim,
-            "official_asset_url": robot_asset_url,
-            "gripper_variant_set": robot_variant,
-            "gripper_variant": profile.isaac_gripper_variant,
-            "dof_names": list(dof_names),
-            "observation_pose": {
-                "source": (
-                    "Isaac Lab UR10e_ROBOTIQ_GRIPPER_CFG initial joint_pos"
-                    if observation_pose is not None
-                    else "official authored USD default"
-                ),
-                "arm_joint_names": list(profile.arm_joint_names),
-                "arm_joint_positions_rad": (
-                    observation_pose.tolist() if observation_pose is not None else None
-                ),
-            },
-        },
         "target_authoring": target_authoring,
         "authoring_contract": {
             "objects_scope": "/World/Objects",

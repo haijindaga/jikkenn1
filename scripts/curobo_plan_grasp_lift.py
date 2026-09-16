@@ -34,8 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentation", type=Path, required=True)
     parser.add_argument("--pregrasp-plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--robot")
-    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument("--max-attempts", type=int, default=2)
@@ -62,7 +61,7 @@ def parse_args() -> argparse.Namespace:
         nargs=3,
         metavar=("X", "Y", "Z"),
         help=(
-            "Optional fixed tool-frame transport goal in robot-base metres. "
+            "Optional fixed panda_hand transport goal in panda_link0 metres. "
             "Omitting this keeps the existing grasp/lift-only scope."
         ),
     )
@@ -80,7 +79,7 @@ def parse_args() -> argparse.Namespace:
         metavar=("X", "Y", "Z"),
         help=(
             "Automatic handover: desired receive-part representative point in "
-            "robot-base metres"
+            "panda_link0 metres"
         ),
     )
     parser.add_argument(
@@ -673,16 +672,6 @@ def main() -> int:
         generate_affordance_handover_goals,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
-    from panda_handover.robot_profiles import get_robot_profile
-    from panda_handover.robot_state import load_robot_joint_positions
-
-    profile = get_robot_profile(args.robot_profile)
-    if args.robot is None:
-        if profile.name != "franka_panda":
-            raise ValueError("--robot is required for non-Franka robot profiles")
-        args.robot = profile.curobo_robot_config
-    global SIMULATION_FINGER_CONTACT_LINKS
-    SIMULATION_FINGER_CONTACT_LINKS = frozenset(profile.contact_link_names)
 
     subprocess.run(
         [
@@ -693,8 +682,6 @@ def main() -> int:
         check=True,
     )
     pregrasp_report, grasp_transforms = _load_reviewed_pregrasp(args.pregrasp_plan)
-    if pregrasp_report.get("robot_profile", "franka_panda") != profile.name:
-        raise ValueError("pre-grasp plan uses a different robot profile")
     source_indices = np.load(
         args.pregrasp_plan / "source_candidate_indices.npy", allow_pickle=False
     ).reshape(-1)
@@ -720,9 +707,7 @@ def main() -> int:
     if not isinstance(prepared_map_value, str) or not prepared_map_value:
         raise ValueError("source pre-grasp report has no prepared_map provenance")
     prepared_map = Path(prepared_map_value)
-    observed_scene = load_singleview_observed_pointcloud(
-        prepared_map, args.capture, expected_robot_profile=profile.name
-    )
+    observed_scene = load_singleview_observed_pointcloud(prepared_map, args.capture)
 
     segmentation_report_path = args.segmentation / "segmentation_check.json"
     segmentation_report = json.loads(segmentation_report_path.read_text(encoding="utf-8"))
@@ -786,12 +771,10 @@ def main() -> int:
     robot_report = json.loads(
         (args.capture / "robot_state.json").read_text(encoding="utf-8")
     )
-    if robot_report.get("robot", "franka_panda") != profile.name:
-        raise ValueError("capture uses a different robot profile")
     captured_names = tuple(str(name) for name in robot_report["joint_names"])
-    captured_positions = load_robot_joint_positions(args.capture).astype(
-        np.float32, copy=False
-    )
+    captured_positions = np.load(
+        args.capture / "panda_joint_positions.npy", allow_pickle=False
+    ).astype(np.float32, copy=False)
 
     import torch
     if not torch.cuda.is_available():
@@ -832,15 +815,13 @@ def main() -> int:
         max_goalset=planner_max_goalset,
     )
     planner = MotionPlanner(planner_cfg)
-    if planner.tool_frames != [profile.tool_frame]:
-        raise RuntimeError(
-            f"reviewed {profile.name} tool frame changed: {planner.tool_frames}"
-        )
+    if planner.tool_frames != ["panda_hand"]:
+        raise RuntimeError(f"reviewed Franka tool frame changed: {planner.tool_frames}")
     contact_collision_links = list(
         planner.kinematics.config.kinematics_config.grasp_contact_link_names or ()
     )
     if not contact_collision_links:
-        raise RuntimeError("reviewed robot config has no grasp_contact_link_names")
+        raise RuntimeError("reviewed Franka config has no grasp_contact_link_names")
     # Match GraspGenX's official end-to-end planner initialization.  Its
     # public-cuRobo compatibility note explicitly warns that overriding the
     # default seeds/tolerances and use_cuda_graph=False makes approach/grasp
@@ -1072,7 +1053,7 @@ def main() -> int:
             )
             if support_contact_links != sorted(SIMULATION_FINGER_CONTACT_LINKS):
                 raise RuntimeError(
-                    "reviewed robot config is missing gripper contact links"
+                    "reviewed Franka config is missing finger contact links"
                 )
             selected_goal = GoalToolPose(
                 tool_frames=planner.tool_frames,
@@ -1475,7 +1456,7 @@ def main() -> int:
     attached_indices_np = _cpu_numpy(attached_indices).astype(np.int64).reshape(-1)
     if attached_indices_np.size != 4:
         raise RuntimeError(
-            f"robot config must expose 4 attached-object spheres, got {attached_indices_np.size}"
+            f"franka.yml must expose 4 attached-object spheres, got {attached_indices_np.size}"
         )
     np.save(output / "attached_object_sphere_indices.npy", attached_indices_np)
     attached_local_spheres = _cpu_numpy(
@@ -1483,9 +1464,7 @@ def main() -> int:
             0, attached_indices, :
         ]
     ).astype(np.float32, copy=False)
-    np.save(output / "attached_object_spheres_tool.npy", attached_local_spheres)
-    if profile.name == "franka_panda":
-        np.save(output / "attached_object_spheres_panda_hand.npy", attached_local_spheres)
+    np.save(output / "attached_object_spheres_panda_hand.npy", attached_local_spheres)
 
     lifted_kinematics = planner.compute_kinematics(lift_end)
     if lifted_kinematics.robot_spheres is None:
@@ -1608,8 +1587,8 @@ def main() -> int:
                     "planner": "MotionPlanner.plan_pose after AttachmentManager.attach",
                 },
                 "goal": {
-                    "frame": "robot base",
-                    "tool_frame": profile.tool_frame,
+                    "frame": "panda_link0 robot base",
+                    "tool_frame": "panda_hand",
                     "candidate_count": int(len(handover_goal_positions)),
                     "positions_m": handover_goal_positions.tolist(),
                     "quaternions_wxyz": handover_goal_quaternions.tolist(),
@@ -1694,8 +1673,8 @@ def main() -> int:
             "waypoints": transport_values["waypoints"],
             "full_joint_names": transport_values["full_joint_names"],
             "goal": {
-                "frame": "robot base",
-                "tool_frame": profile.tool_frame,
+                "frame": "panda_link0 robot base",
+                "tool_frame": "panda_hand",
                 "candidate_count": int(len(handover_goal_positions)),
                 "selected_goalset_rank": selected_transport_goal_rank,
                 "position_m": (
@@ -1727,7 +1706,7 @@ def main() -> int:
                 "GraspGenX/end2end/e2e_grasp_demo.py::init_planner"
             ),
             "official_grasp_contact_handling": (
-                "selected robot profile grasp_contact_link_names"
+                "robot franka.yml grasp_contact_link_names"
             ),
             "issue_663_preflight": "https://github.com/NVlabs/curobo/issues/663",
             "issue_692_padding": "https://github.com/NVlabs/curobo/issues/692",
@@ -1769,12 +1748,11 @@ def main() -> int:
                 else None
             ),
         },
-        "robot_profile": profile.name,
         "parameters": {
             "robot": args.robot,
             "device": args.device,
             "planner_config_policy": "GraspGenX end2end official defaults",
-            "approach_axis": f"{profile.tool_frame} +Z with negative offset",
+            "approach_axis": "panda_hand +Z with negative offset",
             "approach_offset_m": float(
                 pregrasp_report["parameters"]["approach_offset_m"]
             ),
@@ -1900,7 +1878,7 @@ def main() -> int:
             if transport_report is not None
             else (
                 "Replay all three phases in Isaac Sim with a DynamicCuboid target, "
-                "close the physical gripper at the grasp boundary, and measure "
+                "close the physical Franka gripper at the grasp boundary, and measure "
                 "target lift."
             )
         ),

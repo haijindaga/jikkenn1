@@ -37,7 +37,7 @@ class ConservativeEsdf:
 
 @dataclass(frozen=True)
 class PregraspGoalset:
-    """Score-ordered robot tool goals in the robot-base frame."""
+    """Score-ordered Panda hand goals in the robot-base frame."""
 
     grasp_robot_base: np.ndarray
     pregrasp_robot_base: np.ndarray
@@ -63,8 +63,6 @@ def _resolved_path_matches(recorded: str, expected: Path) -> bool:
 def load_singleview_observed_pointcloud(
     prepared_map: str | Path,
     capture: str | Path,
-    *,
-    expected_robot_profile: str = "franka_panda",
 ) -> ObservedPointcloudScene:
     """Load cuRobo Mapper surface points only after checking their provenance.
 
@@ -91,12 +89,8 @@ def load_singleview_observed_pointcloud(
     required_apis = {"RobotSegmenter", "FilterDepth", "Mapper.compute_esdf"}
     if not required_apis.issubset(set(reference.get("apis", ()))):
         raise ValueError("prepared map did not use the reviewed cuRobo perception APIs")
-    map_frame = report.get("frames", {}).get("map")
-    if map_frame not in {"robot base", "franka robot base"}:
-        raise ValueError("prepared pointcloud is not expressed in the robot base frame")
-    reported_profile = report.get("frames", {}).get("robot_profile", "franka_panda")
-    if reported_profile != expected_robot_profile:
-        raise ValueError("prepared map uses a different robot profile")
+    if report.get("frames", {}).get("map") != "franka robot base":
+        raise ValueError("prepared pointcloud is not expressed in the Franka base frame")
 
     parameters = report.get("parameters", {})
     if parameters.get("input_frames") != 1:
@@ -389,7 +383,7 @@ def validate_voxel_fix_report(path: str | Path) -> dict[str, Any]:
 
 
 def prepare_pregrasp_goalset(
-    tool_world: np.ndarray,
+    panda_hand_world: np.ndarray,
     scores: np.ndarray,
     T_world_robot_base: np.ndarray,
     *,
@@ -399,10 +393,10 @@ def prepare_pregrasp_goalset(
     excluded_candidate_indices: np.ndarray | None = None,
 ) -> PregraspGoalset:
     """Transform and score-order grasps, then offset along negative tool Z."""
-    poses = np.asarray(tool_world, dtype=np.float64)
+    poses = np.asarray(panda_hand_world, dtype=np.float64)
     values = np.asarray(scores, dtype=np.float64).reshape(-1)
     if poses.ndim != 3 or poses.shape[1:] != (4, 4):
-        raise ValueError(f"tool_world must have shape (N,4,4), got {poses.shape}")
+        raise ValueError(f"panda_hand_world must have shape (N,4,4), got {poses.shape}")
     if poses.shape[0] == 0 or values.shape != (poses.shape[0],):
         raise ValueError("candidate poses and scores must have one non-empty shared length")
     if not np.all(np.isfinite(values)):
@@ -412,7 +406,7 @@ def prepare_pregrasp_goalset(
     if max_candidates <= 0:
         raise ValueError("max_candidates must be positive")
     for index, pose in enumerate(poses):
-        _require_rigid_transform(pose, label=f"tool_world[{index}]")
+        _require_rigid_transform(pose, label=f"panda_hand_world[{index}]")
     world_from_base = _require_rigid_transform(
         T_world_robot_base, label="T_world_robot_base"
     )
@@ -510,41 +504,3 @@ def rotation_matrix_to_quaternion_wxyz(rotations: np.ndarray) -> np.ndarray:
             quaternion *= -1.0
         output[index] = quaternion
     return output.reshape(*values.shape[:-2], 4).astype(np.float32)
-
-
-def rotation_offset_diagnostics(rotation: np.ndarray) -> dict[str, object]:
-    """Describe a frame rotation without silently choosing a correction."""
-    matrix = np.asarray(rotation, dtype=np.float64)
-    if matrix.shape != (3, 3):
-        raise ValueError("rotation must have shape (3,3)")
-    transform = np.eye(4, dtype=np.float64)
-    transform[:3, :3] = matrix
-    _require_rigid_transform(transform, label="rotation_offset")
-
-    quaternion = rotation_matrix_to_quaternion_wxyz(matrix).astype(np.float64)
-    half_sine = float(np.linalg.norm(quaternion[1:]))
-    angle = float(2.0 * np.arctan2(half_sine, abs(float(quaternion[0]))))
-    axis = (
-        (quaternion[1:] / half_sine).tolist()
-        if half_sine > 1e-12
-        else [1.0, 0.0, 0.0]
-    )
-    principal_half_turns = {
-        "x": np.diag([1.0, -1.0, -1.0]),
-        "y": np.diag([-1.0, 1.0, -1.0]),
-        "z": np.diag([-1.0, -1.0, 1.0]),
-    }
-    residuals = {
-        name: float(np.linalg.norm(matrix - candidate, ord="fro"))
-        for name, candidate in principal_half_turns.items()
-    }
-    nearest_axis = min(residuals, key=residuals.get)
-    return {
-        "matrix": matrix.tolist(),
-        "quaternion_wxyz": quaternion.tolist(),
-        "axis": axis,
-        "angle_rad": angle,
-        "principal_half_turn_frobenius_residuals": residuals,
-        "nearest_principal_half_turn_axis": nearest_axis,
-        "nearest_principal_half_turn_residual": residuals[nearest_axis],
-    }

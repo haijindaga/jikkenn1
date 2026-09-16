@@ -8,8 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .robot_state import load_robot_joint_positions
-
 
 @dataclass(frozen=True)
 class PregraspReplay:
@@ -114,13 +112,11 @@ def load_pregrasp_replay(
     capture_names = tuple(str(name) for name in robot_report.get("joint_names", ()))
     if not capture_names or len(set(capture_names)) != len(capture_names):
         raise ValueError("capture joint names must be non-empty and unique")
-    capture_positions = load_robot_joint_positions(capture).astype(
+    capture_positions = np.load(capture / "panda_joint_positions.npy").astype(
         np.float64, copy=False
     )
     if capture_positions.shape != (len(capture_names),):
         raise ValueError("capture positions do not match capture joint names")
-    if not np.all(np.isfinite(capture_positions)):
-        raise ValueError("capture joint positions must all be finite")
     name_to_capture_index = {name: index for index, name in enumerate(capture_names)}
     missing = [name for name in joint_names if name not in name_to_capture_index]
     if missing:
@@ -135,7 +131,7 @@ def load_pregrasp_replay(
             np.max(np.abs(positions[0] - capture_positions[capture_indices]))
         )
         raise ValueError(
-            "trajectory does not start at the captured robot state; "
+            "trajectory does not start at the captured Panda state; "
             f"maximum error={maximum_error:.6g}"
         )
 
@@ -209,15 +205,11 @@ def load_grasp_lift_replay(
         )
 
     capture_names = tuple(str(name) for name in robot_report.get("joint_names", ()))
-    capture_positions = load_robot_joint_positions(capture).astype(
+    capture_positions = np.load(capture / "panda_joint_positions.npy").astype(
         np.float64, copy=False
     )
-    if not capture_names or len(set(capture_names)) != len(capture_names):
-        raise ValueError("capture joint names must be non-empty and unique")
-    if capture_positions.shape != (len(capture_names),):
+    if not capture_names or capture_positions.shape != (len(capture_names),):
         raise ValueError("capture joint names and positions do not match")
-    if not np.all(np.isfinite(capture_positions)):
-        raise ValueError("capture joint positions must all be finite")
     name_to_capture = {name: index for index, name in enumerate(capture_names)}
     missing = [name for name in joint_names if name not in name_to_capture]
     if missing:

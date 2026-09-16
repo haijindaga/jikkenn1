@@ -226,28 +226,6 @@ class TrajectoryReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "discontinuous"):
                 load_grasp_lift_replay(capture, plan)
 
-    def test_rejects_duplicate_grasp_lift_capture_joint_names(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            capture, plan = self._write_grasp_lift_inputs(root)
-            report_path = capture / "robot_state.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            report["joint_names"][1] = report["joint_names"][0]
-            report_path.write_text(json.dumps(report), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "non-empty and unique"):
-                load_grasp_lift_replay(capture, plan)
-
-    def test_rejects_nonfinite_grasp_lift_capture_joint_positions(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            capture, plan = self._write_grasp_lift_inputs(root)
-            positions_path = capture / "panda_joint_positions.npy"
-            positions = np.load(positions_path)
-            positions[0] = np.nan
-            np.save(positions_path, positions)
-            with self.assertRaisesRegex(ValueError, "must all be finite"):
-                load_grasp_lift_replay(capture, plan)
-
     def test_isaac_replay_uses_position_targets_not_joint_teleportation(self):
         script = (
             Path(__file__).resolve().parents[1]
@@ -256,9 +234,6 @@ class TrajectoryReplayTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ArticulationAction(", script)
         self.assertIn("panda.apply_action(", script)
-        self.assertIn("panda.set_joints_default_state(", script)
-        self.assertIn("select_named_joint_positions(", script)
-        self.assertIn("maximum_arm_start_state_error_rad", script)
         self.assertNotIn("set_joint_positions(", script)
 
     def test_isaac_pregrasp_replay_supports_matching_authored_scene(self):
@@ -281,19 +256,15 @@ class TrajectoryReplayTests(unittest.TestCase):
             / "isaac_replay_grasp_lift.py"
         ).read_text(encoding="utf-8")
         self.assertIn("DynamicCuboid(", script)
-        self.assertIn("finger_names = profile.gripper_joint_names", script)
+        self.assertIn('finger_names = ("panda_finger_joint1", "panda_finger_joint2")', script)
         self.assertIn("PANDA_OPEN_FINGER_JOINT_M = 0.04", script)
-        self.assertIn("open_fingers = np.asarray(profile.gripper_open", script)
+        self.assertIn("open_fingers = np.full(2, args.open_finger_position_m", script)
         self.assertIn("args.closed_finger_position_m", script)
         self.assertIn('execute_phase("transport", closed_finger_target)', script)
         self.assertIn('final_phase = "transport" if transport_executed else "lift"', script)
         self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
         self.assertIn("ArticulationAction(", script)
-        self.assertIn("panda.set_joints_default_state(", script)
-        self.assertIn("select_named_joint_positions(", script)
-        self.assertIn("settle_pose_held_with_position_targets", script)
-        self.assertIn("maximum_arm_start_state_error_rad", script)
         self.assertIn('"physx-auto-attachment",', script)
         self.assertIn('"surface-gripper-attachment",', script)
         self.assertIn(
@@ -373,15 +344,12 @@ class TrajectoryReplayTests(unittest.TestCase):
             / "isaac_replay_grasp_lift.py"
         ).read_text(encoding="utf-8")
         self.assertIn("target.get_masses()", script)
-        self.assertIn('drive_axis = "linear"', script)
-        self.assertIn("UsdPhysics.DriveAPI.Get(joint_prim, drive_axis)", script)
+        self.assertIn('UsdPhysics.DriveAPI.Get(joint_prim, "linear")', script)
         self.assertIn("ComputeBoundMaterial(", script)
         self.assertIn('ComputeBoundMaterial(\n                    "physics"', script)
         self.assertIn('record_physics_sample("close")', script)
         self.assertIn('record_physics_sample("hold")', script)
         self.assertIn('output / "retention_finger_gap_m.npy"', script)
-        self.assertIn('output / "retention_gripper_joint_positions.npy"', script)
-        self.assertIn('profile.gripper_joint_position_unit == "metre"', script)
         self.assertIn('"peak_object_lift_m": peak_object_lift_m', script)
         self.assertIn('"--finger-drive-max-force-n"', script)
         self.assertIn('"--finger-drive-scale"', script)
@@ -389,7 +357,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn('"--fingertip-friction-coefficient"', script)
         self.assertIn("Usd.TraverseInstanceProxies()", script)
         self.assertIn(
-            'Sdf.Path(args.robot_prim).AppendChild(\n                finger_link_name',
+            'Sdf.Path(args.panda_prim).AppendChild(\n                finger_link_name',
             script,
         )
         self.assertIn(

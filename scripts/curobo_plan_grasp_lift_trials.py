@@ -20,8 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument("--max-attempts", type=int, default=2)
-    parser.add_argument("--robot")
-    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument(
@@ -73,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     ):
         parser.error(
             "automatic affordance-aware handover cannot be combined with a fixed "
-            "tool-frame goal"
+            "panda_hand goal"
         )
     return args
 
@@ -98,10 +97,6 @@ def write_manifest(path: Path, manifest: dict) -> None:
 
 def main() -> int:
     args = parse_args()
-    if args.robot is None:
-        if args.robot_profile != "franka_panda":
-            raise ValueError("--robot is required for non-Franka robot profiles")
-        args.robot = "franka.yml"
     source_indices = np.load(
         args.pregrasp_plan / "source_candidate_indices.npy", allow_pickle=False
     ).reshape(-1)
@@ -127,7 +122,6 @@ def main() -> int:
             "segmentation": str(args.segmentation),
             "pregrasp_plan": str(args.pregrasp_plan),
         },
-        "robot_profile": args.robot_profile,
         "policy": {
             "candidate_order": "pregrasp score order",
             "maximum_physical_trials": args.max_physical_trials,
@@ -185,8 +179,6 @@ def main() -> int:
             str(source_index),
             "--robot",
             args.robot,
-            "--robot-profile",
-            args.robot_profile,
             "--device",
             args.device,
             "--lift-offset",

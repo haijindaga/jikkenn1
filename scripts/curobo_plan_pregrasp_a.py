@@ -41,8 +41,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/curobo_voxel_fix_check.json"),
     )
-    parser.add_argument("--robot")
-    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--approach-offset", type=float, default=0.15)
     parser.add_argument("--max-candidates", type=int, default=10)
@@ -177,20 +176,10 @@ def main() -> int:
         load_backend_a_esdf,
         load_singleview_observed_pointcloud,
         prepare_pregrasp_goalset,
-        rotation_offset_diagnostics,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
         validate_voxel_fix_report,
     )
-    from panda_handover.geometry import matrix_from_pose
-    from panda_handover.robot_profiles import get_robot_profile
-    from panda_handover.robot_state import load_robot_joint_positions
-
-    profile = get_robot_profile(args.robot_profile)
-    if args.robot is None:
-        if profile.name != "franka_panda":
-            raise ValueError("--robot is required for non-Franka robot profiles")
-        args.robot = profile.curobo_robot_config
 
     # Keep both scene paths on the exact reviewed cuRobo checkout.  The voxel
     # regression is additionally required before real ESDF values reach it.
@@ -209,9 +198,7 @@ def main() -> int:
     else:
         assert args.prepared_map is not None
         observed_scene = load_singleview_observed_pointcloud(
-            args.prepared_map,
-            args.capture,
-            expected_robot_profile=profile.name,
+            args.prepared_map, args.capture
         )
 
     handover_report_path = args.candidates / "handover_rerank_check.json"
@@ -244,15 +231,12 @@ def main() -> int:
         collision_safety.get("static_gripper_pose_vs_observed_scene_checked") is not True
     ):
         raise ValueError("GraspGenX static collision filter did not pass")
-    if collision_report.get("robot_profile", "franka_panda") != profile.name:
-        raise ValueError("collision-filtered candidates use a different robot profile")
     if collision_safety.get("safe_to_execute") is not False:
         raise ValueError("unexpected executable candidate artifact")
 
-    tool_path = args.candidates / "tool_world.npy"
-    if not tool_path.is_file() and profile.name == "franka_panda":
-        tool_path = args.candidates / "panda_hand_world.npy"
-    tool_world = np.load(tool_path, allow_pickle=False)
+    panda_hand_world = np.load(
+        args.candidates / "panda_hand_world.npy", allow_pickle=False
+    )
     scores = np.load(args.candidates / "scores.npy", allow_pickle=False)
     kept_path = args.candidates / "kept_candidate_indices.npy"
     kept_indices = np.load(kept_path, allow_pickle=False) if kept_path.is_file() else None
@@ -260,7 +244,7 @@ def main() -> int:
         args.capture / "T_world_robot_base.npy", allow_pickle=False
     )
     goalset = prepare_pregrasp_goalset(
-        tool_world,
+        panda_hand_world,
         scores,
         T_world_robot_base,
         approach_offset_m=args.approach_offset,
@@ -274,12 +258,10 @@ def main() -> int:
     robot_report = json.loads(
         (args.capture / "robot_state.json").read_text(encoding="utf-8")
     )
-    if robot_report.get("robot", "franka_panda") != profile.name:
-        raise ValueError("capture uses a different robot profile")
     captured_joint_names = tuple(robot_report["joint_names"])
-    captured_joint_positions = load_robot_joint_positions(args.capture).astype(
-        np.float32, copy=False
-    )
+    captured_joint_positions = np.load(
+        args.capture / "panda_joint_positions.npy", allow_pickle=False
+    ).astype(np.float32, copy=False)
 
     import torch
     if not torch.cuda.is_available():
@@ -342,10 +324,8 @@ def main() -> int:
         max_goalset=len(goalset.scores),
     )
     planner = MotionPlanner(planner_cfg)
-    if planner.tool_frames != [profile.tool_frame]:
-        raise RuntimeError(
-            f"reviewed {profile.name} tool frame changed: {planner.tool_frames}"
-        )
+    if planner.tool_frames != ["panda_hand"]:
+        raise RuntimeError(f"reviewed Franka tool frame changed: {planner.tool_frames}")
     planner.warmup(enable_graph=True, num_warmup_iterations=2)
 
     start_positions = select_named_joint_positions(
@@ -368,99 +348,9 @@ def main() -> int:
     # Query the same collision spheres and scene used by cuRobo's optimizers.
     # Zero activation measures actual overlap; 10 mm matches the optimizer cost.
     start_kinematics = planner.compute_kinematics(current_state)
-    observed_tool_path = args.capture / "T_robot_base_tool.npy"
-    model_alignment = {
-        "checked": False,
-        "observed_transform": str(observed_tool_path),
-        "tool_frame": profile.tool_frame,
-        "isaac_observed_tool_frame": profile.isaac_observed_tool_frame,
-        "isaac_observed_tool_to_planning_tool_transform": [
-            list(row)
-            for row in profile.isaac_observed_tool_to_planning_tool_transform
-        ],
-        "translation_error_m": None,
-        "rotation_error_rad": None,
-        "translation_tolerance_m": 0.005,
-        "rotation_tolerance_rad": float(np.deg2rad(2.0)),
-        "passed": None,
-    }
-    if observed_tool_path.is_file():
-        observed_tool = np.load(observed_tool_path, allow_pickle=False)
-        # MotionPlanner.compute_kinematics returns a KinematicsState whose
-        # frame-indexed poses live in ToolPose.  Query the configured tool
-        # frame explicitly; KinematicsState.ee_pose belongs to cuRobo's older
-        # CudaRobotModelState API and is not present in this planner API.
-        ee_pose = start_kinematics.tool_poses.get_link_pose(profile.tool_frame)
-        curobo_tool = matrix_from_pose(
-            _cpu_numpy(ee_pose.position).reshape(-1, 3)[0],
-            _cpu_numpy(ee_pose.quaternion).reshape(-1, 4)[0],
-        )
-        translation_error_m = float(
-            np.linalg.norm(observed_tool[:3, 3] - curobo_tool[:3, 3])
-        )
-        rotation_delta = observed_tool[:3, :3].T @ curobo_tool[:3, :3]
-        rotation_diagnostics = rotation_offset_diagnostics(rotation_delta)
-        rotation_error_rad = float(
-            np.arccos(np.clip((np.trace(rotation_delta) - 1.0) / 2.0, -1.0, 1.0))
-        )
-        alignment_passed = bool(
-            translation_error_m <= model_alignment["translation_tolerance_m"]
-            and rotation_error_rad <= model_alignment["rotation_tolerance_rad"]
-        )
-        model_alignment.update(
-            {
-                "checked": True,
-                "translation_error_m": translation_error_m,
-                "rotation_error_rad": rotation_error_rad,
-                "observed_transform_matrix": observed_tool.tolist(),
-                "curobo_transform_matrix": curobo_tool.tolist(),
-                "rotation_delta_observed_to_curobo": rotation_diagnostics,
-                "passed": alignment_passed,
-            }
-        )
-        if not alignment_passed:
-            alignment_message = (
-                "Isaac and cuRobo tool frames disagree at the captured state: "
-                f"translation={translation_error_m:.6g} m, "
-                f"rotation={rotation_error_rad:.6g} rad; do not plan until the "
-                "official UR10e/Robotiq mount representations are aligned"
-            )
-    elif profile.name != "franka_panda":
-        alignment_message = (
-            "non-Franka capture has no T_robot_base_tool.npy model-alignment evidence"
-        )
-        model_alignment["passed"] = False
-    else:
-        alignment_message = None
-    if model_alignment["passed"] is False:
-        report = {
-            "status": "robot_model_alignment_failed",
-            "inputs": {
-                "capture": str(args.capture),
-                "candidates": str(args.candidates),
-                "robot": args.robot,
-            },
-            "robot_profile": profile.name,
-            "robot_model_alignment": model_alignment,
-            "failure": {
-                "stage": "isaac_curobo_tool_frame_alignment",
-                "message": alignment_message,
-            },
-            "safety": {
-                "trajectory_saved": False,
-                "trajectory_executed": False,
-                "safe_to_execute": False,
-            },
-        }
-        report_path = output / "pregrasp_plan_check.json"
-        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        planner.destroy()
-        print(json.dumps(report, indent=2))
-        print(f"saved: {report_path}")
-        return 2
     start_spheres = start_kinematics.robot_spheres
     if start_spheres is None:
-        raise RuntimeError("cuRobo robot model returned no collision spheres")
+        raise RuntimeError("cuRobo Franka model returned no collision spheres")
     collision_buffer = CollisionBuffer.from_shape(start_spheres.shape, device_cfg)
     collision_weight = torch.tensor([1.0], device=device_cfg.device, dtype=torch.float32)
 
@@ -703,17 +593,15 @@ def main() -> int:
             "static_collision_filter_report": str(collision_report_path),
             **scene_inputs,
         },
-        "robot_profile": profile.name,
-        "robot_model_alignment": model_alignment,
         "frames": {
-            "map": "robot base",
-            "goal": profile.tool_frame,
+            "map": "panda_link0 robot base",
+            "goal": "panda_hand",
             "candidate_input": "world",
         },
         "parameters": {
             "robot": args.robot,
             "device": args.device,
-            "approach_axis": f"negative {profile.tool_frame} Z",
+            "approach_axis": "negative panda_hand Z",
             "approach_offset_m": args.approach_offset,
             "candidate_count": len(goalset.scores),
             "excluded_source_candidate_indices": sorted(

@@ -36,8 +36,7 @@ def parse_args() -> argparse.Namespace:
         help="Matching SAM3 directories, in the same order as --capture",
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--robot")
-    parser.add_argument("--robot-profile", default="franka_panda")
+    parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--voxel-size", type=float, default=0.01)
     parser.add_argument("--esdf-voxel-size", type=float, default=0.01)
@@ -89,14 +88,6 @@ def main() -> int:
         extent_covers_requested,
         validate_mapping_inputs,
     )
-    from panda_handover.robot_profiles import get_robot_profile
-    from panda_handover.robot_state import load_robot_joint_positions
-
-    profile = get_robot_profile(args.robot_profile)
-    if args.robot is None:
-        if profile.name != "franka_panda":
-            raise ValueError("--robot is required for non-Franka robot profiles")
-        args.robot = profile.curobo_robot_config
 
     input_pairs = pair_capture_inputs(args.capture, args.segmentation)
 
@@ -118,21 +109,17 @@ def main() -> int:
         T_world_robot_base = np.load(capture_path / "T_world_robot_base.npy").astype(
             np.float64, copy=False
         )
-        joint_positions = load_robot_joint_positions(capture_path).astype(
+        joint_positions = np.load(capture_path / "panda_joint_positions.npy").astype(
             np.float32, copy=False
         )
         robot_report = json.loads(
             (capture_path / "robot_state.json").read_text(encoding="utf-8")
         )
-        if robot_report.get("robot", "franka_panda") != profile.name:
-            raise ValueError(
-                f"{capture_path}: capture robot profile does not match {profile.name}"
-            )
         joint_names = tuple(robot_report["joint_names"])
         validate_mapping_inputs(depth, rgb, intrinsics, target_mask, T_robot_camera)
         if joint_positions.shape != (len(joint_names),):
             raise ValueError(
-                f"{capture_path}: saved robot state has {len(joint_names)} names "
+                f"{capture_path}: saved Panda state has {len(joint_names)} names "
                 f"but {joint_positions.shape} positions"
             )
         if image_shape is None:
@@ -148,7 +135,7 @@ def main() -> int:
             T_world_robot_base, reference_world_robot_base, atol=1e-6, rtol=0.0
         ):
             raise ValueError(
-                f"{capture_path}: robot base moved between captures; "
+                f"{capture_path}: Panda base moved between captures; "
                 "multi-view fusion requires one fixed robot-base map frame"
             )
         views.append(
@@ -357,8 +344,7 @@ def main() -> int:
         },
         "frames": {
             "camera_pose": "T_robot_base_camera",
-            "map": "robot base",
-            "robot_profile": profile.name,
+            "map": "franka robot base",
         },
         "parameters": {
             "voxel_size_m": args.voxel_size,
