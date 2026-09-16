@@ -17,6 +17,39 @@ from panda_handover.grasp_candidates import (
 
 
 class GraspCandidateTests(unittest.TestCase):
+    def test_robotiq_candidates_do_not_inherit_panda_frame_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = save_grasp_candidates(
+                output, grasps_camera=np.eye(4)[None], scores=np.array([0.8]),
+                branch_tags=["diff"], T_world_camera=np.eye(4), input_point_count=123,
+                parameters={"gripper": "robotiq_2f_85"}, server_health={}, server_metadata={},
+                gripper_name="robotiq_2f_85")
+            self.assertEqual(report["gripper"], "robotiq_2f_85")
+            self.assertTrue((output / "grasps_world.npy").is_file())
+            self.assertFalse((output / "panda_hand_world.npy").exists())
+            self.assertFalse((output / "T_grasp_panda_hand.npy").exists())
+            self.assertNotIn("panda_frame_offset", report["reference"])
+            self.assertFalse(report["safety"]["tool_frame_conversion_verified"])
+            (output / "panda_hand_world.npy").touch()
+            with self.assertRaises(FileExistsError):
+                save_grasp_candidates(
+                    output, grasps_camera=np.eye(4)[None], scores=np.array([0.8]),
+                    branch_tags=[], T_world_camera=np.eye(4), input_point_count=123,
+                    parameters={}, server_health={}, server_metadata={}, gripper_name="robotiq_2f_85")
+
+    def test_robotiq_filter_saves_no_panda_tool_pose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            report = save_collision_filter_results(
+                output, grasps_camera=np.eye(4)[None], scores=np.array([0.8]), branch_tags=["diff"],
+                collision_free_mask=np.array([True]), T_world_camera=np.eye(4),
+                collision_scene_camera=np.ones((2, 3)), scene_point_count_before_downsampling=2,
+                parameters={"gripper": "robotiq_2f_85"}, gripper_name="robotiq_2f_85")
+            self.assertFalse((output / "panda_hand_world.npy").exists())
+            self.assertEqual(report["gripper"], "robotiq_2f_85")
+            self.assertFalse(report["safety"]["tool_frame_conversion_verified"])
+
     def test_prepare_scene_preserves_organized_points_and_zeros_invalid_labels(self):
         points = np.array(
             [[[1.0, 2.0, 3.0], [np.nan, np.nan, np.nan]],

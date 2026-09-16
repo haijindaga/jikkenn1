@@ -87,9 +87,10 @@ def split_target_from_scene(
 
 
 def transform_grasp_poses(
-    grasps_camera: np.ndarray, T_world_camera: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Convert canonical GraspGenX poses to world and Panda tool poses."""
+    grasps_camera: np.ndarray, T_world_camera: np.ndarray,
+    T_grasp_tool: np.ndarray | None = T_GRASP_PANDA_HAND,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Convert canonical poses; None deliberately omits unverified tool poses."""
     grasps = np.asarray(grasps_camera, dtype=np.float64)
     transform = np.asarray(T_world_camera, dtype=np.float64)
     if grasps.ndim != 3 or grasps.shape[1:] != (4, 4):
@@ -100,7 +101,12 @@ def transform_grasp_poses(
         raise ValueError("grasp poses and T_world_camera must be finite")
 
     grasps_world = np.einsum("ij,njk->nik", transform, grasps)
-    panda_hand_world = np.einsum("nij,jk->nik", grasps_world, T_GRASP_PANDA_HAND)
+    if T_grasp_tool is None:
+        return grasps_world.astype(np.float32), None
+    tool_transform = np.asarray(T_grasp_tool, dtype=np.float64)
+    if tool_transform.shape != (4, 4) or not np.all(np.isfinite(tool_transform)):
+        raise ValueError("T_grasp_tool must be a finite 4x4 transform")
+    panda_hand_world = np.einsum("nij,jk->nik", grasps_world, tool_transform)
     return grasps_world.astype(np.float32), panda_hand_world.astype(np.float32)
 
 
@@ -155,6 +161,7 @@ def save_grasp_candidates(
     parameters: dict[str, Any],
     server_health: dict[str, Any],
     server_metadata: dict[str, Any],
+    gripper_name: str = "franka_panda",
 ) -> dict[str, Any]:
     """Save raw and transformed candidates plus an explicit safety report."""
     output = Path(output)
@@ -166,14 +173,22 @@ def save_grasp_candidates(
     if branch_tags and len(branch_tags) != grasps_camera.shape[0]:
         raise ValueError("branch_tags and grasps_camera have different lengths")
 
+    if gripper_name not in ("franka_panda", "robotiq_2f_85"):
+        raise ValueError(f"Unreviewed gripper: {gripper_name}")
+    if parameters.get("gripper", gripper_name) != gripper_name:
+        raise ValueError("Gripper provenance disagrees with candidate output")
+    if gripper_name != "franka_panda" and any((output / name).exists() for name in ("panda_hand_world.npy", "T_grasp_panda_hand.npy")):
+        raise FileExistsError("Output contains stale Panda tool poses; use a new output")
     grasps_world, panda_hand_world = transform_grasp_poses(
-        grasps_camera, T_world_camera
+        grasps_camera, T_world_camera,
+        T_GRASP_PANDA_HAND if gripper_name == "franka_panda" else None,
     )
     np.save(output / "grasps_camera.npy", grasps_camera)
     np.save(output / "scores.npy", scores)
     np.save(output / "grasps_world.npy", grasps_world)
-    np.save(output / "panda_hand_world.npy", panda_hand_world)
-    np.save(output / "T_grasp_panda_hand.npy", T_GRASP_PANDA_HAND)
+    if panda_hand_world is not None:
+        np.save(output / "panda_hand_world.npy", panda_hand_world)
+        np.save(output / "T_grasp_panda_hand.npy", T_GRASP_PANDA_HAND)
     (output / "branch_tags.json").write_text(
         json.dumps(list(branch_tags), indent=2) + "\n", encoding="utf-8"
     )
@@ -201,7 +216,7 @@ def save_grasp_candidates(
             "score_max": float(scores.max()) if scores.size else None,
             "camera_pose_quality": pose_quality(grasps_camera),
             "world_pose_quality": pose_quality(grasps_world),
-            "panda_hand_pose_quality": pose_quality(panda_hand_world),
+            "panda_hand_pose_quality": pose_quality(panda_hand_world) if panda_hand_world is not None else None,
         },
         "frames": {
             "grasps_camera.npy": "T_camera_graspgenx_grasp",
@@ -216,6 +231,12 @@ def save_grasp_candidates(
             "manual_review_required": True,
         },
     }
+    report["gripper"] = gripper_name
+    if panda_hand_world is None:
+        report["reference"].pop("panda_frame_offset")
+        report["frames"].pop("panda_hand_world.npy")
+        report["safety"]["tool_frame_conversion_verified"] = False
+        report["next_gate"] = "Match the installed Robotiq geometry and grasp-to-tool frame before planning."
     (output / "graspgenx_check.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -233,6 +254,7 @@ def save_collision_filter_results(
     collision_scene_camera: np.ndarray,
     scene_point_count_before_downsampling: int,
     parameters: dict[str, Any],
+    gripper_name: str = "franka_panda",
 ) -> dict[str, Any]:
     """Persist the official point-cloud collision filter's exact inputs/results."""
     output = Path(output)
@@ -256,8 +278,15 @@ def save_collision_filter_results(
     filtered_camera = grasps[keep]
     filtered_scores = scores[keep]
     filtered_tags = [tag for tag, accepted in zip(branch_tags, keep) if accepted]
+    if gripper_name not in ("franka_panda", "robotiq_2f_85"):
+        raise ValueError(f"Unreviewed gripper: {gripper_name}")
+    if parameters.get("gripper", gripper_name) != gripper_name:
+        raise ValueError("Gripper provenance disagrees with collision-filter output")
+    if gripper_name != "franka_panda" and any((output / name).exists() for name in ("panda_hand_world.npy", "T_grasp_panda_hand.npy")):
+        raise FileExistsError("Output contains stale Panda tool poses; use a new output")
     filtered_world, filtered_panda_hand = transform_grasp_poses(
-        filtered_camera, T_world_camera
+        filtered_camera, T_world_camera,
+        T_GRASP_PANDA_HAND if gripper_name == "franka_panda" else None,
     )
     best_filtered_index = (
         int(np.argmax(filtered_scores)) if filtered_scores.size else None
@@ -274,7 +303,8 @@ def save_collision_filter_results(
     np.save(output / "grasps_camera.npy", filtered_camera)
     np.save(output / "scores.npy", filtered_scores)
     np.save(output / "grasps_world.npy", filtered_world)
-    np.save(output / "panda_hand_world.npy", filtered_panda_hand)
+    if filtered_panda_hand is not None:
+        np.save(output / "panda_hand_world.npy", filtered_panda_hand)
     (output / "branch_tags.json").write_text(
         json.dumps(filtered_tags, indent=2) + "\n", encoding="utf-8"
     )
@@ -305,7 +335,7 @@ def save_collision_filter_results(
             ),
             "camera_pose_quality": pose_quality(filtered_camera),
             "world_pose_quality": pose_quality(filtered_world),
-            "panda_hand_pose_quality": pose_quality(filtered_panda_hand),
+            "panda_hand_pose_quality": pose_quality(filtered_panda_hand) if filtered_panda_hand is not None else None,
         },
         "safety": {
             "static_gripper_pose_vs_observed_scene_checked": True,
@@ -319,6 +349,8 @@ def save_collision_filter_results(
             "manual_review_required": True,
         },
     }
+    report["gripper"] = gripper_name
+    report["safety"]["tool_frame_conversion_verified"] = filtered_panda_hand is not None
     (output / "collision_filter_check.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

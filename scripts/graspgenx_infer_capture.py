@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-grasps", type=int, default=200)
     parser.add_argument("--grasp-threshold", type=float, default=-1.0)
     parser.add_argument("--topk", type=int, default=100)
+    parser.add_argument("--gripper-name", choices=("franka_panda", "robotiq_2f_85"), default="franka_panda")
     return parser.parse_args()
 
 
@@ -68,7 +69,7 @@ def main() -> int:
             f"--min-object-points={args.min_object_points}"
         )
 
-    sweep_params = SweepVolumeParams.from_gripper_config("franka_panda")
+    sweep_params = SweepVolumeParams.from_gripper_config(args.gripper_name)
     started = time.monotonic()
     with GraspGenXClient(
         host=args.host, port=args.port, timeout_ms=args.timeout_ms
@@ -103,7 +104,7 @@ def main() -> int:
         "segmentation_role": args.segmentation_role,
         "fallback_to_whole_object": False,
         "planner": args.planner,
-        "gripper": "franka_panda",
+        "gripper": args.gripper_name,
         "min_object_points": args.min_object_points,
         "num_grasps": args.num_grasps,
         "grasp_threshold": args.grasp_threshold,
@@ -121,6 +122,7 @@ def main() -> int:
         parameters=parameters,
         server_health=health,
         server_metadata=metadata,
+        gripper_name=args.gripper_name,
     )
     print(f"valid instance points: {instance_count}", flush=True)
     print(f"GraspGenX candidates: {report['candidates']['count']}", flush=True)

@@ -153,6 +153,13 @@ def _resolved_report_view_matches(report: dict[str, Any], capture: Path) -> bool
 
 def main() -> int:
     args = parse_args()
+    for filename in ("collision_filter_check.json", "handover_rerank_check.json", "graspgenx_check.json"):
+        candidate_report_path = args.candidates / filename
+        if candidate_report_path.is_file():
+            candidate_report = json.loads(candidate_report_path.read_text(encoding="utf-8"))
+            gripper = candidate_report.get("gripper", candidate_report.get("parameters", {}).get("gripper", "franka_panda"))
+            if gripper != "franka_panda":
+                raise ValueError("Robotiq candidates require a verified matching robot model and grasp-to-tool transform; Panda planning is not interchangeable")
     if args.max_candidates <= 0 or args.max_attempts <= 0:
         raise ValueError("--max-candidates and --max-attempts must be positive")
     if args.scene_backend == "backend_a_esdf":

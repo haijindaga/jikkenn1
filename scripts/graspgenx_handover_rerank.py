@@ -58,6 +58,8 @@ def main() -> int:
     )
     if source_report.get("status") != "success":
         raise ValueError("source candidates did not pass static collision filtering")
+    if source_report.get("gripper", source_report.get("parameters", {}).get("gripper", "franka_panda")) != "franka_panda":
+        raise ValueError("Handover reranking currently requires the reviewed Panda gripper profile")
     receive_report = json.loads(
         (args.receive_segmentation / "segmentation_check.json").read_text(
             encoding="utf-8"

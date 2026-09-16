@@ -38,6 +38,8 @@ def parse_args():
                         help="Save replacement scene and joint inventory without commanding motion")
     parser.add_argument("--phase-frames", type=int, default=180)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--export-model-evidence", action="store_true",
+                        help="After reopening, save measured rigid-body frames and USD joint/collision inventory")
     parser.add_argument("--simulation-only", action="store_true", required=True)
     args = parser.parse_args()
     if not args.scene_usd.is_file():
@@ -49,6 +51,8 @@ def parse_args():
         parser.error("output already exists; choose a new output directory")
     if args.phase_frames <= 0:
         parser.error("--phase-frames must be positive")
+    if args.inspect_only and args.export_model_evidence:
+        parser.error("Model evidence requires the completed open/close pass, not --inspect-only")
     return args
 
 
@@ -207,6 +211,19 @@ def main():
         }
         report["automatic_checks"] = checks
         report["status"] = "success" if all(checks.values()) else "smoke_test_failed"
+        if args.export_model_evidence:
+            from isaacsim.core.prims import SingleRigidPrim
+            from panda_handover.robot_model_evidence import collect_model_evidence
+            evidence = collect_model_evidence(active_stage, robot_path, names,
+                                              robot.get_joint_positions(), SingleRigidPrim)
+            evidence["reference"] = report["reference"]
+            evidence["source_scene_sha256"] = source_hash
+            evidence["open_close_checks_passed"] = all(checks.values())
+            evidence["joint_properties"] = report["joint_properties"]
+            evidence_path = output / "robot_model_evidence.json"
+            evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            report["model_evidence"] = str(evidence_path)
+            print(f"saved: {evidence_path}", flush=True)
         report["next_gate"] = "Review opening/closing visually, then prepare matching GraspGenX and cuRobo profiles before grasp trials."
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"saved: {report_path}; {report['status']}", flush=True)

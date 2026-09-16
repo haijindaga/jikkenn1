@@ -64,7 +64,7 @@ source scene hash is checked and source assets are never saved. The output
 depends on the original source scene and official asset paths; it is not a
 portable packaged asset. Output-directory reuse is refused. Scene physics settings
 are retained by default. Optional `--replay-physics cpu` enables CPU PhysX / Fabric
-OFF only in this test process. Normal Panda scripts remain unchanged.
+OFF only in this test process. Normal Panda defaults remain unchanged.
 
 The JSON `gripper_swap_check.json` records the asset, variant, joint inventory,
 authored gains, USD joint/mimic schemas and attributes, physics settings, arm
@@ -100,3 +100,59 @@ fields. `Usd.Stage.GetAllMetadata()` is not an available API. Regression tests
 exercise a stage without that method, as well as real-USD variant composition,
 metadata preservation and relative object references. A separate Windows
 `usd-core` installation validates USD composition only, not Isaac Sim/PhysX.
+
+## Robotiq connection preparation
+
+Opening/closing has been visually confirmed on the user's installed model.
+Candidate inference now accepts `--gripper-name robotiq_2f_85` (default remains
+`franka_panda`). It uses the official `SweepVolumeParams.from_gripper_config`
+and `infer_scene_pc` contract: gripper geometry is sent as sweep-volume parameters,
+not an invented `gripper_name` RPC argument. Reports record the chosen gripper.
+Static filtering infers the gripper from that report, requires its actual
+`coll_mesh.obj`, rejects empty meshes and explicit gripper mismatches, and uses
+the official filter. These checks do **not** establish equivalence with the USD.
+
+Robotiq results deliberately do not contain `panda_hand_world.npy` or the Panda
+90-degree grasp-frame offset. Existing Panda-only pregrasp and handover reranking
+reject Robotiq candidates explicitly. This is not yet a full Robotiq pipeline:
+robot masking, collision geometry, grasp-frame conversion and execution must all
+use a matching verified profile first. Old Panda candidates/plans cannot simply
+be reused with the new fingers.
+
+The next experiment collects actual runtime rigid-body frames, measured joint
+positions, joint body relationships, local-frame/mimic attributes and collision
+inventory. It wraps only existing rigid bodies using `SingleRigidPrim` with
+`reset_xform_properties=False`; it does not author new mounts or meshes. USD
+xforms are not used as a substitute for PhysX runtime poses. The optional FK
+check runs separately in the GraspGenX environment and reuses cuRobo's public
+`Kinematics` API, with collision spheres disabled, rather than implementing FK.
+It compares all eight arm frames at one measured posture. Passing that check
+does not validate the Robotiq mount or grasp frame, nor authorize planning.
+
+After committing/pushing these files from the same Windows repository and
+pulling on Linux, run:
+
+```bash
+cd /home/suzutaro/projects/jikkenn1
+conda activate env_isaaclab
+head_plan=outputs/hammer_head_handover_fixedjoint_e2e_v1/curobo_grasp_lift_trials/candidate_039
+head_capture=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["inputs"]["capture"])' "$head_plan/grasp_lift_plan_check.json")
+test_run="outputs/panda_robotiq85_model_$(date +%Y%m%d_%H%M%S)"
+
+python scripts/isaac_try_panda_robotiq.py \
+  --scene-usd scenes/hammer_01.usda --capture "$head_capture" \
+  --output "$test_run" --export-model-evidence --headless --simulation-only && {
+  evidence_path="/home/suzutaro/projects/jikkenn1/$test_run/robot_model_evidence.json"
+  cd /home/suzutaro/GraspGenX
+  uv run --no-sync python \
+    /home/suzutaro/projects/jikkenn1/scripts/check_panda_robotiq_arm_fk.py \
+    --evidence "$evidence_path" \
+    --output "${evidence_path%/*}/arm_fk_check.json"
+}
+```
+
+Both commands use new output paths and refuse overwriting. The first command is
+a finite open/close test, not a hammer grasp; remove `--headless` to see it (close
+its GUI to proceed). Review both JSON reports before creating the full profile.
+In particular, provide `robot_model_evidence.json` for matching the installed
+mount and joint/geometry structure; `arm_alignment_passed` alone is insufficient.

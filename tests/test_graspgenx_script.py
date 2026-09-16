@@ -13,7 +13,7 @@ import numpy as np
 class _FakeSweepVolumeParams:
     @classmethod
     def from_gripper_config(cls, gripper_name):
-        if gripper_name != "franka_panda":
+        if gripper_name not in ("franka_panda", "robotiq_2f_85"):
             raise AssertionError(gripper_name)
         return cls()
 
@@ -43,6 +43,8 @@ class _FakeClient:
         return {"status": "ok"}
 
     def infer_scene_pc(self, **kwargs):
+        if "gripper_name" in kwargs:
+            raise AssertionError("Official scene-PC API uses sweep_volume_params, not gripper_name")
         if kwargs["point_cloud"].shape != (2, 2, 3):
             raise AssertionError(kwargs["point_cloud"].shape)
         if kwargs["instance_mask"].dtype != np.int32:
@@ -62,6 +64,12 @@ class _FakeGripper:
 
 class GraspGenXScriptTests(unittest.TestCase):
     def test_official_client_contract_saves_frame_explicit_results(self):
+        self.run_client_contract("franka_panda")
+
+    def test_robotiq_client_uses_official_sweep_params_without_panda_transform(self):
+        self.run_client_contract("robotiq_2f_85")
+
+    def run_client_contract(self, gripper_name):
         project = Path(__file__).resolve().parents[1]
         script_path = project / "scripts" / "graspgenx_infer_capture.py"
         fake_modules = {
@@ -93,22 +101,39 @@ class GraspGenXScriptTests(unittest.TestCase):
                 "--segmentation-role", "grasp_part",
                 "--output", str(output),
                 "--min-object-points", "1",
+                "--gripper-name", gripper_name,
             ]
-            with patch.dict(sys.modules, fake_modules), patch.object(sys, "argv", argv):
+            with patch.dict(sys.modules, fake_modules), patch.object(sys, "argv", argv), patch.object(
+                _FakeSweepVolumeParams, "from_gripper_config", wraps=_FakeSweepVolumeParams.from_gripper_config
+            ) as sweep_factory:
                 spec = importlib.util.spec_from_file_location("graspgenx_capture_test", script_path)
                 module = importlib.util.module_from_spec(spec)
                 assert spec.loader is not None
                 spec.loader.exec_module(module)
                 result = module.main()
+                sweep_factory.assert_called_once_with(gripper_name)
 
             self.assertEqual(result, 0)
             self.assertTrue((output / "grasps_camera.npy").is_file())
-            self.assertTrue((output / "panda_hand_world.npy").is_file())
+            self.assertEqual((output / "panda_hand_world.npy").is_file(), gripper_name == "franka_panda")
             report = json.loads((output / "graspgenx_check.json").read_text())
+            self.assertEqual(report["gripper"], gripper_name)
             self.assertEqual(report["parameters"]["segmentation_role"], "grasp_part")
             self.assertFalse(report["parameters"]["fallback_to_whole_object"])
 
     def test_official_collision_filter_contract_uses_surrounding_scene(self):
+        self.run_filter_contract("franka_panda")
+
+    def test_robotiq_collision_filter_uses_matching_mesh_and_provenance(self):
+        self.run_filter_contract("robotiq_2f_85")
+
+    def test_gripper_mismatch_is_rejected_before_collision_check(self):
+        self.run_filter_contract("robotiq_2f_85", failure="mismatch")
+
+    def test_missing_robotiq_mesh_does_not_fall_back_to_dummy_box(self):
+        self.run_filter_contract("robotiq_2f_85", failure="missing_mesh")
+
+    def run_filter_contract(self, gripper_name, failure=None):
         project = Path(__file__).resolve().parents[1]
         script_path = project / "scripts" / "graspgenx_filter_capture.py"
         observed = {}
@@ -136,9 +161,10 @@ class GraspGenXScriptTests(unittest.TestCase):
         fake_modules[
             "graspgenx.utils.collision_filter"
         ].filter_colliding_grasps = fake_filter
-        fake_modules["graspgenx.x_grippers"].resolve_gripper_info = (
-            lambda name: _FakeGripper()
-        )
+        def resolve_info(name):
+            self.assertEqual(name, gripper_name)
+            return types.SimpleNamespace(collision_mesh=types.SimpleNamespace(vertices=np.zeros((8, 3)), faces=np.zeros((12, 3))))
+        fake_modules["graspgenx.x_grippers"].resolve_gripper_info = resolve_info
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -149,6 +175,13 @@ class GraspGenXScriptTests(unittest.TestCase):
             capture.mkdir()
             segmentation.mkdir()
             candidates.mkdir()
+            assets = root / "gripper_assets"
+            assets.mkdir()
+            (assets / "config.json").write_text("{}")
+            if failure != "missing_mesh":
+                (assets / "coll_mesh.obj").write_text("test mesh stand-in")
+            fake_modules["graspgenx.x_grippers"].resolve_gripper_asset_dir = lambda name: str(assets)
+            (candidates / "graspgenx_check.json").write_text(json.dumps({"gripper": gripper_name}))
             points = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
             rgb = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
             mask = np.array([[True, False, False], [False, True, False]])
@@ -173,6 +206,8 @@ class GraspGenXScriptTests(unittest.TestCase):
                 "--num-collision-samples", "5",
                 "--device", "cpu",
             ]
+            if failure == "mismatch":
+                argv.extend(["--gripper-name", "franka_panda"])
             with patch.dict(sys.modules, fake_modules), patch.object(sys, "argv", argv):
                 spec = importlib.util.spec_from_file_location(
                     "graspgenx_collision_test", script_path
@@ -180,6 +215,12 @@ class GraspGenXScriptTests(unittest.TestCase):
                 module = importlib.util.module_from_spec(spec)
                 assert spec.loader is not None
                 spec.loader.exec_module(module)
+                if failure:
+                    with self.assertRaises(ValueError if failure == "mismatch" else FileNotFoundError):
+                        module.main()
+                    self.assertFalse(observed)
+                    self.assertFalse((output / "collision_filter_check.json").exists())
+                    return
                 result = module.main()
 
             self.assertEqual(result, 0)
@@ -193,6 +234,7 @@ class GraspGenXScriptTests(unittest.TestCase):
             saved = json.loads((output / "collision_filter_check.json").read_text())
             self.assertEqual(saved["scene"]["points_before_downsampling"], 4)
             self.assertEqual(saved["candidates"]["collision_free"], 1)
+            self.assertEqual(saved["gripper"], gripper_name)
             self.assertFalse(saved["safety"]["approach_sweep_checked"])
 
     def test_handover_rerank_reuses_official_gripper_and_preserves_provenance(self):

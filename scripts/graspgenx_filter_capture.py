@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--viser-port", type=int, default=8081)
     parser.add_argument("--max-visualized-grasps", type=int, default=20)
+    parser.add_argument("--gripper-name", choices=("franka_panda", "robotiq_2f_85"),
+                        help="Default: use candidate report, or Panda for legacy candidates")
     return parser.parse_args()
 
 
@@ -64,6 +66,19 @@ def main() -> int:
         split_target_from_scene,
     )
 
+    candidate_report_path = args.candidates / "graspgenx_check.json"
+    candidate_report = json.loads(candidate_report_path.read_text()) if candidate_report_path.is_file() else {}
+    recorded_gripper = candidate_report.get("gripper", candidate_report.get("parameters", {}).get("gripper", "franka_panda"))
+    gripper_name = args.gripper_name or recorded_gripper
+    if gripper_name not in ("franka_panda", "robotiq_2f_85") or gripper_name != recorded_gripper:
+        raise ValueError("Candidate and collision-filter grippers disagree; regenerate matching candidates")
+    if gripper_name == "robotiq_2f_85":
+        from graspgenx.x_grippers import resolve_gripper_asset_dir
+        asset_dir = Path(resolve_gripper_asset_dir(gripper_name))
+        for filename in ("config.json", "coll_mesh.obj"):
+            if not (asset_dir / filename).is_file():
+                raise FileNotFoundError(f"Required official gripper asset missing: {asset_dir / filename}; dummy mesh is not allowed")
+
     points_camera = np.load(args.capture / "points_camera.npy")
     rgb = np.load(args.capture / "rgb.npy")
     T_world_camera = np.load(args.capture / "T_world_camera.npy")
@@ -89,7 +104,9 @@ def main() -> int:
     else:
         collision_scene = surrounding
 
-    gripper = resolve_gripper_info("franka_panda")
+    gripper = resolve_gripper_info(gripper_name)
+    if gripper_name == "robotiq_2f_85" and (len(gripper.collision_mesh.vertices) == 0 or len(gripper.collision_mesh.faces) == 0):
+        raise ValueError("Official Robotiq collision mesh is empty; check Git LFS assets")
     surface_points, _ = trimesh.sample.sample_surface(
         gripper.collision_mesh, args.num_collision_samples
     )
@@ -106,6 +123,7 @@ def main() -> int:
     elapsed_ms = (time.monotonic() - started) * 1000.0
 
     parameters = {
+        "gripper": gripper_name,
         "collision_threshold_m": args.collision_threshold,
         "max_scene_points": args.max_scene_points,
         "num_collision_samples": args.num_collision_samples,
@@ -124,6 +142,7 @@ def main() -> int:
         collision_scene_camera=collision_scene,
         scene_point_count_before_downsampling=scene_count_before,
         parameters=parameters,
+        gripper_name=gripper_name,
     )
     print(
         "collision filter: "
