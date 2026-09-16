@@ -34,30 +34,51 @@ python scripts/isaac_try_panda_robotiq.py \
 The script opens, closes, and reopens the gripper (three seconds per phase), then
 keeps the GUI open with **Open / Close** buttons. `--headless` runs the finite
 smoke test and exits. It reads declared joint limits and drive gains; a
-zero-stiffness velocity drive remains velocity-controlled. It does not import
+zero-stiffness velocity drive uses standard `ArticulationAction` velocity targets
+at an explicitly recorded smoke-test speed (joint span / phase duration, capped
+by the authored maximum velocity), stopping near the limit. This small limit-stop
+adapter is not a claimed official Panda+Robotiq grasp controller. It does not import
 the Panda `Franka` hand controller, alter force/stiffness/damping/friction,
 attach an object, or run any old grasp trajectory. It records actual master
 joint motion and arm tracking, not an assumed visual/grasp success.
 
 ## Non-destructive composition
 
-The new output `scene.usda` sublayers the existing scene. In **this new layer
-only**, `/World/Panda` is inactive; a fresh reference to the official Panda USD
-appears at `/World/PandaRobotiq` with the Robotiq variant. This avoids old
-Panda-finger drive overrides leaking into the replacement. The root transform
-is copied, and the seven arm joint angles are read from the existing capture
-by **joint name**, not guessed or inherited from a different home pose.
+The new output `scene.usda` sublayers the existing scene and selects the official
+Robotiq variant **at the same `/World/Panda` path**. It does not create a second
+robot, deactivate the original, author a mounting joint, or replace references.
+Root-stage metadata is copied explicitly: USD sublayering alone does not inherit
+the original up axis or units. A non-metre or non-Z-up source is rejected rather
+than silently converted. Metadata, robot-root attributes, and non-robot prim
+attributes/relationships are compared before simulation. Relative object
+references remain anchored to the source layers.
+
+The seven arm joint angles are read from the existing capture by **joint name**,
+not guessed or inherited from a different home pose. Existing scene-level
+overrides are retained, not silently removed. If original Panda finger DOFs remain
+or additional gripper DOFs have independent drives, the motion test stops and
+saves the inventory for review; it does not guess how to clean up the scene.
 
 The table, object references, lights and camera are inherited unchanged. The
 source scene hash is checked and source assets are never saved. The output
 depends on the original source scene and official asset paths; it is not a
-portable packaged asset. Output-directory reuse is refused. CPU PhysX / Fabric
-OFF applies only to the test process. Normal Panda scripts remain unchanged.
+portable packaged asset. Output-directory reuse is refused. Scene physics settings
+are retained by default. Optional `--replay-physics cpu` enables CPU PhysX / Fabric
+OFF only in this test process. Normal Panda scripts remain unchanged.
 
 The JSON `gripper_swap_check.json` records the asset, variant, joint inventory,
-authored gains, CPU settings, arm angles, phase results and failure traceback.
+authored gains, USD joint/mimic schemas and attributes, physics settings, arm
+angles, phase results and failure traceback. Joint inventory is written before
+interpreting control conventions. The Isaac Sim 5.1 tensor DOF convention is
+Rotation=0, Translation=1; the old smoke test incorrectly expected Rotation=1.
 `success` means an open/close smoke test passed, **not that the hammer was picked**.
 Unknown master-joint or drive conventions fail rather than guessing commands.
+
+For an inventory-only pass add `--inspect-only`: the script loads the variant,
+initializes/reset the simulator, saves the inventory and exits without sending
+position/velocity commands. It is not a read-only simulator startup (World reset
+still initializes physics), and `inspection_complete` does not mean open/close
+or grasp success.
 
 ## Next gate
 
@@ -68,5 +89,7 @@ collision filtering and replay to that same profile. The original Panda
 candidate 039 is not a valid interchangeable-gripper grasp test. Do not pass
 this test scene into the current Panda-only end-to-end pipeline.
 
-The local Windows environment cannot execute Isaac Sim; runtime and grasp
-compatibility remain unverified until the Linux test is performed.
+The local Windows environment cannot execute Isaac Sim. Pure-Python tests cover
+control contracts and CLI defaults; additional real-USD composition tests run
+when `pxr` is available and otherwise skip. Runtime and grasp compatibility remain
+unverified until the Linux test is performed.

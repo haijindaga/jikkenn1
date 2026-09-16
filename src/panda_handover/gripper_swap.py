@@ -9,6 +9,62 @@ GRIPPER_VARIANT = "Robotiq_2F_85"
 ARM_JOINTS = tuple(f"panda_joint{i}" for i in range(1, 8))
 
 
+def create_variant_scene(source_stage, scene_path):
+    """Author only stage metadata and a variant opinion over the original scene.
+
+    References stay anchored to their original layers, so relative object paths
+    are not reinterpreted relative to the experiment output directory.
+    """
+    from pxr import Sdf, Usd, UsdGeom
+
+    robot_path = "/World/Panda"
+    original = source_stage.GetPrimAtPath(robot_path)
+    if not original or not original.IsActive():
+        raise RuntimeError("Input scene lacks active /World/Panda")
+    if UsdGeom.GetStageMetersPerUnit(source_stage) != 1.0:
+        raise RuntimeError("Input scene must use metres")
+    # World assumes a Z-up tabletop. Do not silently rotate a Y-up source.
+    if UsdGeom.GetStageUpAxis(source_stage) != UsdGeom.Tokens.z:
+        raise RuntimeError("Input tabletop scene must be Z-up; source was not changed")
+    layer = Sdf.Layer.CreateNew(str(scene_path))
+    layer.subLayerPaths = [source_stage.GetRootLayer().realPath]
+    stage = Usd.Stage.Open(layer)
+    # Stage metadata is read from the root/session layer, not from sublayers.
+    for key, value in source_stage.GetAllMetadata().items():
+        if key not in ("subLayers", "subLayerOffsets"):
+            if not stage.SetMetadata(key, value):
+                raise RuntimeError(f"Could not preserve source stage metadata: {key}")
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.GetStageUpAxis(source_stage))
+    UsdGeom.SetStageMetersPerUnit(stage, UsdGeom.GetStageMetersPerUnit(source_stage))
+    available = select_official_gripper(stage.GetPrimAtPath(robot_path))
+    layer.Save()
+    return stage, robot_path, available
+
+
+def scene_invariants(stage):
+    """Static composition check before simulation; excludes only robot children."""
+    from pxr import UsdGeom
+
+    rows = []
+    for prim in stage.Traverse():
+        path = str(prim.GetPath())
+        if path.startswith("/World/Panda/"):
+            continue
+        rows.append((path, str(prim.GetTypeName()),
+                     tuple((str(a.GetName()), str(a.Get()),
+                            tuple((t, str(a.Get(t))) for t in a.GetTimeSamples()))
+                           for a in prim.GetAttributes()),
+                     tuple((str(r.GetName()), tuple(map(str, r.GetTargets())))
+                           for r in prim.GetRelationships())))
+    return {
+        "up_axis": str(UsdGeom.GetStageUpAxis(stage)),
+        "meters_per_unit": UsdGeom.GetStageMetersPerUnit(stage),
+        "stage_metadata": {k: str(v) for k, v in stage.GetAllMetadata().items()
+                           if k not in ("subLayers", "subLayerOffsets")},
+        "non_robot_scene": rows,
+    }
+
+
 def select_official_gripper(prim):
     variants = prim.GetVariantSet("Gripper")
     available = list(variants.GetVariantNames())
@@ -41,7 +97,8 @@ def gripper_control_spec(names, properties, phase_duration_s):
     index = list(names).index("finger_joint")
     row = properties[index]
     lower, upper = float(row["lower"]), float(row["upper"])
-    if int(row["type"]) != 1 or not (
+    # Isaac Sim 5.1 tensor API: Rotation=0, Translation=1 (not legacy DC enums).
+    if int(row["type"]) != 0 or not (
         math.isfinite(lower) and math.isfinite(upper) and lower < upper
     ):
         raise RuntimeError("finger_joint must have finite revolute limits")
@@ -56,19 +113,24 @@ def gripper_control_spec(names, properties, phase_duration_s):
     max_velocity = float(row["maxVelocity"])
     if not math.isfinite(max_velocity) or max_velocity <= 0:
         raise RuntimeError("Invalid authored finger velocity limit")
+    max_effort = float(row["maxEffort"])
+    if not math.isfinite(max_effort) or max_effort <= 0:
+        raise RuntimeError("Invalid authored finger effort limit")
     return {
         "joint": "finger_joint", "index": index,
         "mode": "position" if stiffness > 0 else "velocity",
         "open_rad": lower, "closed_rad": upper,
-        "diagnostic_speed_rad_s": min(max_velocity, 2 * (upper - lower) / phase_duration_s),
+        # An explicitly labelled smoke-test speed, NOT a new feedback solver.
+        "diagnostic_speed_rad_s": min(max_velocity, (upper - lower) / phase_duration_s),
         "authored_stiffness": stiffness, "authored_damping": damping,
-        "authored_max_effort": float(row["maxEffort"]),
+        "authored_max_effort": max_effort,
     }
 
 
 def bounded_gripper_velocity(current, target, speed, dt):
+    """Constant signed velocity until the limit; no proportional controller."""
     if not all(map(math.isfinite, (current, target, speed, dt))) or dt <= 0 or speed <= 0:
         raise ValueError("Invalid gripper velocity command inputs")
-    if abs(target - current) < 1e-3:
+    if abs(target - current) <= max(1e-3, speed * dt):
         return 0.0
-    return float(np.clip((target - current) / dt, -speed, speed))
+    return math.copysign(speed, target - current)
