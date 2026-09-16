@@ -14,6 +14,15 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PrepareUr10eRobotProfileTests(unittest.TestCase):
+    def test_source_hash_is_independent_of_checkout_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lf = root / "lf.txt"
+            crlf = root / "crlf.txt"
+            lf.write_bytes(b"first\nsecond\n")
+            crlf.write_bytes(b"first\r\nsecond\r\n")
+            self.assertEqual(MODULE._sha256(lf), MODULE._sha256(crlf))
+
     def test_pinned_official_sources_match_recorded_hashes_and_contract(self) -> None:
         root = Path(__file__).parents[1] / MODULE.SOURCE_DIRECTORY
         urdf = root / f"{MODULE.SOURCE_STEM}.urdf"

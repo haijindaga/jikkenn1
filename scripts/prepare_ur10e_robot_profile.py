@@ -23,10 +23,10 @@ SOURCE_COMMIT = "dbaa7e8264f6314f8baca516511414186ad1105d"
 SOURCE_DIRECTORY = Path("config/robots/isaac_ros_cumotion_release_3_2")
 SOURCE_STEM = "ur10e_robotiq_2f_140"
 OFFICIAL_URDF_SHA256 = (
-    "47ea5d97ced93af17fe165f01a65058bdc913adcde22b1445598f34b1299ed4f"
+    "c750afb86d5a17d451aa85e70b228ac1014ec0b24a59e14883d87606c7e695a7"
 )
 OFFICIAL_XRDF_SHA256 = (
-    "750b01a70755c737ef0d0e04d1927c63358ddef54473d999c81682444d8fcb52"
+    "358e3066af9cd637c0e18022b709944b31a1962639f2e9c16f5bc71fd9f38160"
 )
 
 TOOL_FRAME = "grasp_frame"
@@ -56,11 +56,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    # Git may materialize text files as CRLF on Windows while the Ubuntu
+    # runtime checkout uses LF. Pin the source content, not the checkout's
+    # platform-specific line endings.
+    normalized = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def _require_hash(path: Path, expected: str) -> str:

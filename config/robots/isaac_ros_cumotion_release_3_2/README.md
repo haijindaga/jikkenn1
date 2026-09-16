@@ -12,6 +12,8 @@ That release provides the UR10e + Robotiq 2F-140 pair, including its
 exclusions, and `attached_object` planning frame. The files are immutable
 input to cuRobo's XRDF converter. `scripts/prepare_ur10e_robot_profile.py`
 checks their SHA-256 digests before conversion.
+The digest calculation normalizes text line endings to LF so that the same
+pinned Git content verifies identically on Windows and Ubuntu checkouts.
 
 The copied repository license is in `LICENSE` (Apache-2.0). Runtime simulation
 continues to use Isaac Sim 5.1's bundled `ur_gripper.usd`; the mandatory FK
