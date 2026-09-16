@@ -305,12 +305,13 @@ try:
     tool_prims = [
         prim
         for prim in Usd.PrimRange(robot_root_prim)
-        if prim.GetName() == profile.tool_frame
+        if prim.GetName() == profile.isaac_observed_tool_frame
         and prim.HasAPI(UsdPhysics.RigidBodyAPI)
     ]
     if len(tool_prims) != 1:
         raise RuntimeError(
-            f"expected one rigid-body tool frame {profile.tool_frame!r}, found "
+            "expected one rigid-body observed tool frame "
+            f"{profile.isaac_observed_tool_frame!r}, found "
             f"{[str(prim.GetPath()) for prim in tool_prims]}"
         )
     tool_view = XFormPrim(
@@ -319,9 +320,13 @@ try:
         reset_xform_properties=False,
     )
     tool_position, tool_orientation = tool_view.get_world_poses()
-    T_world_tool = matrix_from_pose(
+    T_world_observed_tool = matrix_from_pose(
         np.asarray(tool_position[0], dtype=np.float64),
         np.asarray(tool_orientation[0], dtype=np.float64),
+    )
+    T_world_tool = T_world_observed_tool @ np.asarray(
+        profile.isaac_observed_tool_to_planning_tool_transform,
+        dtype=np.float64,
     )
 
     target_aabb = np.asarray(
@@ -476,6 +481,8 @@ try:
         robot_profile=profile.name,
         tool_frame=profile.tool_frame,
         T_world_tool=T_world_tool,
+        observed_tool_frame=profile.isaac_observed_tool_frame,
+        T_world_observed_tool=T_world_observed_tool,
     )
     robot_state_path = robot_state.save(saved, T_world_camera)
 

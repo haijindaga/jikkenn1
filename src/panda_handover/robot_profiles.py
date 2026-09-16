@@ -24,6 +24,10 @@ class RobotProfile:
     default_robot_prim: str
     curobo_robot_config: str
     tool_frame: str
+    isaac_observed_tool_frame: str
+    isaac_observed_tool_to_planning_tool_transform: tuple[
+        tuple[float, float, float, float], ...
+    ]
     arm_joint_names: tuple[str, ...]
     gripper_joint_names: tuple[str, ...]
     gripper_open: tuple[float, ...]
@@ -69,6 +73,15 @@ class RobotProfile:
             len(row) != 4 for row in self.grasp_to_tool_transform
         ):
             raise ValueError("grasp_to_tool_transform must be 4x4")
+        if not self.isaac_observed_tool_frame:
+            raise ValueError("isaac_observed_tool_frame must not be empty")
+        observed_to_planning = self.isaac_observed_tool_to_planning_tool_transform
+        if len(observed_to_planning) != 4 or any(
+            len(row) != 4 for row in observed_to_planning
+        ):
+            raise ValueError(
+                "isaac_observed_tool_to_planning_tool_transform must be 4x4"
+            )
 
     def resolve_curobo_config(self, graspgenx_root: str | Path) -> str:
         """Resolve external generated configs while preserving bare built-ins."""
@@ -86,6 +99,11 @@ class RobotProfile:
             "curobo_robot_config": resolved_curobo_config
             or self.curobo_robot_config,
             "tool_frame": self.tool_frame,
+            "isaac_observed_tool_frame": self.isaac_observed_tool_frame,
+            "isaac_observed_tool_to_planning_tool_transform": [
+                list(row)
+                for row in self.isaac_observed_tool_to_planning_tool_transform
+            ],
             "arm_joint_names": list(self.arm_joint_names),
             "gripper_joint_names": list(self.gripper_joint_names),
             "gripper_open": list(self.gripper_open),
@@ -112,6 +130,13 @@ FRANKA_PANDA = RobotProfile(
     default_robot_prim="/World/Panda",
     curobo_robot_config="franka.yml",
     tool_frame="panda_hand",
+    isaac_observed_tool_frame="panda_hand",
+    isaac_observed_tool_to_planning_tool_transform=(
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ),
     arm_joint_names=tuple(f"panda_joint{index}" for index in range(1, 8)),
     gripper_joint_names=("panda_finger_joint1", "panda_finger_joint2"),
     gripper_open=(0.04, 0.04),
@@ -140,15 +165,25 @@ UR10E_ROBOTIQ_2F_140 = RobotProfile(
     robot_family="ur10e",
     gripper_name="robotiq_2f_140",
     default_robot_prim="/World/UR10e",
-    # Produced once by scripts/prepare_ur10e_robot_profile.py from NVIDIA's
-    # build_ur10e_gripper.py.  It remains outside this repository with the
-    # source meshes and records its provenance in a sidecar JSON report.
+    # Produced once by scripts/prepare_ur10e_robot_profile.py from NVIDIA
+    # Isaac ROS cuMotion's pinned URDF/XRDF pair. It remains beside the
+    # GraspGenX cuRobo assets and records provenance in a sidecar JSON report.
     curobo_robot_config=(
         "${GRASPGENX}/end2end/curobo_assets/ur10e_robotiq_2f_140.jikkenn1.yml"
     ),
-    # GraspGenX's reviewed UR10e+2F-140 profile plans the gripper base itself.
-    # Its canonical gripper root is therefore the grasp frame (identity below).
-    tool_frame="robotiq_arg2f_base_link",
+    # Official Isaac ROS cuMotion plans the explicit grasp frame 0.20 m along
+    # the Robotiq gripper's local +Z axis from its base.
+    tool_frame="grasp_frame",
+    # Isaac Sim 5.1's assembled USD exposes the rigid gripper base but not the
+    # URDF-only grasp_frame. Capture therefore observes the rigid body and
+    # composes this pinned official fixed transform before the FK alignment gate.
+    isaac_observed_tool_frame="robotiq_arg2f_base_link",
+    isaac_observed_tool_to_planning_tool_transform=(
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.20),
+        (0.0, 0.0, 0.0, 1.0),
+    ),
     arm_joint_names=(
         "shoulder_pan_joint",
         "shoulder_lift_joint",
@@ -190,8 +225,8 @@ UR10E_ROBOTIQ_2F_140 = RobotProfile(
     # asset.  Keep this case-sensitive so an asset revision fails loudly.
     isaac_gripper_variant="robotiq_2f_140",
     implementation_reference=(
-        "NVIDIA GraspGenX UR10eRobotiq2F140Profile plus Isaac Sim 5.1 "
-        "UR10e/Robotiq 2F-140 manipulator tutorials"
+        "NVIDIA Isaac ROS cuMotion release-3.2 UR10e/Robotiq URDF+XRDF, "
+        "GraspGenX Robotiq grasp model, and Isaac Sim 5.1 ur_gripper.usd"
     ),
 )
 

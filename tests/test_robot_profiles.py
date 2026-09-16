@@ -21,6 +21,16 @@ class RobotProfileTests(unittest.TestCase):
                 np.allclose(transform[:3, :3].T @ transform[:3, :3], np.eye(3))
             )
             self.assertTrue(np.isclose(np.linalg.det(transform[:3, :3]), 1.0))
+            observed_to_planning = np.asarray(
+                profile.isaac_observed_tool_to_planning_tool_transform
+            )
+            self.assertTrue(
+                np.allclose(
+                    observed_to_planning[:3, :3].T
+                    @ observed_to_planning[:3, :3],
+                    np.eye(3),
+                )
+            )
 
 
     def test_external_ur10e_config_resolves_below_graspgenx(self) -> None:
@@ -32,6 +42,13 @@ class RobotProfileTests(unittest.TestCase):
         self.assertEqual(resolved_path.parent.parent.name, "end2end")
         self.assertEqual(profile.isaac_gripper_variant, "robotiq_2f_140")
         self.assertEqual(profile.gripper_joint_position_unit, "radian")
+        self.assertEqual(profile.tool_frame, "grasp_frame")
+        self.assertEqual(
+            profile.isaac_observed_tool_frame, "robotiq_arg2f_base_link"
+        )
+        self.assertEqual(
+            profile.isaac_observed_tool_to_planning_tool_transform[2][3], 0.20
+        )
         self.assertEqual(
             profile.observation_arm_joint_positions,
             (
@@ -50,12 +67,14 @@ class RobotProfileTests(unittest.TestCase):
         self.assertEqual(profile.resolve_curobo_config(Path("/unused")), "franka.yml")
         self.assertEqual(profile.gripper_joint_position_unit, "metre")
         self.assertIsNone(profile.observation_arm_joint_positions)
+        self.assertEqual(profile.isaac_observed_tool_frame, "panda_hand")
 
     def test_pregrasp_checks_isaac_and_curobo_tool_frame_alignment(self) -> None:
         script = (
             Path(__file__).parents[1] / "scripts" / "curobo_plan_pregrasp_a.py"
         ).read_text(encoding="utf-8")
         self.assertIn('args.capture / "T_robot_base_tool.npy"', script)
+        self.assertIn('"isaac_observed_tool_frame"', script)
         self.assertIn(
             "start_kinematics.tool_poses.get_link_pose(profile.tool_frame)", script
         )

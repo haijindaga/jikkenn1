@@ -73,3 +73,35 @@ class RobotStateCaptureTests(unittest.TestCase):
                 np.linalg.inv(state.T_world_robot_base) @ T_world_tool,
             )
             self.assertEqual(report["tool_frame"], "panda_hand")
+
+    def test_save_distinguishes_isaac_observed_and_planning_tool_frames(self):
+        state = make_robot_state()
+        T_world_observed = np.eye(4)
+        T_world_observed[:3, 3] = [0.2, 0.1, 0.7]
+        T_observed_planning = np.eye(4)
+        T_observed_planning[2, 3] = 0.2
+        T_world_planning = T_world_observed @ T_observed_planning
+        state = RobotStateCapture(
+            joint_names=state.joint_names,
+            joint_positions=state.joint_positions,
+            T_world_robot_base=state.T_world_robot_base,
+            tool_frame="grasp_frame",
+            T_world_tool=T_world_planning,
+            observed_tool_frame="robotiq_arg2f_base_link",
+            T_world_observed_tool=T_world_observed,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory)
+            report = json.loads(state.save(output, np.eye(4)).read_text())
+            np.testing.assert_allclose(
+                np.load(output / "T_robot_base_observed_tool.npy"),
+                np.linalg.inv(state.T_world_robot_base) @ T_world_observed,
+            )
+            np.testing.assert_allclose(
+                np.load(output / "T_robot_base_tool.npy"),
+                np.linalg.inv(state.T_world_robot_base) @ T_world_planning,
+            )
+            self.assertEqual(report["tool_frame"], "grasp_frame")
+            self.assertEqual(
+                report["observed_tool_frame"], "robotiq_arg2f_base_link"
+            )

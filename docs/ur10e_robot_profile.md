@@ -9,12 +9,14 @@ pipeline is not copied or replaced.
 
 This profile reuses:
 
-- GraspGenX's official `UR10eRobotiq2F140Profile`, gripper model, URDF merger,
-  and collision-sphere fitter.
+- NVIDIA Isaac ROS cuMotion release-3.2's validated
+  `ur10e_robotiq_2f_140.urdf` + `.xrdf` pair at pinned commit
+  `dbaa7e8264f6314f8baca516511414186ad1105d`.
+- GraspGenX's official `robotiq_2f_140` grasp model.
 - Isaac Sim 5.1's assembled `ur_gripper.usd` asset and its
   `robotiq_2f_140` variant.
 - cuRobo's standard IK, trajectory optimization, robot segmentation, and
-  collision checking.
+  collision checking, plus cuRobo's own XRDF-to-native-config converter.
 
 For RGB-D capture, the arm is parked at the initial joint pose published by
 Isaac Lab's `UR10e_ROBOTIQ_GRIPPER_CFG`:
@@ -26,13 +28,17 @@ Isaac Lab's `UR10e_ROBOTIQ_GRIPPER_CFG`:
 This is an observation pose, not a replacement for cuRobo's retract/seed
 configuration. The captured joint state remains the trajectory start state.
 
-The local adapter adds the attached-object collision proxy contract used by
-this project's handover planner. It does not edit the official meshes, joint
-limits, or Isaac drive gains. It explicitly supplies the Isaac-compatible
-Robotiq mount RPY `[0, 0, pi/2]` to the GraspGenX builder because that
-builder documents its default mount as a first guess. The value matches Isaac
-Sim 5.1's official Robot Assembler instruction to rotate the gripper Z +90
-degrees and is verified in the generated URDF before planning.
+The official XRDF supplies the arm/gripper collision spheres, self-collision
+exclusions, `grasp_frame`, and `attached_object` frame. The local adapter does
+not refit or edit those values. It only adds the contact-link list consumed by
+the existing grasp planner and reserves four disabled spheres that cuRobo's
+official attachment manager replaces with the held-object geometry at runtime.
+
+The Isaac USD exposes `robotiq_arg2f_base_link`, whereas the official planning
+model uses `grasp_frame`. Capture observes the former rigid body and composes
+the official fixed +0.20 m local-Z transform before comparing Isaac and cuRobo
+forward kinematics. Both the directly observed and composed transforms are
+saved, so this frame bridge is explicit and auditable.
 
 UR10 (non-e) is intentionally not aliased to UR10e. It needs a separate
 profile and matching official robot model because its kinematics and assets
@@ -40,24 +46,22 @@ must not be silently mixed with UR10e.
 
 ## One-time cuRobo profile preparation
 
-Run from the GraspGenX environment. The command invokes NVIDIA's official
-builder first, then writes a separate `.jikkenn1.yml` adapter and a provenance
-JSON file. It leaves the official generated YAML unchanged.
+Run from the GraspGenX environment. The command verifies the vendored official
+URDF/XRDF hashes, invokes the pinned cuRobo XRDF converter, then writes a
+separate `.jikkenn1.yml` runtime adapter and provenance JSON file.
 
 ```bash
 cd /home/suzutaro/GraspGenX
 
-uv run python \
+uv run --no-sync python \
   /home/suzutaro/projects/jikkenn1/scripts/prepare_ur10e_robot_profile.py \
   --graspgenx-root /home/suzutaro/GraspGenX \
   --overwrite
 ```
 
-Expected files:
+Expected generated files:
 
 ```text
-/home/suzutaro/GraspGenX/end2end/curobo_assets/ur10e_robotiq_2f_140.urdf
-/home/suzutaro/GraspGenX/end2end/curobo_assets/ur10e_robotiq_2f_140.yml
 /home/suzutaro/GraspGenX/end2end/curobo_assets/ur10e_robotiq_2f_140.jikkenn1.yml
 /home/suzutaro/GraspGenX/end2end/curobo_assets/ur10e_robotiq_2f_140.jikkenn1.json
 ```
@@ -104,9 +108,10 @@ for resuming the same profile and same run.
 
 ## Mandatory alignment gate
 
-The capture stage saves the observed tool transform as
-`capture/camera_0/T_robot_base_tool.npy`. Before IK, the pre-grasp stage
-computes the same tool transform using the generated cuRobo model.
+The capture stage saves the composed planning-frame transform as
+`capture/camera_0/T_robot_base_tool.npy` and the directly observed Isaac rigid
+body as `T_robot_base_observed_tool.npy`. Before IK, the pre-grasp stage
+computes `grasp_frame` using the official cuRobo model.
 
 Planning stops with `robot_model_alignment_failed` when either error exceeds:
 
@@ -128,6 +133,6 @@ pending simulator integration gate, not a claimed successful UR10e grasp.
 
 ## Upstream references
 
+- [Isaac ROS cuMotion robot descriptions](https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion/tree/release-3.2/isaac_ros_cumotion_robot_description)
 - [GraspGenX robot profiles](https://github.com/NVlabs/GraspGenX/blob/main/end2end/robot_profiles.py)
-- [GraspGenX UR10e gripper builder](https://github.com/NVlabs/GraspGenX/blob/main/end2end/build_ur10e_gripper.py)
 - [Isaac Sim 5.1 manipulator assembly tutorial](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/robot_setup_tutorials/tutorial_import_assemble_manipulator.html)

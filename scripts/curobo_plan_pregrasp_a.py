@@ -373,6 +373,11 @@ def main() -> int:
         "checked": False,
         "observed_transform": str(observed_tool_path),
         "tool_frame": profile.tool_frame,
+        "isaac_observed_tool_frame": profile.isaac_observed_tool_frame,
+        "isaac_observed_tool_to_planning_tool_transform": [
+            list(row)
+            for row in profile.isaac_observed_tool_to_planning_tool_transform
+        ],
         "translation_error_m": None,
         "rotation_error_rad": None,
         "translation_tolerance_m": 0.005,
