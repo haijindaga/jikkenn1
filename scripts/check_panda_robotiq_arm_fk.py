@@ -35,8 +35,17 @@ def main():
         from curobo.types import JointState, DeviceCfg
 
         observed = arm_poses_in_base(evidence)
+        # The loader builds only chains to requested frames. The stock finger
+        # locks refer to joints outside these arm-only chains and cause KeyError
+        # before FK. Remove those locks and the stock hand's attachment extension
+        # only for this diagnostic; do not alter the YAML, URDF or simulator.
+        report["diagnostic_model_overrides"] = {
+            "load_collision_spheres": False, "lock_joints": None, "extra_links": {},
+            "tool_frames": list(observed),
+        }
         cfg = KinematicsCfg.from_robot_yaml_file("franka.yml", tool_frames=list(observed),
-                                                load_collision_spheres=False)
+                                                load_collision_spheres=False,
+                                                lock_joints=None, extra_links={})
         kin = Kinematics(cfg)
         if set(kin.joint_names) != set(ARM_JOINTS):
             raise ValueError(f"Unexpected official arm joints: {kin.joint_names}")

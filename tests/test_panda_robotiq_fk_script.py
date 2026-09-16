@@ -26,6 +26,12 @@ class FKScriptTests(unittest.TestCase):
                 return self.data
         def load_cfg(filename, **kwargs):
             observed.update(filename=filename, **kwargs)
+            # Reproduce the installed loader's failure if stock finger locks
+            # remain while requested frames exclude finger chains.
+            if kwargs.get("lock_joints", {"panda_finger_joint1": 0.04}) is not None:
+                raise KeyError("panda_finger_joint1")
+            if kwargs.get("extra_links", {"attached_object": {}}):
+                raise AssertionError("Arm-only FK must not request stock hand attachment links")
             return object()
         class Kinematics:
             joint_names = list(ARM_JOINTS)
@@ -65,11 +71,16 @@ class FKScriptTests(unittest.TestCase):
                 spec.loader.exec_module(module)
                 self.assertEqual(module.main(), 0)
             self.assertFalse(observed["load_collision_spheres"])
+            self.assertIsNone(observed["lock_joints"])
+            self.assertEqual(observed["extra_links"], {})
+            self.assertEqual(observed["tool_frames"], [f"panda_link{i}" for i in range(8)])
             self.assertEqual(observed["filename"], "franka.yml")
             np.testing.assert_array_equal(observed["state"][0].numpy(), [list(range(1, 8))])
             self.assertEqual(observed["state"][1], list(ARM_JOINTS))
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "arm_alignment_passed")
+            self.assertIsNone(report["diagnostic_model_overrides"]["lock_joints"])
+            self.assertEqual(report["diagnostic_model_overrides"]["extra_links"], {})
             self.assertFalse(report["safety"]["profile_ready"])
             self.assertFalse(report["safety"]["robot_moved"])
             self.assertFalse(report["safety"]["grasp_to_tool_verified"])

@@ -156,3 +156,24 @@ a finite open/close test, not a hammer grasp; remove `--headless` to see it (clo
 its GUI to proceed). Review both JSON reports before creating the full profile.
 In particular, provide `robot_model_evidence.json` for matching the installed
 mount and joint/geometry structure; `arm_alignment_passed` alone is insufficient.
+
+### Rerun arm FK after the stock finger-lock error
+
+Arm-only FK passes `lock_joints=None` and `extra_links={}` to the public cuRobo
+configuration loader. The stock finger locks cannot be resolved in a kinematic
+tree built only to arm frames; the stock attached-object extension also does not
+belong to this diagnostic. These overrides are recorded in the result report.
+The official YAML/URDF files, simulator joint locks, physical gripper and normal
+Panda pipeline are not modified. This is not a workaround that bypasses frame
+comparison: all eight arm frames and the existing error thresholds remain.
+
+The existing evidence from the successful open/close run can be reused; do not
+repeat the simulation. After transferring the fix, rerun:
+
+```bash
+cd /home/suzutaro/GraspGenX
+uv run --no-sync python \
+  /home/suzutaro/projects/jikkenn1/scripts/check_panda_robotiq_arm_fk.py \
+  --evidence /home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_model_20260917_085346/robot_model_evidence.json \
+  --output "/home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_model_20260917_085346/arm_fk_check_fixed_$(date +%Y%m%d_%H%M%S).json"
+```
