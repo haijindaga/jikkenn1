@@ -352,3 +352,100 @@ the model is executable: `profile_ready`, `safe_to_plan` and `safe_to_execute`
 remain false. Review `colliders[].coverage` and the runtime report before adapting
 capture/masking, candidate filtering and pregrasp execution. Do not feed this YAML
 into the normal end-to-end pipeline or reuse old Panda grasp plans with Robotiq.
+
+## Isolated physical pick diagnostic (not collision-aware deployment)
+
+To inspect whether the replacement gripper can physically retain the hammer,
+`run_robotiq_pick_diagnostic.py` reuses a saved capture and SAM3 mask, generates
+**fresh Robotiq 2F-85** candidates with the existing official GraspGenX server,
+stops that managed server to free GPU memory, and launches at most five separate
+Isaac processes in original score order. Every attempt starts from a fresh scene
+and the capture's named arm posture. A busy server port is not killed: stop that
+server yourself or choose a different `--port`.
+
+This deliberately does **not** make the incomplete collision draft executable.
+Neither the 24 mm sphere undercoverage nor the canonical/installed geometry
+differences are hidden. World/self-collision avoidance is **not checked** by this
+diagnostic; normal PhysX contact remains active. Both `--simulation-only` and
+`--allow-collision-unchecked-simulation` are mandatory. Do not use this runner
+as the research's collision-aware planner or on a real robot.
+
+`isaac_try_robotiq_pick.py` uses the installed official Panda/Robotiq USD variant
+and Isaac Sim's **official Franka LulaKinematicsSolver**, explicitly targeting
+`panda_hand`, not the stock `right_gripper` offset. The original Panda arm remains
+unchanged. Before approach motion it verifies the measured native mount and the
+official Lula FK against actual runtime hand poses. Source-derived Rz(+90 deg)
+converts GraspGenX canonical poses to hand poses, without a guessed fingertip
+translation, scale correction, mount offset, or original Panda candidate reuse.
+This canonical conversion is an explicit diagnostic hypothesis, not proof of
+canonical/installed collision-mesh equivalence.
+
+The phases are:
+
+1. Open/settle for 120 frames at the saved arm posture.
+2. Solve a pregrasp 100 mm back along canonical grasp +Z, contact waypoints every
+   5 mm, then a 150 mm world-Z lift, with official Lula IK using preceding warm
+   starts. Reject failed IK, joint limits, or >0.35 rad branch jumps between
+   contact/lift waypoints. The initial joint-space approach is not such a small
+   Cartesian step and does not use that branch-jump check.
+3. Generate all three trajectories before moving using official
+   `LulaCSpaceTrajectoryGenerator` with its default limits; stretch time by 3x,
+   not force/stiffness/damping. C-space splines interpolate Cartesian IK
+   waypoints: this is not a guaranteed exact straight Cartesian path or a
+   collision-aware trajectory optimization.
+4. Approach and contact while open; settle 60 frames at each phase endpoint.
+   Require runtime hand error <=10 mm and <=5 degrees before continuing.
+5. Close only the installed `finger_joint` master for 180 frames; preserve its
+   authored drive and follower mimic relationships. Lift, settle 60 frames,
+   and hold for 180 frames. No fixed joint, surface gripper, friction alteration,
+   force multiplier, gravity alteration, or target-pose override is applied.
+
+Arm tracking error >0.35 rad, missing runtime bodies, incompatible models,
+invalid samples, or endpoint tracking failure are **implementation/control
+errors**: stop the batch immediately. Only expected candidate IK/trajectory
+rejections or a completed physical pick failure advance to the next candidate.
+Success means target height is >=50 mm above its settled baseline throughout
+the final 180-frame hold, and reaches >=50 mm during lift. It is not a handover
+success or a force-calibrated hardware result. The first observed pick stops
+the batch.
+
+The saved RGB-D contains the old Panda observation. It is useful for this
+unchanged-object diagnostic but is **not a new Robotiq camera observation**.
+The old plan is read only for its `inputs.capture` and `inputs.segmentation`
+paths, never its joint trajectory, chosen grasp, or Panda tool offsets. This
+mask may describe the whole object; the command below does not promise a
+head-only grasp. Add `--segmentation /absolute/path/to/sam3/parts/grasp_part`
+only if you have a verified intended part mask for that same capture.
+
+After committing/pushing these additions, run in Linux:
+
+```bash
+cd /home/suzutaro/projects/jikkenn1
+git pull --ff-only origin main
+conda activate env_isaaclab
+
+python scripts/run_robotiq_pick_diagnostic.py \
+  --collision-model outputs/panda_robotiq85_connection_20260917_092827/collision_open_20260917_095618/collision_model_check.json \
+  --reference-plan outputs/hammer_head_handover_fixedjoint_e2e_v1/curobo_grasp_lift_trials/candidate_039/grasp_lift_plan_check.json \
+  --graspgenx-root /home/suzutaro/GraspGenX \
+  --output "outputs/robotiq_pick_diagnostic_$(date +%Y%m%d_%H%M%S)" \
+  --max-trials 5 \
+  --simulation-only \
+  --allow-collision-unchecked-simulation
+```
+
+No manual GraspGenX server startup or new environment installation is needed.
+The wrapper uses the existing GraspGenX `.venv/bin/python` for inference and the
+active Isaac environment's Python for motion. Each Isaac window closes after
+its attempt; a successful attempt ends the batch. Without `--headless` you can
+watch motion. Reports are `robotiq_pick_trials.json`, per-attempt
+`trial_*/robotiq_pick_check.json`, and full server/inference/trial logs. Each
+attempt saves measured joint states, commands, hand/target world transforms,
+phase labels, planned IK waypoints, tracking errors, and target lift metrics.
+Standalone `isaac_try_robotiq_pick.py --keep-open` can retain the GUI at the end;
+it is not used by the multi-attempt runner.
+
+Local tests exercise transforms, source binding, candidate provenance, official
+API call contracts, phase ordering, hold criteria, and retry/error handling
+using mocked Isaac/Lula. They do **not** establish actual pick success; runtime
+verification must occur on the user's Linux Isaac Sim installation.
