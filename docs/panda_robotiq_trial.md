@@ -266,3 +266,89 @@ build matching collision spheres/masking and an isolated Robotiq execution
 adapter. Original Panda capture/planning/replay defaults, drive gains, friction,
 physics settings and attachment policy are unchanged. Local tests cover contracts
 and source composition, not Isaac/PhysX runtime or successful Robotiq grasping.
+
+## Installed open-gripper collision snapshot draft
+
+The user's native tool/mount FK passed. Comparing the exported open USD meshes
+with GraspGenX's canonical `coll_mesh.obj`, after the source-derived positive
+90-degree rotation, gave:
+
+| Extent in grasp frame | Installed USD | GraspGenX |
+| --- | --- | --- |
+| Finger-opening direction | 154.48 mm | 148.43 mm |
+| Depth | 75.00 mm | 75.00 mm |
+| Height | 151.78 mm | 151.81 mm |
+
+These are outer bounds, not jaw gaps. Bounds matching would not prove surface
+or collision equivalence. The models are not rescaled to force agreement.
+
+`prepare_panda_robotiq_collision.py` uses the **installed USD snapshot** instead
+of assuming that the canonical gripper mesh matches it exactly. It checks that
+the geometry and model evidence have identical measured joint states, the master
+and follower joints are reopened, every enabled gripper collider is included,
+and the previously checked model/source hashes are unchanged. It constructs a
+convex hull for **each** source collider separately using standard trimesh,
+matching the declared USD `convexHull` approximation in intent. This is not exact
+PhysX cooking. It never hulls the entire gripper and therefore does not replace
+the inter-finger space with one solid block.
+
+Spheres are fitted with the existing cuRobo `fit_spheres_to_mesh`, VOXEL mode,
+`sphere_density=1.0`, with no new fitting solver or guessed mounting offsets.
+The positive sphere centers/radii are expressed in `panda_hand` and aggregated
+as one **frozen open hand** collision group. Each hull and the combined canonical
+open-gripper mesh are saved for inspection. Sphere coverage is reported per hull
+as vertex outside-distance/count, with a 1 micrometre numerical tolerance. This
+is an inspection metric, not a proof of triangle or solid-volume coverage.
+Radii are not silently expanded or shrunk to pass.
+
+The generated YAML reuses the stock eight arm links' spheres, arm motion limits,
+distance/null-space weights and arm adjacency exclusions. It removes old Panda
+finger/hand spheres, old finger locks and the attached-object extension from
+this draft only. Stock wrist-to-hand adjacency exclusions remain recorded for
+review; new hand/arm collision checks are not blanket-disabled. New hand
+self-collision padding is zero, rather than copying the old hand's 20 mm padding
+onto the new fitted geometry. Physical gains, friction and force limits are
+untouched. Because this is an open snapshot, there are no contact-excluded links
+and **closing, lift and handover are unsupported**.
+
+`check_panda_robotiq_collision.py` loads this YAML with collision spheres enabled,
+verifies ten FK frames again, checks sphere inventory/finite radii, and runs the
+official cuRobo `SelfCollisionCost` at the measured posture. It saves runtime
+spheres in robot-base coordinates and the checked sphere pairs. Neither command
+starts Isaac Sim, moves the robot, creates attachments or saves a trajectory.
+
+After committing/pushing and pulling these additions, run this block in Linux.
+It reuses the user's successful FK run and creates a fresh collision output:
+
+```bash
+(
+  set -e
+  cd /home/suzutaro/GraspGenX
+  run=/home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_connection_20260917_092827
+  stamp=$(date +%Y%m%d_%H%M%S)
+  collision="$run/collision_open_$stamp"
+
+  uv run --no-sync python \
+    /home/suzutaro/projects/jikkenn1/scripts/prepare_panda_robotiq_collision.py \
+    --graspgenx-root /home/suzutaro/GraspGenX \
+    --geometry "$run/gripper_collision_geometry.json" \
+    --prepared-model "$run/fk_model_20260917_093353/model_preparation_check.json" \
+    --tool-fk-check "$run/tool_mount_fk_check_20260917_093353.json" \
+    --output "$collision"
+
+  uv run --no-sync python \
+    /home/suzutaro/projects/jikkenn1/scripts/check_panda_robotiq_collision.py \
+    --collision-model "$collision/collision_model_check.json" \
+    --output "$collision/runtime_preflight"
+
+  echo "Collision outputs: $collision"
+)
+```
+
+`open_snapshot_collision_draft_prepared` means spheres/YAML were generated.
+`open_snapshot_preflight_passed` means FK, inventory and self collision passed at
+one measured posture. It does **not** mean sphere coverage is sufficient or that
+the model is executable: `profile_ready`, `safe_to_plan` and `safe_to_execute`
+remain false. Review `colliders[].coverage` and the runtime report before adapting
+capture/masking, candidate filtering and pregrasp execution. Do not feed this YAML
+into the normal end-to-end pipeline or reuse old Panda grasp plans with Robotiq.
