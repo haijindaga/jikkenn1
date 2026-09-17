@@ -177,3 +177,92 @@ uv run --no-sync python \
   --evidence /home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_model_20260917_085346/robot_model_evidence.json \
   --output "/home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_model_20260917_085346/arm_fk_check_fixed_$(date +%Y%m%d_%H%M%S).json"
 ```
+
+## Isolated source-model preparation and tool/mount FK
+
+The installed arm FK has passed. The supplied runtime evidence also shows
+`panda_hand` and the installed Robotiq `base_link` coincident, joined by the
+official `AssemblerFixedJoint`. The preparation script checks both conditions,
+then composes the **existing** cuRobo Panda arm URDF and GraspGenX 2F-85 URDF into
+a **new FK-only file**. The arm and its 107 mm / minus-45-degree hand frame remain
+unchanged. The old hand geometry, fingers and auxiliary old-hand TCP links are
+removed only from the generated diagnostic model. The source Robotiq joint
+origins, axes, scales, limits and mimic relationships are copied unchanged.
+Mesh references are resolved to existing absolute paths; empty files, missing
+files and Git LFS pointers fail. No mesh, collision sphere or physical mount is
+created in Isaac Sim, and no source URDF/USD/config is overwritten.
+
+The source gripper's fixed `world_joint` defines the canonical grasp frame:
+`T_grasp_gripper_base = Rz(+1.5708)` with zero translation. Its `fingertip` value
+of 136 mm is **not** an extra translation for the native base/hand frame. The
+result is saved as `T_grasp_panda_hand_proposed.npy`; it is deliberately not
+injected into grasp candidate or planner outputs before collision-mesh review.
+Unexpected root transforms or additional `base_rotation` are rejected.
+
+The extended FK checker compares eight arm links **plus** `panda_hand` and
+`robotiq_arg2f_base_link` at the measured posture. It reuses the public cuRobo FK
+loader with the generated URDF; no new FK solver is implemented. Its result is
+`tool_mount_alignment_passed`, **not** `profile_ready`. Collision spheres are
+disabled for this diagnostic only. There is no new collision-ready YAML yet,
+and the normal Panda-only planner/rerank guards remain in place.
+
+The USD export is needed because equivalent-looking gripper parts have different
+body-frame conventions: the installed USD uses coincident open-state body origins
+with mesh offsets in descendants, whereas the URDF uses joint/part-local origins.
+Comparing same-named body origins is therefore not a geometry-equivalence test.
+Optional `--export-collision-geometry` saves enabled authored gripper meshes in
+the measured gripper-base frame, retaining face topology and collision
+approximation attributes. It combines mesh-to-body USD transforms with runtime
+body poses, not stale global USD articulation xforms. This is **not** an export
+of PhysX's cooked convex hulls, and does not automatically declare equivalence.
+
+After transferring these changes, the following block performs the finite
+open/close + geometry export, arm FK, source composition and native mount FK.
+It stops on any command failure and uses a fresh timestamped directory. It does
+**not** attempt hammer grasping or reuse the old Panda trajectory.
+
+```bash
+(
+  set -e
+  cd /home/suzutaro/projects/jikkenn1
+  conda activate env_isaaclab
+  head_plan=outputs/hammer_head_handover_fixedjoint_e2e_v1/curobo_grasp_lift_trials/candidate_039
+  head_capture=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["inputs"]["capture"])' "$head_plan/grasp_lift_plan_check.json")
+  run="/home/suzutaro/projects/jikkenn1/outputs/panda_robotiq85_connection_$(date +%Y%m%d_%H%M%S)"
+
+  python scripts/isaac_try_panda_robotiq.py \
+    --scene-usd scenes/hammer_01.usda --capture "$head_capture" \
+    --output "$run" --export-model-evidence --export-collision-geometry \
+    --headless --simulation-only
+
+  cd /home/suzutaro/GraspGenX
+  uv run --no-sync python /home/suzutaro/projects/jikkenn1/scripts/check_panda_robotiq_arm_fk.py \
+    --evidence "$run/robot_model_evidence.json" --output "$run/arm_fk_check.json"
+
+  uv run --no-sync python /home/suzutaro/projects/jikkenn1/scripts/prepare_panda_robotiq_model.py \
+    --graspgenx-root /home/suzutaro/GraspGenX \
+    --evidence "$run/robot_model_evidence.json" --arm-fk-check "$run/arm_fk_check.json" \
+    --output "$run/fk_model"
+
+  uv run --no-sync python /home/suzutaro/projects/jikkenn1/scripts/check_panda_robotiq_arm_fk.py \
+    --evidence "$run/robot_model_evidence.json" \
+    --prepared-model "$run/fk_model/model_preparation_check.json" \
+    --output "$run/tool_mount_fk_check.json"
+
+  echo "Results: $run"
+)
+```
+
+Remove `--headless` if watching opening/closing is useful; close the GUI to
+continue the block. Inspect `tool_mount_fk_check.json`,
+`fk_model/model_preparation_check.json` and `gripper_collision_geometry.json`.
+All generated-model source paths/hashes are recorded; the FK checker rejects a
+changed URDF or different evidence. Source meshes must remain at those paths.
+Source URDFs/meshes retain their upstream licenses; this diagnostic composition
+does not relicense or package those assets for redistribution.
+
+Next gate: review actual USD vs source URDF/canonical collision geometry, then
+build matching collision spheres/masking and an isolated Robotiq execution
+adapter. Original Panda capture/planning/replay defaults, drive gains, friction,
+physics settings and attachment policy are unchanged. Local tests cover contracts
+and source composition, not Isaac/PhysX runtime or successful Robotiq grasping.

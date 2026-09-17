@@ -3,7 +3,9 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from panda_handover.robot_model_evidence import arm_poses_in_base, collect_model_evidence, compare_arm_poses
+from panda_handover.robot_model_evidence import (
+    arm_poses_in_base, collect_model_evidence, compare_arm_poses, collect_gripper_collision_geometry,
+)
 
 
 class ModelEvidenceTests(unittest.TestCase):
@@ -64,3 +66,39 @@ class ModelEvidenceTests(unittest.TestCase):
         self.assertEqual(result["joints"][0]["body0"], ["/World/Panda/panda_link0"])
         self.assertEqual(len(result["collisions"]), 1)
         self.assertFalse(result["safety"]["profile_ready"])
+
+    def test_collision_export_uses_body_local_mesh_and_runtime_pose_without_stage_writes(self):
+        try:
+            from pxr import Usd, UsdGeom, UsdPhysics
+        except ImportError:
+            self.skipTest("USD bindings unavailable")
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.Xform.Define(stage, "/World/Panda")
+        UsdGeom.Xform.Define(stage, "/World/Panda/Gripper")
+        base = UsdGeom.Xform.Define(stage, "/World/Panda/Gripper/base_link")
+        UsdPhysics.RigidBodyAPI.Apply(base.GetPrim())
+        finger = UsdGeom.Xform.Define(stage, "/World/Panda/Gripper/finger")
+        UsdPhysics.RigidBodyAPI.Apply(finger.GetPrim())
+        # Deliberately stale USD body pose must not enter exported placement.
+        finger.AddTranslateOp().Set((99, 99, 99))
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Panda/Gripper/finger/geometry/mesh")
+        mesh.AddTranslateOp().Set((.01, 0, 0))
+        mesh.GetPointsAttr().Set([(0, 0, 0), (.02, 0, 0), (0, .02, 0)])
+        mesh.GetFaceVertexCountsAttr().Set([3])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2])
+        UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+        t_base, t_finger = np.eye(4), np.eye(4)
+        t_base[:3, 3] = [5, 4, 3]
+        t_finger[:3, 3] = [5.1, 4, 3]
+        evidence = {"joint_names": ["finger_joint"], "joint_positions": [0], "rigid_bodies": [
+            {"name": "base_link", "path": str(base.GetPath()), "T_world_body": t_base.tolist()},
+            {"name": "finger", "path": str(finger.GetPath()), "T_world_body": t_finger.tolist()}]}
+        before = stage.GetRootLayer().ExportToString()
+        result = collect_gripper_collision_geometry(stage, evidence)
+        self.assertEqual(before, stage.GetRootLayer().ExportToString())
+        np.testing.assert_allclose(result["meshes"][0]["vertices_gripper_base_m"],
+                                   [[.11, 0, 0], [.13, 0, 0], [.11, .02, 0]])
+        self.assertFalse(result["safety"]["collision_geometry_equivalence_verified"])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 30])
+        with self.assertRaises(ValueError):
+            collect_gripper_collision_geometry(stage, evidence)

@@ -40,6 +40,8 @@ def parse_args():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--export-model-evidence", action="store_true",
                         help="After reopening, save measured rigid-body frames and USD joint/collision inventory")
+    parser.add_argument("--export-collision-geometry", action="store_true",
+                        help="With --export-model-evidence, also save authored gripper mesh topology and runtime placement")
     parser.add_argument("--simulation-only", action="store_true", required=True)
     args = parser.parse_args()
     if not args.scene_usd.is_file():
@@ -53,6 +55,8 @@ def parse_args():
         parser.error("--phase-frames must be positive")
     if args.inspect_only and args.export_model_evidence:
         parser.error("Model evidence requires the completed open/close pass, not --inspect-only")
+    if args.export_collision_geometry and not args.export_model_evidence:
+        parser.error("--export-collision-geometry requires --export-model-evidence")
     return args
 
 
@@ -224,6 +228,14 @@ def main():
             evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             report["model_evidence"] = str(evidence_path)
             print(f"saved: {evidence_path}", flush=True)
+            if args.export_collision_geometry:
+                from panda_handover.robot_model_evidence import collect_gripper_collision_geometry
+                geometry = collect_gripper_collision_geometry(active_stage, evidence)
+                geometry["evidence_path"] = str(evidence_path)
+                geometry_path = output / "gripper_collision_geometry.json"
+                geometry_path.write_text(json.dumps(geometry, indent=2) + "\n", encoding="utf-8")
+                report["collision_geometry"] = str(geometry_path)
+                print(f"saved: {geometry_path}", flush=True)
         report["next_gate"] = "Review opening/closing visually, then prepare matching GraspGenX and cuRobo profiles before grasp trials."
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"saved: {report_path}; {report['status']}", flush=True)

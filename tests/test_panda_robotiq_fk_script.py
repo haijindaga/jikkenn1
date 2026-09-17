@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from panda_handover.gripper_swap import ARM_JOINTS
+from panda_handover.robotiq_model import file_identity
 
 
 class FKScriptTests(unittest.TestCase):
@@ -40,7 +41,7 @@ class FKScriptTests(unittest.TestCase):
             def compute_kinematics(self, js):
                 observed["state"] = js
                 def pose(name):
-                    return types.SimpleNamespace(position=Tensor([[0, 0, int(name[-1])]]),
+                    return types.SimpleNamespace(position=Tensor([[0, 0, int(name[-1]) if name[-1].isdigit() else 9]]),
                                                  quaternion=Tensor([[1, 0, 0, 0]]))
                 return types.SimpleNamespace(tool_poses=types.SimpleNamespace(get_link_pose=pose))
         fake_torch = types.ModuleType("torch")
@@ -84,3 +85,32 @@ class FKScriptTests(unittest.TestCase):
             self.assertFalse(report["safety"]["profile_ready"])
             self.assertFalse(report["safety"]["robot_moved"])
             self.assertFalse(report["safety"]["grasp_to_tool_verified"])
+            for name in ("panda_hand", "base_link"):
+                transform = np.eye(4)
+                transform[:3, 3] = [5, 4, 9]
+                evidence["rigid_bodies"].append({"name": name, "T_world_body": transform.tolist()})
+            path.write_text(json.dumps(evidence))
+            urdf = root / "fk_only.urdf"
+            urdf.write_text("<robot name='fixture'/>")
+            prepared = root / "prepared.json"
+            prepared.write_text(json.dumps({"status": "fk_model_prepared", "urdf": file_identity(urdf),
+                                           "sources": {"evidence": file_identity(path)}}))
+            output = root / "mount_check.json"
+            arguments = [str(script), "--evidence", str(path), "--output", str(output),
+                         "--prepared-model", str(prepared)]
+            with patch.dict(sys.modules, modules), patch.object(sys, "argv", arguments):
+                self.assertEqual(module.main(), 0)
+            self.assertEqual(observed["urdf_path"], str(urdf.resolve()))
+            self.assertEqual(observed["tool_frames"][-2:], ["panda_hand", "robotiq_arg2f_base_link"])
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "tool_mount_alignment_passed")
+            self.assertFalse(report["safety"]["profile_ready"])
+            self.assertFalse(report["safety"]["grasp_to_tool_verified"])
+            # A changed draft must be rejected before constructing Kinematics.
+            urdf.write_text("<robot name='changed'/>")
+            arguments[arguments.index(str(output))] = str(root / "tampered_check.json")
+            with patch.dict(sys.modules, modules), patch.object(sys, "argv", arguments):
+                self.assertEqual(module.main(), 2)
+            tampered = json.loads((root / "tampered_check.json").read_text())
+            self.assertEqual(tampered["status"], "failure")
+            self.assertIn("changed", tampered["failure"]["message"])

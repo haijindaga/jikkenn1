@@ -86,3 +86,64 @@ def compare_arm_poses(observed, predicted, translation_tolerance=0.005,
         results[name] = {"translation_error_m": translation, "rotation_error_rad": rotation,
                          "passed": bool(translation <= translation_tolerance and rotation <= rotation_tolerance)}
     return results
+
+
+def collect_gripper_collision_geometry(stage, evidence):
+    """Export authored collision topology with synchronized rigid-body transforms.
+
+    Mesh-local transforms come from USD, body poses from PhysX. We do not replace
+    runtime body poses with potentially stale USD articulation xforms. Authored
+    meshes are not a claim of equivalence to PhysX's cooked convex shapes.
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+    from .robotiq_model import body_transform
+
+    base_entries = [b for b in evidence["rigid_bodies"] if b["name"] == "base_link"]
+    if len(base_entries) != 1:
+        raise ValueError("Expected one installed Robotiq base rigid body")
+    root_path = str(stage.GetPrimAtPath(base_entries[0]["path"]).GetParent().GetPath())
+    inverse_base = np.linalg.inv(body_transform(evidence, "base_link"))
+    runtime = {b["path"]: np.asarray(b["T_world_body"], dtype=float)
+               for b in evidence["rigid_bodies"]}
+    cache = UsdGeom.XformCache()
+    meshes = []
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()):
+        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        if UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get() is False:
+            continue
+        if not prim.IsA(UsdGeom.Mesh):
+            raise ValueError(f"Unsupported installed collision geometry: {prim.GetPath()}")
+        body = prim
+        while body.IsValid() and str(body.GetPath()) not in runtime:
+            body = body.GetParent()
+        if not body.IsValid():
+            raise ValueError(f"Collision mesh has no measured parent body: {prim.GetPath()}")
+        relative, reset_stack = cache.ComputeRelativeTransform(prim, body)
+        if reset_stack:
+            raise ValueError(f"Mesh resets its transform outside its parent body: {prim.GetPath()}")
+        mesh = UsdGeom.Mesh(prim)
+        points = np.asarray(mesh.GetPointsAttr().Get(), dtype=float)
+        counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get(), dtype=int)
+        indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=int)
+        if (points.ndim != 2 or points.shape[1] != 3 or len(points) == 0
+                or not np.all(np.isfinite(points)) or counts.ndim != 1
+                or len(counts) == 0 or np.any(counts < 3) or indices.ndim != 1
+                or counts.sum() != len(indices) or np.any(indices < 0) or np.any(indices >= len(points))):
+            raise ValueError(f"Invalid collision mesh topology: {prim.GetPath()}")
+        transform = inverse_base @ runtime[str(body.GetPath())] @ np.asarray(relative, dtype=float).T
+        points_base = points @ transform[:3, :3].T + transform[:3, 3]
+        approximation = prim.GetAttribute("physics:approximation")
+        meshes.append({"path": str(prim.GetPath()), "body": str(body.GetPath()),
+                       "vertices_gripper_base_m": points_base.tolist(),
+                       "face_vertex_counts": counts.tolist(), "face_vertex_indices": indices.tolist(),
+                       "T_gripper_base_mesh": transform.tolist(),
+                       "physics_approximation": str(approximation.Get()) if approximation.IsValid() else None})
+    if not meshes:
+        raise ValueError("No enabled installed gripper collision meshes found")
+    return {"status": "authored_collision_geometry_exported", "frame": "installed Robotiq base_link",
+            "joint_names": evidence["joint_names"], "joint_positions": evidence["joint_positions"],
+            "meshes": meshes, "source": "authored USD topology + runtime rigid-body poses",
+            "safety": {"source_assets_modified": False, "profile_ready": False,
+                       "physx_cooked_geometry_exported": False,
+                       "collision_geometry_equivalence_verified": False}}
