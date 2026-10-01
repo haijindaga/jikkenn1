@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -9,6 +11,7 @@ from panda_handover.grasp_visualization import (
     STATIC_COLLISION_FREE,
     STATIC_COLLISION_REJECTED,
     classify_candidate_states,
+    require_gripper_visual_mesh,
     resolve_saved_gripper_identity,
     state_counts,
     verify_saved_world_grasps,
@@ -16,6 +19,22 @@ from panda_handover.grasp_visualization import (
 
 
 class GraspCandidateVisualizationTests(unittest.TestCase):
+    def test_requires_real_official_visual_mesh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mesh = root / "vis_mesh.obj"
+            with self.assertRaises(FileNotFoundError):
+                require_gripper_visual_mesh(root)
+            mesh.write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:deadbeef\nsize 1234\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Git LFS pointer"):
+                require_gripper_visual_mesh(root)
+            mesh.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+            self.assertEqual(require_gripper_visual_mesh(root), mesh)
+
     def test_legacy_reports_resolve_to_historical_franka_default(self) -> None:
         self.assertEqual(
             resolve_saved_gripper_identity(

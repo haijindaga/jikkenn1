@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import numpy as np
 
@@ -20,6 +21,17 @@ STATE_COLORS_RGB = {
     CUROBO_PLAN_SUCCESS: (35, 105, 235),
     PLANNING_ERROR: (220, 55, 180),
 }
+
+
+def require_gripper_visual_mesh(asset_directory: str | Path) -> Path:
+    """Return the official canonical visual mesh, rejecting missing LFS data."""
+
+    path = Path(asset_directory) / "vis_mesh.obj"
+    if not path.is_file() or path.stat().st_size == 0:
+        raise FileNotFoundError(f"official gripper visual mesh is missing: {path}")
+    if b"git-lfs.github.com/spec" in path.read_bytes()[:256]:
+        raise ValueError(f"official gripper visual mesh is still a Git LFS pointer: {path}")
+    return path
 
 
 def resolve_saved_gripper_identity(

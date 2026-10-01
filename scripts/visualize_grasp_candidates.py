@@ -72,6 +72,7 @@ def main() -> int:
         CUROBO_PLAN_SUCCESS,
         STATE_COLORS_RGB,
         classify_candidate_states,
+        require_gripper_visual_mesh,
         resolve_saved_gripper_identity,
         state_counts,
         verify_saved_world_grasps,
@@ -84,7 +85,11 @@ def main() -> int:
             visualize_pointcloud,
             visualize_x_grasp,
         )
-        from graspgenx.x_grippers import resolve_gripper_info
+        from graspgenx.x_grippers import (
+            resolve_gripper_asset_dir,
+            resolve_gripper_info,
+        )
+        import trimesh
     except ImportError as exc:
         raise RuntimeError(
             "Run this viewer with the official GraspGenX uv environment"
@@ -167,6 +172,12 @@ def main() -> int:
     )
 
     gripper = resolve_gripper_info(gripper_name)
+    visual_mesh_path = require_gripper_visual_mesh(
+        resolve_gripper_asset_dir(gripper_name)
+    )
+    visual_mesh = trimesh.load(str(visual_mesh_path), force="mesh")
+    if len(visual_mesh.vertices) == 0 or len(visual_mesh.faces) == 0:
+        raise ValueError(f"official gripper visual mesh is empty: {visual_mesh_path}")
     vis = create_visualizer(port=args.port)
     vis.scene.set_up_direction((0.0, 0.0, 1.0))
     vis.scene.world_axes.visible = True
@@ -224,7 +235,7 @@ def main() -> int:
         visualize_mesh(
             vis,
             "selection/top_score_collision_free_gripper_mesh",
-            gripper.collision_mesh,
+            visual_mesh,
             color=[80, 200, 255],
             transform=grasps_world[best_static_index],
         )
@@ -238,6 +249,7 @@ def main() -> int:
                 "state_counts": counts,
                 "top_score_collision_free_candidate": best_static_index,
                 "gripper": gripper_name,
+                "representative_gripper_mesh": str(visual_mesh_path),
                 "candidate_generation_changed": False,
                 "candidate_classification_changed": False,
             },
