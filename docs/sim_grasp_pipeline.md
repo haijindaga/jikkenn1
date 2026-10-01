@@ -208,6 +208,35 @@ both success and failure and opens in the default browser. `--headless` or
 saved. It embeds every saved image, provides expandable JSON previews, and
 links every NPY, PLY, log, and report artifact.
 
+## Inspect all grasp candidates in Viser
+
+The read-only candidate viewer follows GraspGenX's official visualization
+semantics without rerunning inference or inventing a new feasibility score:
+red is rejected by the saved static collision filter, green passed that filter,
+yellow was later rejected by cuRobo, blue has a successful cuRobo plan, and
+magenta marks a planner/infrastructure error. A light-blue gripper mesh marks
+the highest-score statically collision-free candidate. Scene points and grasp
+poses are both transformed through the saved `T_world_camera` and displayed in
+the Isaac world frame with +Z up, avoiding the former OpenCV-camera/world-up
+ambiguity.
+
+```bash
+cd /home/suzutaro/GraspGenX
+
+uv run --no-sync python \
+  /home/suzutaro/projects/jikkenn1/scripts/visualize_grasp_candidates.py \
+  --capture /home/suzutaro/projects/jikkenn1/outputs/hammer_handover_e2e_v1/capture/camera_0 \
+  --segmentation /home/suzutaro/projects/jikkenn1/outputs/hammer_handover_e2e_v1/capture/sam3 \
+  --candidates /home/suzutaro/projects/jikkenn1/outputs/hammer_handover_e2e_v1/graspgenx_candidates \
+  --filtered /home/suzutaro/projects/jikkenn1/outputs/hammer_handover_e2e_v1/graspgenx_candidates_filtered \
+  --plan-trials /home/suzutaro/projects/jikkenn1/outputs/hammer_handover_e2e_v1/curobo_grasp_lift_trials \
+  --port 8081
+```
+
+Omit `--plan-trials` for the official-style red/green static-filter view.
+The default shows all candidates. Use `--max-candidates N` only for a less
+cluttered presentation view; selection is then deterministic score order.
+
 For a controlled simulation-only high-drive diagnostic, reuse the same saved
 capture and candidate plans with `scripts/isaac_replay_grasp_lift_trials.py`
 and pass `--finger-drive-scale 5`. The scale multiplies the source-backed
