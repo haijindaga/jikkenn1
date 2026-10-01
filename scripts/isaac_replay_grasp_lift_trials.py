@@ -100,6 +100,14 @@ def parse_args() -> argparse.Namespace:
                 "solver-iteration diagnostics currently require "
                 "--grasp-retention-mode rigid-attachment"
             )
+    if (
+        args.grasp_retention_mode == "surface-gripper-attachment"
+        and args.replay_physics != "cpu"
+    ):
+        parser.error(
+            "--grasp-retention-mode surface-gripper-attachment requires "
+            "--replay-physics cpu"
+        )
     return args
 
 
@@ -146,6 +154,11 @@ def main() -> int:
             ),
             "surface_gripper_attachment_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "surface-gripper-attachment"
+            ),
+            "surface_gripper_finger_policy": (
+                "hold both Panda fingers at open targets; no finger closure"
+                if args.grasp_retention_mode == "surface-gripper-attachment"
+                else None
             ),
             "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "kinematic-pose-lock"

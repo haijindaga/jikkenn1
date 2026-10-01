@@ -405,6 +405,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             replay[replay.index("--grasp-retention-mode") + 1],
             "surface-gripper-attachment",
         )
+        self.assertEqual(replay[replay.index("--replay-physics") + 1], "cpu")
 
     def test_affordance_handover_requires_part_segmentation_and_complete_geometry(self):
         with self.assertRaises(SystemExit):

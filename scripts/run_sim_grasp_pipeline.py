@@ -710,6 +710,8 @@ def build_stages(
         args.grasp_retention_mode,
         "--simulation-only",
     ]
+    if args.grasp_retention_mode == "surface-gripper-attachment":
+        replay_command.extend(["--replay-physics", "cpu"])
     if args.fingertip_friction_coefficient is not None:
         replay_command.extend(
             [
@@ -879,6 +881,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             ),
             "surface_gripper_attachment_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "surface-gripper-attachment"
+            ),
+            "replay_physics": (
+                "cpu"
+                if args.grasp_retention_mode == "surface-gripper-attachment"
+                else "default"
+            ),
+            "surface_gripper_finger_policy": (
+                "hold both Panda fingers at open targets; no finger closure"
+                if args.grasp_retention_mode == "surface-gripper-attachment"
+                else None
             ),
             "kinematic_pose_lock_means_grasp_success_is_assumed": bool(
                 args.grasp_retention_mode == "kinematic-pose-lock"

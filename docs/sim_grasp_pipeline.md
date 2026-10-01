@@ -20,10 +20,14 @@ retention abstraction, compared against the existing FixedJoint baseline; it
 must not be presented as a calibrated parallel-jaw contact model.
 
 After the preflight succeeds, replay the same planned candidate with the
-separate experimental mode. The runtime copies the D6 attachment-point physics
-from the bundled `SurfaceGripper_gantry.usda` and uses the Surface Gripper
-properties from NVIDIA's Isaac Sim 5.1 code example. It does not introduce
-candidate-specific force limits or gains.
+separate experimental mode. The runtime copies all nine D6 attachment points
+from the bundled `SurfaceGripper_gantry.usda`, preserves their official 3 x 3
+grid, and uses the Surface Gripper properties from NVIDIA's Isaac Sim 5.1 code
+example. It does not introduce candidate-specific force limits or gains. This
+mode keeps both Panda fingers at their open targets; retention comes only from
+the explicit Surface Gripper abstraction, not from hidden parallel-jaw contact.
+Isaac Sim 5.1 Surface Gripper is CPU-physics only, so this mode requires and
+records `--replay-physics cpu`.
 
 ```bash
 python scripts/isaac_replay_grasp_lift_trials.py \
@@ -34,8 +38,13 @@ python scripts/isaac_replay_grasp_lift_trials.py \
   --max-physical-trials 1 \
   --finger-drive-preset isaaclab-franka \
   --grasp-retention-mode surface-gripper-attachment \
+  --replay-physics cpu \
   --simulation-only
 ```
+
+The one-command runner adds `--replay-physics cpu` automatically only for
+`surface-gripper-attachment`. Other retention modes keep their existing physics
+backend and finger behavior unchanged.
 
 `scripts/run_sim_grasp_pipeline.py` preserves the existing reviewed stage
 boundaries but executes them in order:

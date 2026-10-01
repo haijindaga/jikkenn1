@@ -260,7 +260,7 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("PANDA_OPEN_FINGER_JOINT_M = 0.04", script)
         self.assertIn("open_fingers = np.full(2, args.open_finger_position_m", script)
         self.assertIn("args.closed_finger_position_m", script)
-        self.assertIn('execute_phase("transport", closed_finger_target)', script)
+        self.assertIn('execute_phase("transport", retention_finger_target)', script)
         self.assertIn('final_phase = "transport" if transport_executed else "lift"', script)
         self.assertIn('"handover_release_executed": False', script)
         self.assertNotIn("open_finger_targets_rad", script)
@@ -289,6 +289,10 @@ class TrajectoryReplayTests(unittest.TestCase):
         self.assertIn("gripper_interface.get_gripped_objects", script)
         self.assertIn("SurfaceGripper_gantry.usda", script)
         self.assertIn('"/World/Surface_Gripper_Joints"', script)
+        self.assertIn("EXPECTED_SURFACE_GRIPPER_ATTACHMENT_POINT_COUNT", script)
+        self.assertIn("rebase_attachment_point_grid", script)
+        self.assertIn('"finger_motion_used_for_retention": False', script)
+        self.assertIn("close_frame_budget = 0 if surface_gripper_retention", script)
         self.assertIn("MAX_GRIP_DISTANCE.name: 0.011", script)
         self.assertNotIn(
             "official Surface Gripper USD contains no attachment-points relation",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Physically close the Panda gripper and replay a cuRobo grasp/lift in Isaac Sim."""
+"""Replay a cuRobo grasp/lift trajectory with an explicit retention model."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ from panda_handover.physics_baselines import (
 from panda_handover.trajectory_replay import (
     load_grasp_lift_replay,
     sample_positions_at_physics_rate,
+)
+from panda_handover.surface_gripper import (
+    EXPECTED_SURFACE_GRIPPER_ATTACHMENT_POINT_COUNT,
+    rebase_attachment_point_grid,
 )
 
 
@@ -222,6 +226,15 @@ def parse_args() -> argparse.Namespace:
                 "solver-iteration diagnostics currently require "
                 "--grasp-retention-mode rigid-attachment"
             )
+    if (
+        args.grasp_retention_mode == "surface-gripper-attachment"
+        and args.replay_physics != "cpu"
+    ):
+        parser.error(
+            "--grasp-retention-mode surface-gripper-attachment requires "
+            "--replay-physics cpu because Isaac Sim 5.1 Surface Gripper is "
+            "CPU-physics only"
+        )
     return args
 
 
@@ -1336,51 +1349,72 @@ try:
             raise RuntimeError(
                 "official Surface Gripper USD contains no gripper D6 joints"
             )
-        source_joint_prim = source_joint_candidates[0]
-        source_joint_path = source_joint_prim.GetPath()
-        source_joint_prim = source_stage.GetPrimAtPath(source_joint_path)
-        if not source_joint_prim.IsValid():
+        source_joint_candidates = sorted(
+            source_joint_candidates, key=lambda prim: str(prim.GetPath())
+        )
+        if (
+            len(source_joint_candidates)
+            != EXPECTED_SURFACE_GRIPPER_ATTACHMENT_POINT_COUNT
+        ):
             raise RuntimeError(
-                f"official Surface Gripper D6 joint is missing: {source_joint_path}"
+                "official Surface Gripper USD must contain exactly "
+                f"{EXPECTED_SURFACE_GRIPPER_ATTACHMENT_POINT_COUNT} D6 attachment "
+                f"points, found {len(source_joint_candidates)}"
             )
 
-        runtime_joint_path = Sdf.Path("/World/RuntimeSurfaceGripperAttachmentPoint")
-        runtime_gripper_path = Sdf.Path("/World/RuntimeSurfaceGripper")
-        for runtime_path in (runtime_joint_path, runtime_gripper_path):
-            if stage.GetPrimAtPath(runtime_path).IsValid():
-                raise RuntimeError(f"runtime Surface Gripper prim already exists: {runtime_path}")
+        def gf_quaternion_to_rotation(value) -> np.ndarray:
+            if value is None:
+                return np.eye(3, dtype=np.float64)
+            imaginary = value.GetImaginary()
+            quaternion = np.array(
+                [
+                    float(value.GetReal()),
+                    float(imaginary[0]),
+                    float(imaginary[1]),
+                    float(imaginary[2]),
+                ],
+                dtype=np.float64,
+            )
+            return matrix_from_pose(np.zeros(3), quaternion)[:3, :3]
 
-        flattened_template = source_stage.Flatten()
-        copied = Sdf.CopySpec(
-            flattened_template,
-            source_joint_path,
-            stage.GetEditTarget().GetLayer(),
-            runtime_joint_path,
-        )
-        if not copied:
-            raise RuntimeError("could not copy official Surface Gripper D6 template")
-        runtime_joint_prim = stage.GetPrimAtPath(runtime_joint_path)
-        if not runtime_joint_prim.IsValid():
-            raise RuntimeError("copied Surface Gripper D6 joint is invalid")
-        runtime_joint = UsdPhysics.Joint(runtime_joint_prim)
-        runtime_joint.CreateBody0Rel().SetTargets(
-            [Sdf.Path(panda_hand_rigid_body_path)]
-        )
-        runtime_joint.CreateBody1Rel().ClearTargets(True)
-        runtime_joint.CreateJointEnabledAttr().Set(True)
-        runtime_joint.CreateExcludeFromArticulationAttr().Set(True)
-        runtime_joint.GetBreakForceAttr().Clear()
-        runtime_joint.GetBreakTorqueAttr().Clear()
-        robot_schema.ApplyAttachmentPointAPI(runtime_joint_prim)
+        source_joint_paths = [prim.GetPath() for prim in source_joint_candidates]
+        source_positions = []
+        source_rotations = []
+        for source_joint_prim in source_joint_candidates:
+            source_joint = UsdPhysics.Joint(source_joint_prim)
+            source_position = source_joint.GetLocalPos0Attr().Get()
+            if source_position is None:
+                raise RuntimeError(
+                    "official Surface Gripper attachment point has no localPos0: "
+                    f"{source_joint_prim.GetPath()}"
+                )
+            source_positions.append(np.asarray(tuple(source_position), dtype=np.float64))
+            source_rotations.append(
+                gf_quaternion_to_rotation(source_joint.GetLocalRot0Attr().Get())
+            )
+        source_positions_array = np.stack(source_positions)
+        source_rotations_array = np.stack(source_rotations)
 
-        forward_axis_attr = runtime_joint_prim.GetAttribute(
+        first_source_prim = source_joint_candidates[0]
+        source_forward_axis_attr = first_source_prim.GetAttribute(
             robot_schema.Attributes.FORWARD_AXIS.name
         )
-        forward_axis = str(forward_axis_attr.Get() or "X")
-        clearance_offset_attr = runtime_joint_prim.GetAttribute(
+        forward_axis = str(source_forward_axis_attr.Get() or "Z")
+        if forward_axis != "Z":
+            raise RuntimeError(
+                "official Surface Gripper attachment forward axis changed: "
+                f"expected Z, got {forward_axis}"
+            )
+        source_clearance_attr = first_source_prim.GetAttribute(
             robot_schema.Attributes.CLEARANCE_OFFSET.name
         )
-        clearance_offset_m = float(clearance_offset_attr.Get() or 0.0)
+        clearance_offset_m = float(source_clearance_attr.Get() or 0.008)
+        if not math.isclose(clearance_offset_m, 0.008, abs_tol=1e-6):
+            raise RuntimeError(
+                "official Surface Gripper clearance offset changed: expected "
+                f"0.008 m, got {clearance_offset_m} m"
+            )
+
         hand_position, hand_orientation = world_pose_for_xform(
             panda_hand_rigid_body_path
         )
@@ -1409,26 +1443,119 @@ try:
             attachment_position_world,
             attachment_orientation_world,
         )
-        runtime_joint.CreateLocalPos0Attr().Set(
-            Gf.Vec3f(*local_position.astype(float))
+        local_rotation = matrix_from_pose(
+            np.zeros(3), local_orientation
+        )[:3, :3]
+        runtime_positions, runtime_rotations = rebase_attachment_point_grid(
+            source_positions_array,
+            source_rotations_array,
+            local_position,
+            local_rotation,
         )
-        runtime_joint.CreateLocalRot0Attr().Set(
-            Gf.Quatf(
-                float(local_orientation[0]),
-                Gf.Vec3f(*local_orientation[1:].astype(float)),
+
+        runtime_joint_root_path = Sdf.Path(
+            "/World/RuntimeSurfaceGripperAttachmentPoints"
+        )
+        runtime_gripper_path = Sdf.Path("/World/RuntimeSurfaceGripper")
+        for runtime_path in (runtime_joint_root_path, runtime_gripper_path):
+            if stage.GetPrimAtPath(runtime_path).IsValid():
+                raise RuntimeError(f"runtime Surface Gripper prim already exists: {runtime_path}")
+
+        flattened_template = source_stage.Flatten()
+        stage.DefinePrim(runtime_joint_root_path, "Xform")
+        runtime_joint_paths: list[Sdf.Path] = []
+        copied_attachment_point_properties: list[dict] = []
+        for index, (
+            source_joint_path,
+            runtime_position,
+            runtime_rotation,
+        ) in enumerate(
+            zip(source_joint_paths, runtime_positions, runtime_rotations, strict=True)
+        ):
+            runtime_joint_path = runtime_joint_root_path.AppendChild(
+                f"point_{index:02d}"
             )
-        )
-        runtime_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-        runtime_joint.CreateLocalRot1Attr().Set(
-            Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0))
-        )
+            copied = Sdf.CopySpec(
+                flattened_template,
+                source_joint_path,
+                stage.GetEditTarget().GetLayer(),
+                runtime_joint_path,
+            )
+            if not copied:
+                raise RuntimeError(
+                    "could not copy official Surface Gripper D6 template point: "
+                    f"{source_joint_path}"
+                )
+            runtime_joint_prim = stage.GetPrimAtPath(runtime_joint_path)
+            if not runtime_joint_prim.IsValid():
+                raise RuntimeError(
+                    f"copied Surface Gripper D6 joint is invalid: {runtime_joint_path}"
+                )
+            runtime_joint = UsdPhysics.Joint(runtime_joint_prim)
+            runtime_joint.CreateBody0Rel().SetTargets(
+                [Sdf.Path(panda_hand_rigid_body_path)]
+            )
+            runtime_joint.CreateBody1Rel().ClearTargets(True)
+            runtime_joint.CreateJointEnabledAttr().Set(True)
+            runtime_joint.CreateExcludeFromArticulationAttr().Set(True)
+            runtime_joint.GetBreakForceAttr().Clear()
+            runtime_joint.GetBreakTorqueAttr().Clear()
+            robot_schema.ApplyAttachmentPointAPI(runtime_joint_prim)
+            runtime_joint_prim.GetAttribute(
+                robot_schema.Attributes.FORWARD_AXIS.name
+            ).Set("Z")
+            runtime_joint_prim.GetAttribute(
+                robot_schema.Attributes.CLEARANCE_OFFSET.name
+            ).Set(0.008)
+
+            runtime_quaternion = quaternion_wxyz_from_rotation_matrix(
+                runtime_rotation
+            )
+            runtime_joint.CreateLocalPos0Attr().Set(
+                Gf.Vec3f(*runtime_position.astype(float))
+            )
+            runtime_joint.CreateLocalRot0Attr().Set(
+                Gf.Quatf(
+                    float(runtime_quaternion[0]),
+                    Gf.Vec3f(*runtime_quaternion[1:].astype(float)),
+                )
+            )
+            runtime_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+            runtime_joint.CreateLocalRot1Attr().Set(
+                Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0))
+            )
+
+            for axis_name in ("transX", "transY"):
+                limit = UsdPhysics.LimitAPI.Apply(runtime_joint_prim, axis_name)
+                limit.CreateLowAttr().Set(1.0)
+                limit.CreateHighAttr().Set(-1.0)
+            trans_z_limit = UsdPhysics.LimitAPI.Apply(runtime_joint_prim, "transZ")
+            trans_z_limit.CreateLowAttr().Set(0.0)
+            trans_z_limit.CreateHighAttr().Set(0.01)
+            trans_z_drive = UsdPhysics.DriveAPI.Apply(runtime_joint_prim, "transZ")
+            trans_z_drive.CreateStiffnessAttr().Set(5000.0)
+            trans_z_drive.CreateDampingAttr().Set(100.0)
+            for axis_name in ("rotX", "rotY", "rotZ"):
+                angular_limit = UsdPhysics.LimitAPI.Apply(runtime_joint_prim, axis_name)
+                angular_limit.CreateLowAttr().Set(-3.0)
+                angular_limit.CreateHighAttr().Set(3.0)
+
+            runtime_joint_paths.append(runtime_joint_path)
+            copied_attachment_point_properties.append(
+                {
+                    "source": str(source_joint_path),
+                    "runtime": str(runtime_joint_path),
+                    "local_position_m": runtime_position.tolist(),
+                    "local_quaternion_wxyz": runtime_quaternion.tolist(),
+                }
+            )
 
         robot_schema.CreateSurfaceGripper(stage, str(runtime_gripper_path))
         runtime_gripper_prim = stage.GetPrimAtPath(runtime_gripper_path)
         if not runtime_gripper_prim.IsValid():
             raise RuntimeError("CreateSurfaceGripper returned an invalid prim")
         runtime_gripper_prim.GetRelationship(attachment_relation_name).SetTargets(
-            [runtime_joint_path]
+            runtime_joint_paths
         )
         # These are the values in NVIDIA's Isaac Sim 5.1 "Creating a Surface
         # Gripper fully on code" example. They are not candidate-specific tuning.
@@ -1498,7 +1625,8 @@ try:
                 else "Surface Gripper close was attempted but did not attach the target"
             ),
             "surface_gripper_prim": str(runtime_gripper_path),
-            "attachment_point_prim": str(runtime_joint_path),
+            "attachment_point_prims": [str(path) for path in runtime_joint_paths],
+            "attachment_point_count": len(runtime_joint_paths),
             "hand_rigid_body_prim": panda_hand_rigid_body_path,
             "target_rigid_body_prim": target_rigid_prim_path,
             "target_robot_collision_filtered": target_gripped,
@@ -1516,7 +1644,22 @@ try:
             },
             "official_template": str(source_path),
             "official_template_surface_gripper": None,
-            "official_template_attachment_point": str(source_joint_path),
+            "official_template_attachment_points": [
+                str(path) for path in source_joint_paths
+            ],
+            "copied_attachment_points": copied_attachment_point_properties,
+            "attachment_point_policy": {
+                "source": "official bundled 3x3 D6 template",
+                "count": EXPECTED_SURFACE_GRIPPER_ATTACHMENT_POINT_COUNT,
+                "forward_axis": "Z",
+                "clearance_offset_m": 0.008,
+                "trans_x_y": "locked",
+                "trans_z_limit_m": [0.0, 0.01],
+                "trans_z_stiffness": 5000.0,
+                "trans_z_damping": 100.0,
+                "rotation_limits_deg": [-3.0, 3.0],
+                "candidate_specific_tuning": False,
+            },
             "copied_gripper_properties": copied_gripper_properties,
             "gripper_property_source": (
                 "Isaac Sim 5.1 documented Creating a Surface Gripper fully on code example"
@@ -1839,6 +1982,14 @@ try:
     closed_finger_target = np.full(
         2, args.closed_finger_position_m, dtype=np.float64
     )
+    surface_gripper_retention = (
+        args.grasp_retention_mode == "surface-gripper-attachment"
+    )
+    retention_finger_target = (
+        open_fingers.copy()
+        if surface_gripper_retention
+        else closed_finger_target.copy()
+    )
     fixed_joint_attachment_gate = {
         "required": args.grasp_retention_mode == "rigid-attachment",
         "passed": None,
@@ -1861,7 +2012,8 @@ try:
         "contact_frame": None,
         "samples": [],
     }
-    for close_index in range(args.close_frames):
+    close_frame_budget = 0 if surface_gripper_retention else args.close_frames
+    for close_index in range(close_frame_budget):
         panda.apply_action(
             ArticulationAction(
                 joint_positions=np.concatenate((grasp_arm_target, closed_finger_target)),
@@ -1944,8 +2096,12 @@ try:
                 f"{gate_failure_path}"
             )
     else:
-        fixed_joint_attachment_gate["close_frames_executed"] = args.close_frames
-    frame_path = save_rgb("03_gripper_closed")
+        fixed_joint_attachment_gate["close_frames_executed"] = close_frame_budget
+    frame_path = save_rgb(
+        "03_surface_gripper_ready"
+        if surface_gripper_retention
+        else "03_gripper_closed"
+    )
     if frame_path:
         saved_frames.append(frame_path)
 
@@ -2021,20 +2177,30 @@ try:
         attachment_report = create_post_close_physx_auto_attachment()
     elif args.grasp_retention_mode == "surface-gripper-attachment":
         attachment_report = create_post_close_surface_gripper_attachment()
+        attachment_report["finger_policy"] = {
+            "command": "hold open finger positions",
+            "finger_motion_used_for_retention": False,
+            "target_positions_m": retention_finger_target.tolist(),
+            "close_frames_executed": 0,
+            "reason": (
+                "Surface Gripper is evaluated as an explicit retention "
+                "abstraction independent of parallel-jaw contact"
+            ),
+        }
     elif args.grasp_retention_mode == "kinematic-pose-lock":
         attachment_report = create_post_close_kinematic_pose_lock()
 
     target_before_lift_position, target_before_lift_orientation = get_target_world_pose()
     target_before_lift_position = np.asarray(target_before_lift_position, dtype=np.float64)
     lift_diagnostic_start_index = len(diagnostic_phases)
-    execute_phase("lift", closed_finger_target)
+    execute_phase("lift", retention_finger_target)
     target_after_lift_position, target_after_lift_orientation = get_target_world_pose()
     target_after_lift_position = np.asarray(target_after_lift_position, dtype=np.float64)
 
     transport_executed = "transport" in replay.phase_positions
     target_after_transport_position = None
     if transport_executed:
-        execute_phase("transport", closed_finger_target)
+        execute_phase("transport", retention_finger_target)
         target_after_transport_position, target_after_transport_orientation = (
             get_target_world_pose()
         )
@@ -2047,7 +2213,7 @@ try:
     for _ in range(args.hold_frames):
         panda.apply_action(
             ArticulationAction(
-                joint_positions=np.concatenate((final_arm_target, closed_finger_target)),
+                joint_positions=np.concatenate((final_arm_target, retention_finger_target)),
                 joint_indices=all_indices,
             )
         )
@@ -2266,6 +2432,8 @@ try:
             "open_finger_targets_m": open_fingers.tolist(),
             "measured_fingers_before_close_m": measured_fingers_before_close.tolist(),
             "closed_finger_targets_m": closed_finger_target.tolist(),
+            "retention_finger_targets_m": retention_finger_target.tolist(),
+            "finger_motion_used_for_retention": not surface_gripper_retention,
             "measured_fingers_after_close_m": measured_fingers_after_close.tolist(),
             "measured_fingers_held_m": measured_fingers_held.tolist(),
             "saved_review_frames": saved_frames,
