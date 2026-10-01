@@ -72,6 +72,7 @@ def main() -> int:
         CUROBO_PLAN_SUCCESS,
         STATE_COLORS_RGB,
         classify_candidate_states,
+        resolve_saved_gripper_identity,
         state_counts,
         verify_saved_world_grasps,
     )
@@ -111,13 +112,7 @@ def main() -> int:
     filter_report = json.loads(
         (args.filtered / "collision_filter_check.json").read_text(encoding="utf-8")
     )
-    gripper_name = candidate_report.get(
-        "gripper", candidate_report.get("parameters", {}).get("gripper")
-    )
-    if not isinstance(gripper_name, str) or not gripper_name:
-        raise ValueError("candidate report has no gripper identity")
-    if filter_report.get("gripper") != gripper_name:
-        raise ValueError("candidate and collision-filter grippers disagree")
+    gripper_name = resolve_saved_gripper_identity(candidate_report, filter_report)
     candidate_count = len(grasps_camera)
     if grasps_world.shape != grasps_camera.shape:
         raise ValueError("camera/world grasp arrays have different shapes")

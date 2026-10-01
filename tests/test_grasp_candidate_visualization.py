@@ -9,12 +9,29 @@ from panda_handover.grasp_visualization import (
     STATIC_COLLISION_FREE,
     STATIC_COLLISION_REJECTED,
     classify_candidate_states,
+    resolve_saved_gripper_identity,
     state_counts,
     verify_saved_world_grasps,
 )
 
 
 class GraspCandidateVisualizationTests(unittest.TestCase):
+    def test_legacy_reports_resolve_to_historical_franka_default(self) -> None:
+        self.assertEqual(
+            resolve_saved_gripper_identity(
+                {"parameters": {"gripper": "franka_panda"}},
+                {"parameters": {"collision_threshold_m": 0.005}},
+            ),
+            "franka_panda",
+        )
+
+    def test_explicit_gripper_mismatch_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "grippers disagree"):
+            resolve_saved_gripper_identity(
+                {"gripper": "robotiq_2f_85"},
+                {"gripper": "franka_panda"},
+            )
+
     def test_classifies_static_and_curobo_results_without_conflation(self) -> None:
         states = classify_candidate_states(
             np.array([False, True, True, True, True]),

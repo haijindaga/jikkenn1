@@ -22,6 +22,37 @@ STATE_COLORS_RGB = {
 }
 
 
+def resolve_saved_gripper_identity(
+    candidate_report: Mapping[str, object],
+    filter_report: Mapping[str, object],
+) -> str:
+    """Resolve matching gripper provenance across current and legacy reports.
+
+    Before selectable grippers were introduced, both stages were hard-coded to
+    ``franka_panda``. Legacy reports can therefore omit the identity. Explicit
+    conflicting identities still fail closed.
+    """
+
+    def recorded(report: Mapping[str, object]) -> object:
+        parameters = report.get("parameters", {})
+        nested = parameters if isinstance(parameters, Mapping) else {}
+        return report.get("gripper", nested.get("gripper"))
+
+    candidate = recorded(candidate_report) or "franka_panda"
+    filtered = recorded(filter_report) or "franka_panda"
+    supported = {"franka_panda", "robotiq_2f_85"}
+    if candidate not in supported:
+        raise ValueError(f"unsupported candidate gripper identity: {candidate!r}")
+    if filtered not in supported:
+        raise ValueError(f"unsupported collision-filter gripper identity: {filtered!r}")
+    if candidate != filtered:
+        raise ValueError(
+            "candidate and collision-filter grippers disagree: "
+            f"candidate={candidate!r}, filtered={filtered!r}"
+        )
+    return str(candidate)
+
+
 def classify_candidate_states(
     collision_free_mask: np.ndarray,
     plan_attempts: Iterable[Mapping[str, object]] = (),
