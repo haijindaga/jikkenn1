@@ -13,12 +13,13 @@ from panda_handover.vlm_parts import (
 
 
 class HandoverPartsTests(unittest.TestCase):
-    def test_accepts_original_three_field_contract(self) -> None:
+    def test_accepts_bounded_four_field_contract(self) -> None:
         parts = HandoverParts.from_mapping(
             {
                 "object": "scissors",
                 "grasp_part": "scissors blade near the pivot",
                 "receive_part": "scissors handles",
+                "transport_orientation_policy": "free",
             },
             target_object="scissors",
         )
@@ -31,6 +32,7 @@ class HandoverPartsTests(unittest.TestCase):
                     "object": "hammer",
                     "grasp_part": "hammer head",
                     "receive_part": "hammer handle",
+                    "transport_orientation_policy": "free",
                     "confidence": 0.9,
                 },
                 target_object="hammer",
@@ -43,6 +45,7 @@ class HandoverPartsTests(unittest.TestCase):
                     "object": "hammer",
                     "grasp_part": "head",
                     "receive_part": "hammer handle",
+                    "transport_orientation_policy": "free",
                 },
                 target_object="hammer",
             )
@@ -54,6 +57,7 @@ class HandoverPartsTests(unittest.TestCase):
                     "object": "pliers",
                     "grasp_part": "pliers jaws",
                     "receive_part": "pliers handles",
+                    "transport_orientation_policy": "free",
                 },
                 target_object="scissors",
             )
@@ -63,12 +67,24 @@ class HandoverPartsTests(unittest.TestCase):
         self.assertIn("Target object: knife", prompt)
         self.assertIn("hand", prompt)
 
+    def test_rejects_unbounded_orientation_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "transport_orientation_policy"):
+            HandoverParts.from_mapping(
+                {
+                    "object": "mug",
+                    "grasp_part": "mug handle",
+                    "receive_part": "mug body",
+                    "transport_orientation_policy": "tilt_approximately_10_degrees",
+                },
+                target_object="mug",
+            )
+
     def test_user_prompt_records_additional_grasp_instruction(self) -> None:
         prompt = build_user_prompt(
             "hammer", task_instruction="Grasp near the estimated center of mass."
         )
         self.assertIn("Target object: hammer", prompt)
-        self.assertIn("Additional grasp instruction", prompt)
+        self.assertIn("Additional task instruction", prompt)
         self.assertIn("center of mass", prompt)
 
     def test_ollama_request_uses_schema_and_unloads_model(self) -> None:
@@ -82,7 +98,8 @@ class HandoverPartsTests(unittest.TestCase):
                     "role": "assistant",
                     "content": (
                         '{"object":"hammer","grasp_part":"hammer head",'
-                        '"receive_part":"hammer handle"}'
+                        '"receive_part":"hammer handle",'
+                        '"transport_orientation_policy":"free"}'
                     ),
                 },
             }
@@ -100,12 +117,17 @@ class HandoverPartsTests(unittest.TestCase):
                     task_instruction="Grasp near the estimated center of mass.",
                 )
         self.assertEqual(parts.receive_part, "hammer handle")
+        self.assertEqual(parts.transport_orientation_policy, "free")
         payload = calls[0][2]
         self.assertEqual(calls[0][1], "POST")
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["keep_alive"], 0)
         self.assertEqual(payload["options"]["temperature"], 0)
         self.assertFalse(payload["format"]["additionalProperties"])
+        self.assertEqual(
+            payload["format"]["properties"]["transport_orientation_policy"]["enum"],
+            ["free", "keep_grasp_orientation"],
+        )
         self.assertEqual(metadata["model_digest"], "digest")
         self.assertEqual(
             metadata["request"]["task_instruction"],

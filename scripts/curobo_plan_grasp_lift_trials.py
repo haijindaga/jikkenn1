@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         nargs=3,
         metavar=("DX", "DY", "DZ"),
     )
+    parser.add_argument("--transport-orientation-policy-report", type=Path)
     parser.add_argument(
         "--allow-reviewed-support-contact-preflight", action="store_true"
     )
@@ -83,6 +84,7 @@ def read_plan_status(directory: Path) -> tuple[str, str | None]:
         "grasp_preflight_failure.json",
         "grasp_lift_failure.json",
         "handover_transport_failure.json",
+        "handover_orientation_constraint_failure.json",
     )
     for name in report_names:
         path = directory / name
@@ -147,6 +149,11 @@ def main() -> int:
                 if args.handover_receiver_position_robot_base_m is not None
                 else "manual panda_hand goal"
                 if args.handover_goal_position_robot_base_m is not None
+                else None
+            ),
+            "transport_orientation_policy_report": (
+                str(args.transport_orientation_policy_report)
+                if args.transport_orientation_policy_report is not None
                 else None
             ),
         },
@@ -219,6 +226,13 @@ def main() -> int:
                         str(value)
                         for value in args.handover_human_direction_robot_base
                     ],
+                ]
+            )
+        if args.transport_orientation_policy_report is not None:
+            command.extend(
+                [
+                    "--transport-orientation-policy-report",
+                    str(args.transport_orientation_policy_report),
                 ]
             )
         print(

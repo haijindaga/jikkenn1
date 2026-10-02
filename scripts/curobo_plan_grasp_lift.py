@@ -89,6 +89,14 @@ def parse_args() -> argparse.Namespace:
         metavar=("DX", "DY", "DZ"),
         help="Automatic handover direction from the robot-held part toward the human",
     )
+    parser.add_argument(
+        "--transport-orientation-policy-report",
+        type=Path,
+        help=(
+            "Successful VLM part-discovery report containing the bounded "
+            "free/keep_grasp_orientation transport policy"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -359,6 +367,23 @@ def _normalized_quaternion(value: Any) -> np.ndarray:
     if quaternion[0] < 0.0:
         quaternion *= -1.0
     return quaternion.astype(np.float32)
+
+
+def _tool_quaternions_wxyz(planner: Any, joint_state: Any) -> np.ndarray:
+    """Read the reviewed main tool pose from cuRobo V2 kinematics."""
+
+    state = planner.compute_kinematics(joint_state)
+    tool_poses = getattr(state, "tool_poses", None)
+    if tool_poses is None or not hasattr(tool_poses, "get_link_pose"):
+        raise RuntimeError("cuRobo kinematics returned no tool_poses collection")
+    if len(planner.tool_frames) != 1:
+        raise RuntimeError("orientation validation requires exactly one tool frame")
+    pose = tool_poses.get_link_pose(planner.tool_frames[0])
+    quaternions = _cpu_numpy(pose.quaternion).astype(np.float32, copy=False)
+    quaternions = quaternions.reshape(-1, 4)
+    if len(quaternions) == 0 or not np.isfinite(quaternions).all():
+        raise RuntimeError("cuRobo returned invalid tool quaternions")
+    return quaternions
 
 
 def _collision_sphere_link_names(
@@ -663,15 +688,33 @@ def main() -> int:
     from panda_handover.curobo_bridge import select_named_joint_positions
     from panda_handover.curobo_planning import (
         load_singleview_observed_pointcloud,
+        quaternion_orientation_deviation_rad,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
     )
     from panda_handover.geometry import transform_points
     from panda_handover.handover import (
         DEFAULT_HANDOVER_ROLL_DEGREES,
+        ORIENTATION_PRESERVATION_TOLERANCE_RAD,
         generate_affordance_handover_goals,
+        generate_orientation_preserving_handover_goal,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+    from panda_handover.vlm_parts import load_handover_parts_report
+
+    transport_orientation_policy = "free"
+    if args.transport_orientation_policy_report is not None:
+        handover_parts = load_handover_parts_report(
+            args.transport_orientation_policy_report
+        )
+        transport_orientation_policy = handover_parts.transport_orientation_policy
+    if (
+        transport_orientation_policy == "keep_grasp_orientation"
+        and args.handover_goal_quaternion_wxyz is not None
+    ):
+        raise ValueError(
+            "keep_grasp_orientation conflicts with an explicit handover quaternion"
+        )
 
     subprocess.run(
         [
@@ -806,7 +849,11 @@ def main() -> int:
     # planner. Reserve capacity for the largest goalset used in either phase.
     planner_max_goalset = max(
         len(grasp_transforms),
-        len(DEFAULT_HANDOVER_ROLL_DEGREES) if automatic_handover else 1,
+        (
+            len(DEFAULT_HANDOVER_ROLL_DEGREES)
+            if automatic_handover and transport_orientation_policy == "free"
+            else 1
+        ),
     )
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -1507,21 +1554,32 @@ def main() -> int:
             assert handover_human_direction is not None
             assert grasp_part_robot_base is not None
             assert receive_part_robot_base is not None
-            handover_goal_transforms, handover_goal_diagnostics = (
-                generate_affordance_handover_goals(
-                    grasp_transforms[selected_rank],
-                    grasp_part_robot_base,
-                    receive_part_robot_base,
-                    handover_receiver_position,
-                    handover_human_direction,
+            if transport_orientation_policy == "keep_grasp_orientation":
+                handover_goal_transforms, handover_goal_diagnostics = (
+                    generate_orientation_preserving_handover_goal(
+                        grasp_transforms[selected_rank],
+                        receive_part_robot_base,
+                        handover_receiver_position,
+                    )
                 )
-            )
+            else:
+                handover_goal_transforms, handover_goal_diagnostics = (
+                    generate_affordance_handover_goals(
+                        grasp_transforms[selected_rank],
+                        grasp_part_robot_base,
+                        receive_part_robot_base,
+                        handover_receiver_position,
+                        handover_human_direction,
+                    )
+                )
             handover_goal_positions = handover_goal_transforms[:, :3, 3]
             handover_goal_quaternions = rotation_matrix_to_quaternion_wxyz(
                 handover_goal_transforms[:, :3, :3]
             ).astype(np.float32, copy=False)
             handover_orientation_policy = (
-                "align_grasp_to_receive_part_axis_with_human_direction_then_"
+                "preserve_selected_grasp_orientation"
+                if transport_orientation_policy == "keep_grasp_orientation"
+                else "align_grasp_to_receive_part_axis_with_human_direction_then_"
                 "curobo_selects_roll"
             )
             np.save(
@@ -1646,6 +1704,88 @@ def main() -> int:
             output / "transport_attached_object_spheres_world.npy",
             transport_attached_spheres,
         )
+        orientation_validation = None
+        if transport_orientation_policy == "keep_grasp_orientation":
+            reference_quaternion = rotation_matrix_to_quaternion_wxyz(
+                grasp_transforms[selected_rank, :3, :3]
+            )
+            lift_state = JointState.from_position(
+                torch.from_numpy(phase_reports["lift"]["position"]).to(
+                    device_cfg.device
+                ),
+                joint_names=planner.joint_names,
+            )
+            lift_tool_quaternions = _tool_quaternions_wxyz(planner, lift_state)
+            transport_tool_quaternions = _tool_quaternions_wxyz(
+                planner, transport_state
+            )
+            lift_deviation = quaternion_orientation_deviation_rad(
+                lift_tool_quaternions, reference_quaternion
+            )
+            transport_deviation = quaternion_orientation_deviation_rad(
+                transport_tool_quaternions, reference_quaternion
+            )
+            np.save(output / "lift_tool_quaternions_wxyz.npy", lift_tool_quaternions)
+            np.save(
+                output / "transport_tool_quaternions_wxyz.npy",
+                transport_tool_quaternions,
+            )
+            np.save(output / "lift_orientation_deviation_rad.npy", lift_deviation)
+            np.save(
+                output / "transport_orientation_deviation_rad.npy",
+                transport_deviation,
+            )
+            maximum_deviation = float(
+                max(np.max(lift_deviation), np.max(transport_deviation))
+            )
+            orientation_validation = {
+                "policy": transport_orientation_policy,
+                "reference": "selected grasp panda_hand orientation",
+                "reference_quaternion_wxyz": reference_quaternion.tolist(),
+                "tolerance_rad": ORIENTATION_PRESERVATION_TOLERANCE_RAD,
+                "tolerance_deg": float(
+                    np.rad2deg(ORIENTATION_PRESERVATION_TOLERANCE_RAD)
+                ),
+                "maximum_lift_deviation_rad": float(np.max(lift_deviation)),
+                "maximum_transport_deviation_rad": float(
+                    np.max(transport_deviation)
+                ),
+                "maximum_deviation_rad": maximum_deviation,
+                "passed": bool(
+                    maximum_deviation <= ORIENTATION_PRESERVATION_TOLERANCE_RAD
+                ),
+                "implementation": (
+                    "goal orientation fixed to grasp orientation, followed by "
+                    "FK validation at every saved lift and transport waypoint"
+                ),
+            }
+            if not orientation_validation["passed"]:
+                failure_report = {
+                    "status": "handover_orientation_constraint_failed",
+                    "inputs": {
+                        "transport_orientation_policy_report": str(
+                            args.transport_orientation_policy_report
+                        ),
+                    },
+                    "orientation_validation": orientation_validation,
+                    "safety": {
+                        "trajectory_saved": True,
+                        "trajectory_accepted": False,
+                        "trajectory_executed": False,
+                    },
+                    "next_gate": (
+                        "Try another grasp candidate. Do not relax the common "
+                        "orientation tolerance for one object."
+                    ),
+                }
+                failure_path = output / "handover_orientation_constraint_failure.json"
+                failure_path.write_text(
+                    json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+                )
+                planner.destroy()
+                print(json.dumps(failure_report, indent=2))
+                print(f"saved: {failure_path}")
+                return 2
         transport_checks = {
             "transport_starts_at_lift_end": bool(
                 np.allclose(
@@ -1661,6 +1801,9 @@ def main() -> int:
             ),
             "transport_all_waypoints_clear_of_observed_scene": bool(
                 not np.any(transport_cost_np > 0.0)
+            ),
+            "transport_orientation_policy_satisfied": bool(
+                orientation_validation is None or orientation_validation["passed"]
             ),
         }
         transport_report = {
@@ -1692,6 +1835,7 @@ def main() -> int:
                 "orientation_policy": handover_orientation_policy,
                 "affordance_geometry": handover_goal_diagnostics,
             },
+            "orientation_validation": orientation_validation,
         }
 
     report = {
@@ -1770,6 +1914,15 @@ def main() -> int:
                 requested_candidate_original_rank
             ),
             "automatic_affordance_handover": automatic_handover,
+            "transport_orientation_policy": transport_orientation_policy,
+            "transport_orientation_policy_report": (
+                str(args.transport_orientation_policy_report)
+                if args.transport_orientation_policy_report is not None
+                else None
+            ),
+            "orientation_preservation_tolerance_rad": (
+                ORIENTATION_PRESERVATION_TOLERANCE_RAD
+            ),
             "planner_max_goalset": planner_max_goalset,
             "handover_receiver_position_robot_base_m": (
                 handover_receiver_position.tolist()
@@ -1861,6 +2014,10 @@ def main() -> int:
             "attachment_prepared_and_checked_at_lift_end": True,
             "attachment_transform_defined_at_grasp_end": True,
             "handover_transport_planned": transport_report is not None,
+            "path_orientation_preservation_postvalidated": bool(
+                transport_report is not None
+                and transport_orientation_policy == "keep_grasp_orientation"
+            ),
             "held_object_collision_checked_during_transport": (
                 transport_report is not None and transport_cost_np is not None
             ),

@@ -4,6 +4,7 @@ import numpy as np
 
 from panda_handover.handover import (
     generate_affordance_handover_goals,
+    generate_orientation_preserving_handover_goal,
     receive_clear_score_order,
 )
 
@@ -60,6 +61,33 @@ class HandoverGeometryTests(unittest.TestCase):
             generate_affordance_handover_goals(
                 np.eye(4), points, points, [0.5, 0.0, 0.5], [1.0, 0.0, 0.0]
             )
+
+    def test_orientation_preserving_goal_keeps_rotation_and_places_receive_part(self):
+        grasp_transform = np.eye(4)
+        grasp_transform[:3, :3] = np.array(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        grasp_transform[:3, 3] = [0.4, 0.1, 0.2]
+        receive_part = np.array(
+            [[0.5, 0.09, 0.2], [0.5, 0.11, 0.2], [0.5, 0.1, 0.2]]
+        )
+        receiver = np.array([0.55, -0.3, 0.65])
+
+        goals, report = generate_orientation_preserving_handover_goal(
+            grasp_transform, receive_part, receiver
+        )
+
+        self.assertEqual(goals.shape, (1, 4, 4))
+        np.testing.assert_allclose(
+            goals[0, :3, :3], grasp_transform[:3, :3], atol=1e-7
+        )
+        receive_center_hand = np.asarray(report["receive_part_center_panda_hand_m"])
+        np.testing.assert_allclose(
+            goals[0, :3, :3] @ receive_center_hand + goals[0, :3, 3],
+            receiver,
+            atol=1e-6,
+        )
+        self.assertFalse(report["human_direction_alignment_enforced"])
 
 
 if __name__ == "__main__":

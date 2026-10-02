@@ -19,8 +19,17 @@ HANDOVER_PARTS_SCHEMA: dict[str, Any] = {
         "object": {"type": "string"},
         "grasp_part": {"type": "string"},
         "receive_part": {"type": "string"},
+        "transport_orientation_policy": {
+            "type": "string",
+            "enum": ["free", "keep_grasp_orientation"],
+        },
     },
-    "required": ["object", "grasp_part", "receive_part"],
+    "required": [
+        "object",
+        "grasp_part",
+        "receive_part",
+        "transport_orientation_policy",
+    ],
     "additionalProperties": False,
 }
 
@@ -35,9 +44,16 @@ Rules:
 - Every value must be a short English noun phrase suitable as a SAM3 text prompt.
 - Each part phrase must be self-contained and include the complete object phrase.
 - grasp_part and receive_part must name different regions.
-- If the user supplies an additional grasp instruction, follow it when choosing
-  grasp_part. Translate abstract requests such as center of mass into the closest
-  visually identifiable semantic region; do not claim an exact physical point.
+- transport_orientation_policy must be exactly one of:
+  - keep_grasp_orientation: changing the object's orientation after grasping may
+    spill contents, damage the object, or violate an explicit task instruction.
+  - free: no such orientation-sensitive condition is stated or visibly evident.
+- Do not invent hidden contents. Use the task instruction when it states an
+  orientation-sensitive condition such as a filled or open container.
+- If the user supplies an additional task instruction, use it for both the
+  grasp-part choice and the transport-orientation decision. Translate abstract
+  grasp requests such as center of mass into the closest visually identifiable
+  semantic region; do not claim an exact physical point.
 - Do not add explanations, markdown, confidence scores, or extra fields.
 """
 
@@ -47,12 +63,18 @@ class HandoverParts:
     object: str
     grasp_part: str
     receive_part: str
+    transport_orientation_policy: str
 
     @classmethod
     def from_mapping(
         cls, value: Mapping[str, Any], *, target_object: str
     ) -> "HandoverParts":
-        expected = {"object", "grasp_part", "receive_part"}
+        expected = {
+            "object",
+            "grasp_part",
+            "receive_part",
+            "transport_orientation_policy",
+        }
         if set(value) != expected:
             raise ValueError(
                 f"VLM output fields must be exactly {sorted(expected)}, got {sorted(value)}"
@@ -63,6 +85,9 @@ class HandoverParts:
             object=value["object"].strip(),
             grasp_part=value["grasp_part"].strip(),
             receive_part=value["receive_part"].strip(),
+            transport_orientation_policy=value[
+                "transport_orientation_policy"
+            ].strip(),
         )
         result.validate(target_object=target_object)
         return result
@@ -71,7 +96,11 @@ class HandoverParts:
         target = target_object.strip()
         if not target:
             raise ValueError("target object must not be empty")
-        for name, phrase in asdict(self).items():
+        for name, phrase in (
+            ("object", self.object),
+            ("grasp_part", self.grasp_part),
+            ("receive_part", self.receive_part),
+        ):
             if not phrase:
                 raise ValueError(f"{name} must not be empty")
             if len(phrase) > 160:
@@ -93,6 +122,14 @@ class HandoverParts:
                 )
         if self.grasp_part.casefold() == self.receive_part.casefold():
             raise ValueError("grasp_part and receive_part must be different")
+        if self.transport_orientation_policy not in {
+            "free",
+            "keep_grasp_orientation",
+        }:
+            raise ValueError(
+                "transport_orientation_policy must be 'free' or "
+                "'keep_grasp_orientation'"
+            )
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -115,7 +152,7 @@ def build_user_prompt(
             raise ValueError("task instruction must not be empty")
         if len(instruction) > 500:
             raise ValueError("task instruction is too long")
-        prompt += f"\nAdditional grasp instruction: {instruction}"
+        prompt += f"\nAdditional task instruction: {instruction}"
     return prompt
 
 

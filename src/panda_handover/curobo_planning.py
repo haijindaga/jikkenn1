@@ -504,3 +504,30 @@ def rotation_matrix_to_quaternion_wxyz(rotations: np.ndarray) -> np.ndarray:
             quaternion *= -1.0
         output[index] = quaternion
     return output.reshape(*values.shape[:-2], 4).astype(np.float32)
+
+
+def quaternion_orientation_deviation_rad(
+    quaternions_wxyz: np.ndarray, reference_wxyz: np.ndarray
+) -> np.ndarray:
+    """Return sign-invariant angular deviation from one reference quaternion."""
+
+    values = np.asarray(quaternions_wxyz, dtype=np.float64)
+    reference = np.asarray(reference_wxyz, dtype=np.float64)
+    if values.ndim == 1:
+        values = values[None, :]
+    if values.ndim != 2 or values.shape[1] != 4:
+        raise ValueError("quaternions_wxyz must have shape (N,4) or (4,)")
+    if reference.shape != (4,):
+        raise ValueError("reference_wxyz must have shape (4,)")
+    if not np.isfinite(values).all() or not np.isfinite(reference).all():
+        raise ValueError("quaternions must contain only finite values")
+    value_norms = np.linalg.norm(values, axis=1)
+    reference_norm = float(np.linalg.norm(reference))
+    if np.any(value_norms <= 1e-12) or reference_norm <= 1e-12:
+        raise ValueError("quaternion norm must be non-zero")
+    normalized = values / value_norms[:, None]
+    normalized_reference = reference / reference_norm
+    absolute_dot = np.clip(
+        np.abs(normalized @ normalized_reference), 0.0, 1.0
+    )
+    return 2.0 * np.arccos(absolute_dot)

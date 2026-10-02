@@ -669,6 +669,13 @@ def build_stages(
                 *[str(value) for value in args.handover_goal_position_robot_base_m],
             ]
         )
+    if args.target_object is not None:
+        plan_trials_command.extend(
+            [
+                "--transport-orientation-policy-report",
+                str(paths.vlm / "vlm_part_discovery.json"),
+            ]
+        )
     if args.handover_goal_quaternion_wxyz is not None:
         plan_trials_command.extend(
             [
@@ -871,6 +878,11 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "receive-part clearance hard gate, then original GraspGenX score"
                 if args.handover_receiver_position_robot_base_m is not None
                 else None
+            ),
+            "transport_orientation_policy_source": (
+                str(paths.vlm / "vlm_part_discovery.json")
+                if args.target_object is not None
+                else "manual mode defaults to free"
             ),
             "grasp_retention_mode": args.grasp_retention_mode,
             "rigid_attachment_means_grasp_success_is_assumed": bool(

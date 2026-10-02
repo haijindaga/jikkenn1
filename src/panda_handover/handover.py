@@ -8,6 +8,7 @@ import numpy as np
 
 
 DEFAULT_HANDOVER_ROLL_DEGREES = (0.0, 45.0, -45.0, 90.0, -90.0, 180.0)
+ORIENTATION_PRESERVATION_TOLERANCE_RAD = float(np.deg2rad(2.0))
 
 
 def receive_clear_score_order(
@@ -168,3 +169,52 @@ def generate_affordance_handover_goals(
         "goal_count": len(goals),
     }
     return goal_transforms, diagnostics
+
+
+def generate_orientation_preserving_handover_goal(
+    grasp_transform_robot_base: np.ndarray,
+    receive_part_points_robot_base: np.ndarray,
+    receiver_position_robot_base_m: Iterable[float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Place the receive part while preserving the selected grasp rotation.
+
+    This is the geometric realization of the VLM's bounded
+    ``keep_grasp_orientation`` policy. It does not infer a new angle and does
+    not try to satisfy the otherwise conflicting presentation-axis policy.
+    """
+
+    transform = np.asarray(grasp_transform_robot_base, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("grasp_transform_robot_base must be a finite 4x4 matrix")
+    rotation = transform[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-5
+    ):
+        raise ValueError("grasp_transform_robot_base rotation must be rigid")
+    receive_points = _points(receive_part_points_robot_base, name="receive part points")
+    receiver_position = np.asarray(
+        tuple(receiver_position_robot_base_m), dtype=np.float64
+    ).reshape(3)
+    if not np.isfinite(receiver_position).all():
+        raise ValueError("receiver position must contain three finite values")
+
+    receive_center_base = np.median(receive_points, axis=0)
+    receive_center_hand = rotation.T @ (
+        receive_center_base - transform[:3, 3]
+    )
+    goal = np.eye(4, dtype=np.float64)
+    goal[:3, :3] = rotation
+    goal[:3, 3] = receiver_position - rotation @ receive_center_hand
+    diagnostics: dict[str, Any] = {
+        "policy": (
+            "preserve the selected grasp rotation and place the receive-part "
+            "median at the requested receiver position"
+        ),
+        "representative_point": "coordinate-wise median of segmented 3-D points",
+        "receive_part_center_robot_base_m": receive_center_base.tolist(),
+        "receive_part_center_panda_hand_m": receive_center_hand.tolist(),
+        "receiver_position_robot_base_m": receiver_position.tolist(),
+        "goal_count": 1,
+        "human_direction_alignment_enforced": False,
+    }
+    return goal[None, ...].astype(np.float32), diagnostics

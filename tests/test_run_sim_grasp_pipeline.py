@@ -125,6 +125,11 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             self.assertEqual(
                 command[command.index("--segmentation") + 1], str(paths.segmentation)
             )
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertEqual(
+            planner[planner.index("--transport-orientation-policy-report") + 1],
+            str(paths.vlm / "vlm_part_discovery.json"),
+        )
 
     def test_manual_part_prompt_also_drives_candidate_generation(self) -> None:
         args = MODULE.parse_args(
@@ -334,6 +339,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         planner = stages["curobo_grasp_lift_trials"].command
         self.assertIn("--handover-receiver-position-robot-base-m", planner)
         self.assertIn("--handover-human-direction-robot-base", planner)
+        self.assertIn("--transport-orientation-policy-report", planner)
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],

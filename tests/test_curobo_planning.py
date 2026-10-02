@@ -14,6 +14,7 @@ from panda_handover.curobo_planning import (
     load_singleview_observed_pointcloud,
     prepare_pregrasp_goalset,
     rotation_matrix_to_quaternion_wxyz,
+    quaternion_orientation_deviation_rad,
     summarize_ik_result_arrays,
     validate_voxel_fix_report,
 )
@@ -336,6 +337,21 @@ class CuroboPlanningTests(unittest.TestCase):
         quaternions = rotation_matrix_to_quaternion_wxyz(rotations)
         np.testing.assert_allclose(quaternions[0], [1.0, 0.0, 0.0, 0.0])
         np.testing.assert_allclose(quaternions[1], [0.0, 1.0, 0.0, 0.0])
+
+    def test_quaternion_deviation_is_sign_invariant(self):
+        half_angle = np.deg2rad(10.0) / 2.0
+        values = np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0, 0.0],
+                [np.cos(half_angle), 0.0, 0.0, np.sin(half_angle)],
+            ]
+        )
+        deviation = quaternion_orientation_deviation_rad(
+            values, np.array([1.0, 0.0, 0.0, 0.0])
+        )
+        np.testing.assert_allclose(deviation[:2], [0.0, 0.0], atol=1e-12)
+        self.assertAlmostEqual(float(deviation[2]), np.deg2rad(10.0))
 
     def test_voxel_fix_report_requires_exact_source_hash(self):
         report = {
