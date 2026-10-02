@@ -26,11 +26,20 @@ from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
 
-RECEIVER_CHARACTER_USD = {
-    "male-police": (
-        "Isaac/People/Characters/original_male_adult_police_04/"
-        "male_adult_police_04.usd"
-    ),
+RECEIVER_CHARACTER_ASSETS = {
+    "male-police": {
+        "relative_usd": (
+            "Isaac/People/Characters/original_male_adult_police_04/"
+            "male_adult_police_04.usd"
+        ),
+        "asset_kind": "skinned human character",
+        "documented_local_forward_axis": "-Y",
+    },
+    "humanoid-proxy": {
+        "relative_usd": "Isaac/Robots/IsaacSim/Humanoid/humanoid.usd",
+        "asset_kind": "articulated humanoid proxy",
+        "documented_local_forward_axis": None,
+    },
 }
 
 
@@ -76,10 +85,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--static-receiver-character",
-        choices=tuple(RECEIVER_CHARACTER_USD),
+        choices=tuple(RECEIVER_CHARACTER_ASSETS),
         help=(
-            "Add an official NVIDIA character as a static visual-only receiver; "
-            "it is not included as a human collision or safety model"
+            "Add an official NVIDIA character or humanoid proxy as a static "
+            "visual-only receiver; it is not included as a human collision or "
+            "safety model"
         ),
     )
     parser.add_argument(
@@ -95,8 +105,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=90.0,
         help=(
-            "Receiver yaw about world +Z; 90 degrees maps the NVIDIA "
-            "character's documented local -Y forward axis toward world +X"
+            "Receiver yaw about world +Z. For male-police, 90 degrees maps its "
+            "documented local -Y forward axis toward world +X; humanoid-proxy "
+            "orientation must be confirmed visually"
         ),
     )
     args = parser.parse_args()
@@ -345,9 +356,8 @@ try:
                 "Isaac Sim assets root could not be resolved; install or configure "
                 "the Isaac Sim 5.1 assets before adding the static receiver"
             )
-        character_relative_path = RECEIVER_CHARACTER_USD[
-            args.static_receiver_character
-        ]
+        character_spec = RECEIVER_CHARACTER_ASSETS[args.static_receiver_character]
+        character_relative_path = character_spec["relative_usd"]
         character_usd = f"{assets_root.rstrip('/')}/{character_relative_path}"
         character_stat_result, _ = omni.client.stat(character_usd)
         if character_stat_result != omni.client.Result.OK:
@@ -464,8 +474,9 @@ try:
             )
         receiver_authoring = {
             "role": "visual-only static human receiver",
-            "source": "NVIDIA Isaac Sim 5.1 character assets",
+            "source": "NVIDIA Isaac Sim 5.1 assets",
             "character": args.static_receiver_character,
+            "asset_kind": character_spec["asset_kind"],
             "source_usd": character_usd,
             "source_stat_result": omni.client.get_result_string(
                 character_stat_result
@@ -474,8 +485,14 @@ try:
             "asset_prim": "/World/Receiver/Asset",
             "requested_center_xy_m": list(args.receiver_center_xy),
             "requested_yaw_deg": args.receiver_yaw_deg,
-            "documented_local_forward_axis": "-Y",
-            "world_facing_direction": "+X",
+            "documented_local_forward_axis": character_spec[
+                "documented_local_forward_axis"
+            ],
+            "orientation_validation": (
+                "documented -Y forward axis rotated toward world +X"
+                if character_spec["documented_local_forward_axis"] == "-Y"
+                else "visual review required; no forward-axis claim is encoded"
+            ),
             "ground_z_m": LAYOUT.ground_z_m,
             "translation_world_m": receiver_translation.tolist(),
             "placed_aabb_world_m": placed_receiver_aabb.tolist(),

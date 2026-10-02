@@ -68,28 +68,28 @@ GraspGenX and cuRobo through `/home/suzutaro/GraspGenX/.venv/bin/python`.
 ## Static visual receiver
 
 For presentation-only handover scenes, the scene authoring command can add an
-official NVIDIA Isaac Sim 5.1 character behind the robot. The character is
-referenced from the configured Isaac asset root, placed with its feet on the
-room floor, and turned toward the robot. Physics and collision APIs below the
-character reference are disabled in the authored scene layer. This is a visual
-receiver only: it is not a human collision model and does not make the planned
-trajectory human-safe.
+official NVIDIA Isaac Sim 5.1 humanoid proxy behind the robot. The asset is
+referenced from the configured Isaac asset root and placed with its lowest
+visible bound on the room floor. Physics and collision APIs below the reference
+are disabled in the authored scene layer. This is a visual receiver only: it is
+not a human collision model and does not make the planned trajectory human-safe.
 
 ```bash
 python scripts/isaac_edit_tabletop_scene.py \
-  --output scenes/mug_handover_01.usda \
+  --output scenes/mug_handover_humanoid_v1.usda \
   --target-usd /home/suzutaro/RoboLab-current/assets/objects/hot3d/mug.usd \
-  --static-receiver-character male-police \
+  --static-receiver-character humanoid-proxy \
   --receiver-center-xy -1.15 0.0 \
-  --receiver-yaw-deg 90 \
-  --exit-after-save
+  --receiver-yaw-deg 90
 ```
 
 The reviewed coordinate convention puts the robot base at the origin, the
-table in world +X, and this visual receiver in world -X. NVIDIA documents its
-character forward axis as local -Y, so +90 degrees of world-Z yaw points the
-character toward world +X and the robot. The generated scene check records the
-resolved source USD, bounds, placement, and visual-only physics overrides.
+table in world +X, and this visual receiver in world -X. The Humanoid proxy's
+facing direction is intentionally left for visual review; change
+`--receiver-yaw-deg` if it appears sideways or backward. The generated scene
+check records the resolved source USD, bounds, placement, requested yaw, and
+visual-only physics overrides. `male-police` remains available when a realistic
+skinned character is needed.
 
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:

@@ -103,6 +103,8 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn('"--receiver-yaw-deg"', script)
         self.assertIn("Isaac/People/Characters/", script)
         self.assertIn("original_male_adult_police_04", script)
+        self.assertIn("Isaac/Robots/IsaacSim/Humanoid/humanoid.usd", script)
+        self.assertIn('"humanoid-proxy"', script)
         self.assertIn("omni.client.stat(character_usd)", script)
         self.assertIn('stage.DefinePrim("/World/Receiver/Asset", "Xform")', script)
         self.assertIn("CreateRigidBodyEnabledAttr(False)", script)
