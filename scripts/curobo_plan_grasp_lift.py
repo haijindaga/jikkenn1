@@ -106,6 +106,14 @@ def parse_args() -> argparse.Namespace:
             "free/preserve_gravity_tilt/keep_grasp_orientation transport policy"
         ),
     )
+    parser.add_argument(
+        "--diagnostic-gravity-tilt-tolerance-deg",
+        type=float,
+        help=(
+            "Simulation-only diagnostic override for preserve_gravity_tilt "
+            "postvalidation. Omitted uses the reviewed 2 degree default."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -664,6 +672,13 @@ def main() -> int:
         raise ValueError("--lift-offset must be positive and finite")
     if args.max_attempts <= 0:
         raise ValueError("--max-attempts must be positive")
+    if args.diagnostic_gravity_tilt_tolerance_deg is not None and (
+        not np.isfinite(args.diagnostic_gravity_tilt_tolerance_deg)
+        or not 0.0 < args.diagnostic_gravity_tilt_tolerance_deg <= 90.0
+    ):
+        raise ValueError(
+            "--diagnostic-gravity-tilt-tolerance-deg must be in (0, 90]"
+        )
     if (
         args.handover_goal_quaternion_wxyz is not None
         and args.handover_goal_position_robot_base_m is None
@@ -749,6 +764,19 @@ def main() -> int:
             f"{transport_orientation_policy} conflicts with an explicit "
             "handover quaternion"
         )
+    if (
+        args.diagnostic_gravity_tilt_tolerance_deg is not None
+        and transport_orientation_policy != "preserve_gravity_tilt"
+    ):
+        raise ValueError(
+            "--diagnostic-gravity-tilt-tolerance-deg requires "
+            "preserve_gravity_tilt"
+        )
+    orientation_preservation_tolerance_rad = (
+        float(np.deg2rad(args.diagnostic_gravity_tilt_tolerance_deg))
+        if args.diagnostic_gravity_tilt_tolerance_deg is not None
+        else ORIENTATION_PRESERVATION_TOLERANCE_RAD
+    )
 
     subprocess.run(
         [
@@ -1881,9 +1909,9 @@ def main() -> int:
                 "yaw_unconstrained": bool(
                     transport_orientation_policy == "preserve_gravity_tilt"
                 ),
-                "tolerance_rad": ORIENTATION_PRESERVATION_TOLERANCE_RAD,
+                "tolerance_rad": orientation_preservation_tolerance_rad,
                 "tolerance_deg": float(
-                    np.rad2deg(ORIENTATION_PRESERVATION_TOLERANCE_RAD)
+                    np.rad2deg(orientation_preservation_tolerance_rad)
                 ),
                 "maximum_lift_deviation_rad": float(np.max(lift_deviation)),
                 "maximum_transport_deviation_rad": float(
@@ -1891,9 +1919,12 @@ def main() -> int:
                 ),
                 "maximum_deviation_rad": maximum_deviation,
                 "passed": bool(
-                    maximum_deviation <= ORIENTATION_PRESERVATION_TOLERANCE_RAD
+                    maximum_deviation <= orientation_preservation_tolerance_rad
                 ),
                 "implementation": implementation,
+                "diagnostic_tolerance_override": bool(
+                    args.diagnostic_gravity_tilt_tolerance_deg is not None
+                ),
             }
             if not orientation_validation["passed"]:
                 failure_report = {
@@ -1910,8 +1941,8 @@ def main() -> int:
                         "trajectory_executed": False,
                     },
                     "next_gate": (
-                        "Try another grasp candidate. Do not relax the common "
-                        "orientation tolerance for one object."
+                        "Try another grasp candidate or inspect the rejected "
+                        "trajectory before changing the configured tolerance."
                     ),
                 }
                 failure_path = output / "handover_orientation_constraint_failure.json"
@@ -2057,7 +2088,10 @@ def main() -> int:
                 else None
             ),
             "orientation_preservation_tolerance_rad": (
-                ORIENTATION_PRESERVATION_TOLERANCE_RAD
+                orientation_preservation_tolerance_rad
+            ),
+            "diagnostic_gravity_tilt_tolerance_deg": (
+                args.diagnostic_gravity_tilt_tolerance_deg
             ),
             "planner_max_goalset": planner_max_goalset,
             "handover_receiver_position_robot_base_m": (
@@ -2155,6 +2189,9 @@ def main() -> int:
                 transport_report is not None
                 and transport_orientation_policy
                 in {"preserve_gravity_tilt", "keep_grasp_orientation"}
+            ),
+            "gravity_tilt_tolerance_is_diagnostic_override": bool(
+                args.diagnostic_gravity_tilt_tolerance_deg is not None
             ),
             "held_object_collision_checked_during_transport": (
                 transport_report is not None and transport_cost_np is not None

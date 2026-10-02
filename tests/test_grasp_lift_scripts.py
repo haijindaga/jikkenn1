@@ -347,6 +347,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("generate_gravity_tilt_preserving_handover_goals(", source)
         self.assertIn("generate_orientation_preserving_handover_goal(", source)
         self.assertIn("gravity_tilt_deviation_rad(", source)
+        self.assertIn('"--diagnostic-gravity-tilt-tolerance-deg"', source)
+        self.assertIn('"diagnostic_tolerance_override"', source)
         self.assertIn("quaternion_orientation_deviation_rad(", source)
         self.assertIn("handover_orientation_constraint_failure.json", source)
         self.assertIn("handover_goal_candidates_robot_base.npy", source)
