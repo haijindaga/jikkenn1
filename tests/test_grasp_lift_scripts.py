@@ -401,6 +401,14 @@ class GraspLiftScriptTests(unittest.TestCase):
             '"--handover-receiver-position-robot-base-m"', planner_runner
         )
         self.assertIn('"handover_transport_failure.json"', planner_runner)
+        self.assertIn(
+            '"--diagnostic-gravity-tilt-tolerance-deg"', planner_runner
+        )
+        self.assertIn('"--exclude-source-candidate-index"', planner_runner)
+        self.assertIn(
+            '"excluded_previously_evaluated_source_candidate_indices"',
+            planner_runner,
+        )
 
     def test_handover_transport_rejection_is_a_reported_candidate_failure(self):
         namespace = runpy.run_path(

@@ -54,6 +54,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--transport-orientation-policy-report", type=Path)
     parser.add_argument(
+        "--diagnostic-gravity-tilt-tolerance-deg",
+        type=float,
+        help="Pass one fixed simulation-only gravity-tilt tolerance to every trial",
+    )
+    parser.add_argument(
+        "--exclude-source-candidate-index",
+        type=int,
+        action="append",
+        default=[],
+        help=(
+            "Skip a source candidate already physically evaluated; may be "
+            "repeated without changing the remaining score order"
+        ),
+    )
+    parser.add_argument(
         "--allow-reviewed-support-contact-preflight", action="store_true"
     )
     args = parser.parse_args()
@@ -61,6 +76,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-physical-trials must be positive")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
+    if args.diagnostic_gravity_tilt_tolerance_deg is not None and (
+        not np.isfinite(args.diagnostic_gravity_tilt_tolerance_deg)
+        or not 0.0 < args.diagnostic_gravity_tilt_tolerance_deg <= 90.0
+    ):
+        parser.error(
+            "--diagnostic-gravity-tilt-tolerance-deg must be in (0, 90]"
+        )
+    if any(value < 0 for value in args.exclude_source_candidate_index):
+        parser.error("--exclude-source-candidate-index must be non-negative")
+    if len(set(args.exclude_source_candidate_index)) != len(
+        args.exclude_source_candidate_index
+    ):
+        parser.error("excluded source candidate indices must be unique")
     if (
         args.handover_goal_quaternion_wxyz is not None
         and args.handover_goal_position_robot_base_m is None
@@ -139,6 +167,9 @@ def main() -> int:
             "candidate_order": "pregrasp score order",
             "maximum_physical_trials": args.max_physical_trials,
             "candidate_specific_parameter_tuning": False,
+            "excluded_previously_evaluated_source_candidate_indices": (
+                args.exclude_source_candidate_index
+            ),
             "continue_after_planning_rejection": True,
             "handover_transport_requested": bool(
                 args.handover_goal_position_robot_base_m is not None
@@ -170,6 +201,9 @@ def main() -> int:
                 if args.transport_orientation_policy_report is not None
                 else None
             ),
+            "diagnostic_gravity_tilt_tolerance_deg_for_every_candidate": (
+                args.diagnostic_gravity_tilt_tolerance_deg
+            ),
         },
         "candidate_pool_count": int(len(source_indices)),
         "attempts": [],
@@ -185,6 +219,8 @@ def main() -> int:
         if successful_plans >= args.max_physical_trials:
             break
         source_index = int(source_index)
+        if source_index in args.exclude_source_candidate_index:
+            continue
         trial_directory = output / f"candidate_{source_index:03d}"
         command = [
             sys.executable,
@@ -251,6 +287,13 @@ def main() -> int:
                     str(args.transport_orientation_policy_report),
                 ]
             )
+        if args.diagnostic_gravity_tilt_tolerance_deg is not None:
+            command.extend(
+                [
+                    "--diagnostic-gravity-tilt-tolerance-deg",
+                    str(args.diagnostic_gravity_tilt_tolerance_deg),
+                ]
+            )
         print(
             f"=== planning candidate {source_index} "
             f"(score rank {original_rank}, score {float(score):.6f}) ===",
@@ -286,8 +329,14 @@ def main() -> int:
         "plans_ready" if manifest["successful_plan_directories"] else "no_plans_ready"
     )
     manifest["successful_plan_count"] = successful_plans
-    manifest["candidate_pool_exhausted"] = len(manifest["attempts"]) == len(
-        source_indices
+    eligible_candidate_count = int(
+        np.count_nonzero(
+            ~np.isin(source_indices, args.exclude_source_candidate_index)
+        )
+    )
+    manifest["eligible_candidate_pool_count"] = eligible_candidate_count
+    manifest["candidate_pool_exhausted"] = (
+        len(manifest["attempts"]) == eligible_candidate_count
     )
     write_manifest(manifest_path, manifest)
     print(json.dumps(manifest, indent=2), flush=True)
