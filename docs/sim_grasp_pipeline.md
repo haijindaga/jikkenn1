@@ -89,7 +89,8 @@ facing direction is intentionally left for visual review; change
 `--receiver-yaw-deg` if it appears sideways or backward. The generated scene
 check records the resolved source USD, bounds, placement, requested yaw, and
 visual-only physics overrides. `male-police` remains available when a realistic
-skinned character is needed.
+skinned character is needed, and `1x-neo` selects the official human-shaped 1X
+NEO robot asset shipped with Isaac Sim 5.1.
 
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:

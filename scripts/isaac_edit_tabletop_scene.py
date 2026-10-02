@@ -40,6 +40,11 @@ RECEIVER_CHARACTER_ASSETS = {
         "asset_kind": "articulated humanoid proxy",
         "documented_local_forward_axis": None,
     },
+    "1x-neo": {
+        "relative_usd": "Isaac/Robots/1X/Neo/Neo.usd",
+        "asset_kind": "1X NEO humanoid robot",
+        "documented_local_forward_axis": None,
+    },
 }
 
 
@@ -107,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Receiver yaw about world +Z. For male-police, 90 degrees maps its "
             "documented local -Y forward axis toward world +X; humanoid-proxy "
-            "orientation must be confirmed visually"
+            "and 1x-neo orientations must be confirmed visually"
         ),
     )
     args = parser.parse_args()
