@@ -89,6 +89,11 @@ python scripts/isaac_open_stage.py \
   --stage scenes/mug_handover_1x_neo_v1.usda
 ```
 
+The viewer resets only Kit's transient perspective camera to a Z-up oblique
+presentation view. It does not change or save the scene, the receiver, or the
+authored RGB-D camera. Override the display view explicitly with `--eye X Y Z`
+and `--target X Y Z` when needed.
+
 The reviewed coordinate convention puts the robot base at the origin, the
 table in world +X, and the visual receiver in world -X. Isaac Sim uses +X as
 the world forward direction, so zero yaw is the documented convention-based
