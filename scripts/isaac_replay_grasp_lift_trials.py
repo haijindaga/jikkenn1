@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--plan-trials", type=Path, required=True)
     parser.add_argument("--scene-usd", type=Path, required=True)
+    parser.add_argument("--visual-only-receiver-prim")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
@@ -54,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.simulation_only:
         parser.error("--simulation-only is required")
+    if args.visual_only_receiver_prim is not None and not (
+        args.visual_only_receiver_prim.startswith("/")
+        and args.visual_only_receiver_prim != "/"
+    ):
+        parser.error(
+            "--visual-only-receiver-prim must be an absolute non-root prim path"
+        )
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
@@ -178,6 +186,7 @@ def main() -> int:
             ),
             "hardware_force_calibrated": False,
             "candidate_specific_parameter_tuning": False,
+            "visual_only_receiver_prim": args.visual_only_receiver_prim,
             "solver_iteration_override_for_every_candidate": (
                 {
                     "position": args.solver_position_iterations,
@@ -218,6 +227,10 @@ def main() -> int:
             args.replay_physics,
             "--simulation-only",
         ]
+        if args.visual_only_receiver_prim is not None:
+            command.extend(
+                ["--visual-only-receiver-prim", args.visual_only_receiver_prim]
+            )
         if args.fingertip_friction_coefficient is not None:
             command.extend(
                 [

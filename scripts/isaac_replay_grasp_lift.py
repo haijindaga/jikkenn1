@@ -58,6 +58,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panda-prim", default="/World/Panda")
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--camera-prim", default="/World/camera_0")
+    parser.add_argument(
+        "--visual-only-receiver-prim",
+        help=(
+            "Optional presentation-only receiver root. At runtime, rigid-body "
+            "simulation and collision are disabled below this prim so a visual "
+            "receiver such as 1X NEO remains fixed while the replay timeline runs."
+        ),
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
         "--replay-physics",
@@ -235,6 +243,13 @@ def parse_args() -> argparse.Namespace:
             "--replay-physics cpu because Isaac Sim 5.1 Surface Gripper is "
             "CPU-physics only"
         )
+    if args.visual_only_receiver_prim is not None and not (
+        args.visual_only_receiver_prim.startswith("/")
+        and args.visual_only_receiver_prim != "/"
+    ):
+        parser.error(
+            "--visual-only-receiver-prim must be an absolute non-root prim path"
+        )
     return args
 
 
@@ -338,6 +353,7 @@ try:
 
     target_physics_apis = None
     target_rigid_prim_path = None
+    visual_only_receiver_report = None
     if scene_usd is not None:
         stage_opened, stage = stage_utils.open_stage(str(scene_usd))
         if not stage_opened or stage is None:
@@ -387,6 +403,71 @@ try:
                 f"{rigid_body_paths}"
             )
         target_rigid_prim_path = str(rigid_body_prims[0].GetPath())
+
+        if args.visual_only_receiver_prim is not None:
+            receiver_root = stage.GetPrimAtPath(args.visual_only_receiver_prim)
+            if not receiver_root.IsValid():
+                raise RuntimeError(
+                    "visual-only receiver prim does not exist: "
+                    f"{args.visual_only_receiver_prim}"
+                )
+            receiver_prims = tuple(Usd.PrimRange(receiver_root))
+            receiver_rigid_bodies = tuple(
+                prim
+                for prim in receiver_prims
+                if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            )
+            receiver_colliders = tuple(
+                prim
+                for prim in receiver_prims
+                if prim.HasAPI(UsdPhysics.CollisionAPI)
+            )
+            if not receiver_rigid_bodies:
+                raise RuntimeError(
+                    "visual-only receiver contains no USD rigid bodies to disable: "
+                    f"{args.visual_only_receiver_prim}"
+                )
+            for prim in receiver_rigid_bodies:
+                rigid_body_api = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
+                rigid_body_api.CreateRigidBodyEnabledAttr().Set(False)
+            for prim in receiver_colliders:
+                collision_api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
+                collision_api.CreateCollisionEnabledAttr().Set(False)
+            if any(
+                bool(
+                    UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
+                    .GetRigidBodyEnabledAttr()
+                    .Get()
+                )
+                for prim in receiver_rigid_bodies
+            ):
+                raise RuntimeError("failed to disable visual-only receiver rigid bodies")
+            if any(
+                bool(
+                    UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
+                    .GetCollisionEnabledAttr()
+                    .Get()
+                )
+                for prim in receiver_colliders
+            ):
+                raise RuntimeError("failed to disable visual-only receiver collisions")
+            visual_only_receiver_report = {
+                "prim": args.visual_only_receiver_prim,
+                "policy": "runtime visual only; physics and collision disabled",
+                "rigid_body_count": len(receiver_rigid_bodies),
+                "collision_prim_count": len(receiver_colliders),
+                "rigid_body_paths": [
+                    str(prim.GetPath()) for prim in receiver_rigid_bodies
+                ],
+                "collision_prim_paths": [
+                    str(prim.GetPath()) for prim in receiver_colliders
+                ],
+            }
+            print(
+                "visual-only receiver: "
+                + json.dumps(visual_only_receiver_report),
+                flush=True,
+            )
 
     world = World(
         stage_units_in_meters=1.0,
@@ -2412,6 +2493,7 @@ try:
             "camera_prim": (
                 args.camera_prim if scene_usd is not None else "/World/replay_camera"
             ),
+            "visual_only_receiver": visual_only_receiver_report,
         },
         "replay": {
             "physics_backend": replay_physics_report,

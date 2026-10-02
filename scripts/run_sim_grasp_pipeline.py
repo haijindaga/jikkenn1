@@ -182,6 +182,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--visual-only-receiver-prim",
+        help=(
+            "Runtime-only receiver root passed to Isaac replay. Physics and "
+            "collision below this prim are disabled so the receiver stays fixed."
+        ),
+    )
     parser.add_argument("--sam3-allow-download", action="store_true")
     parser.add_argument(
         "--no-show-results",
@@ -236,6 +243,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--max-physical-trials must be positive")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
         parser.error("--finger-drive-scale must be positive and finite")
+    if args.visual_only_receiver_prim is not None and not (
+        args.visual_only_receiver_prim.startswith("/")
+        and args.visual_only_receiver_prim != "/"
+    ):
+        parser.error(
+            "--visual-only-receiver-prim must be an absolute non-root prim path"
+        )
     if args.collision_threshold <= 0:
         parser.error("--collision-threshold must be positive")
     if (
@@ -739,6 +753,10 @@ def build_stages(
                 str(args.fingertip_friction_coefficient),
             ]
         )
+    if args.visual_only_receiver_prim is not None:
+        replay_command.extend(
+            ["--visual-only-receiver-prim", args.visual_only_receiver_prim]
+        )
     if args.solver_position_iterations is not None:
         replay_command.extend(
             [
@@ -934,6 +952,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             "finger_drive_diagnostic_scale": args.finger_drive_scale,
             "finger_drive_diagnostic_only": args.finger_drive_scale != 1.0,
             "finger_drive_hardware_force_calibrated": False,
+            "visual_only_receiver_prim": args.visual_only_receiver_prim,
+            "visual_only_receiver_policy": (
+                "runtime physics and collision disabled below receiver root"
+                if args.visual_only_receiver_prim is not None
+                else None
+            ),
             "grasp_candidate_segmentation": (
                 "grasp_part" if args.target_object is not None or args.grasp_part_prompt
                 else "whole_object"

@@ -131,6 +131,36 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             str(paths.vlm / "vlm_part_discovery.json"),
         )
 
+    def test_visual_only_receiver_is_forwarded_only_to_replay(self) -> None:
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "mug",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--visual-only-receiver-prim",
+                "/World/Receiver",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--visual-only-receiver-prim") + 1],
+            "/World/Receiver",
+        )
+        for name, stage in stages.items():
+            if name != "isaac_physical_trials":
+                self.assertNotIn("--visual-only-receiver-prim", stage.command)
+
     def test_manual_part_prompt_also_drives_candidate_generation(self) -> None:
         args = MODULE.parse_args(
             [
