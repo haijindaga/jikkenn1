@@ -8,6 +8,7 @@ import numpy as np
 
 
 DEFAULT_HANDOVER_ROLL_DEGREES = (0.0, 45.0, -45.0, 90.0, -90.0, 180.0)
+DEFAULT_GRAVITY_YAW_DEGREES = tuple(float(value) for value in range(0, 360, 45))
 ORIENTATION_PRESERVATION_TOLERANCE_RAD = float(np.deg2rad(2.0))
 
 
@@ -218,3 +219,108 @@ def generate_orientation_preserving_handover_goal(
         "human_direction_alignment_enforced": False,
     }
     return goal[None, ...].astype(np.float32), diagnostics
+
+
+def generate_gravity_tilt_preserving_handover_goals(
+    grasp_transform_robot_base: np.ndarray,
+    receive_part_points_robot_base: np.ndarray,
+    receiver_position_robot_base_m: Iterable[float],
+    *,
+    yaw_degrees: Iterable[float] = DEFAULT_GRAVITY_YAW_DEGREES,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Place the receive part while preserving tilt and allowing world yaw.
+
+    Each goal left-multiplies the selected grasp rotation by a rotation about
+    the robot-base/world vertical axis. This preserves gravity expressed in
+    the hand frame, so the rigidly held object's tilt is unchanged while cuRobo
+    may choose a reachable yaw.
+    """
+
+    transform = np.asarray(grasp_transform_robot_base, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("grasp_transform_robot_base must be a finite 4x4 matrix")
+    rotation = transform[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-5
+    ):
+        raise ValueError("grasp_transform_robot_base rotation must be rigid")
+    receive_points = _points(receive_part_points_robot_base, name="receive part points")
+    receiver_position = np.asarray(
+        tuple(receiver_position_robot_base_m), dtype=np.float64
+    ).reshape(3)
+    if not np.isfinite(receiver_position).all():
+        raise ValueError("receiver position must contain three finite values")
+
+    yaws = tuple(float(value) for value in yaw_degrees)
+    if not yaws or not np.isfinite(yaws).all():
+        raise ValueError("yaw_degrees must contain at least one finite value")
+    if len(set(yaws)) != len(yaws):
+        raise ValueError("yaw_degrees must not contain duplicates")
+
+    receive_center_base = np.median(receive_points, axis=0)
+    receive_center_hand = rotation.T @ (
+        receive_center_base - transform[:3, 3]
+    )
+    world_up = np.array([0.0, 0.0, 1.0])
+    reference_gravity_hand = rotation.T @ world_up
+    goals = []
+    for yaw_degree in yaws:
+        goal_rotation = (
+            _axis_angle_rotation(world_up, np.deg2rad(yaw_degree)) @ rotation
+        )
+        goal = np.eye(4, dtype=np.float64)
+        goal[:3, :3] = goal_rotation
+        goal[:3, 3] = receiver_position - goal_rotation @ receive_center_hand
+        goals.append(goal)
+
+    diagnostics: dict[str, Any] = {
+        "policy": (
+            "preserve gravity expressed in the selected grasp frame; place "
+            "the receive-part median at the requested receiver position; let "
+            "cuRobo choose among uniform world-vertical yaw variants"
+        ),
+        "representative_point": "coordinate-wise median of segmented 3-D points",
+        "receive_part_center_robot_base_m": receive_center_base.tolist(),
+        "receive_part_center_panda_hand_m": receive_center_hand.tolist(),
+        "receiver_position_robot_base_m": receiver_position.tolist(),
+        "reference_gravity_panda_hand": reference_gravity_hand.tolist(),
+        "yaw_degrees": list(yaws),
+        "goal_count": len(goals),
+        "human_direction_alignment_enforced": False,
+    }
+    return np.asarray(goals, dtype=np.float32), diagnostics
+
+
+def gravity_tilt_deviation_rad(
+    rotations_robot_base: np.ndarray,
+    reference_rotation_robot_base: np.ndarray,
+) -> np.ndarray:
+    """Return gravity-relative hand tilt error, invariant to world yaw."""
+
+    rotations = np.asarray(rotations_robot_base, dtype=np.float64)
+    reference = np.asarray(reference_rotation_robot_base, dtype=np.float64)
+    if rotations.ndim == 2:
+        rotations = rotations[None, ...]
+    if rotations.ndim != 3 or rotations.shape[1:] != (3, 3):
+        raise ValueError("rotations_robot_base must have shape (N,3,3)")
+    if reference.shape != (3, 3):
+        raise ValueError("reference_rotation_robot_base must have shape (3,3)")
+    if not np.isfinite(rotations).all() or not np.isfinite(reference).all():
+        raise ValueError("rotations must contain only finite values")
+    if not np.allclose(
+        np.transpose(rotations, (0, 2, 1)) @ rotations,
+        np.eye(3),
+        atol=1e-5,
+    ) or not np.allclose(reference.T @ reference, np.eye(3), atol=1e-5):
+        raise ValueError("rotations must be orthonormal")
+    if np.any(np.linalg.det(rotations) <= 0.0) or np.linalg.det(reference) <= 0.0:
+        raise ValueError("rotations must be right-handed")
+
+    world_up = np.array([0.0, 0.0, 1.0])
+    reference_gravity_hand = reference.T @ world_up
+    gravity_hand = np.einsum("nji,j->ni", rotations, world_up)
+    reference_gravity_hand /= np.linalg.norm(reference_gravity_hand)
+    gravity_hand /= np.linalg.norm(gravity_hand, axis=1, keepdims=True)
+    cosine = np.clip(gravity_hand @ reference_gravity_hand, -1.0, 1.0)
+    cosine[np.isclose(cosine, 1.0, atol=1e-12)] = 1.0
+    return np.arccos(cosine)

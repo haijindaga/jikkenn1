@@ -42,6 +42,20 @@ class HandoverPartsTests(unittest.TestCase):
         )
         self.assertNotIn("transport_orientation_policy", parts.to_sam3_prompts())
 
+    def test_accepts_gravity_tilt_policy(self) -> None:
+        parts = HandoverParts.from_mapping(
+            {
+                "object": "mug",
+                "grasp_part": "mug body",
+                "receive_part": "mug handle",
+                "transport_orientation_policy": "preserve_gravity_tilt",
+            },
+            target_object="mug",
+        )
+        self.assertEqual(
+            parts.transport_orientation_policy, "preserve_gravity_tilt"
+        )
+
     def test_rejects_extra_vlm_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "exactly"):
             HandoverParts.from_mapping(
@@ -143,7 +157,7 @@ class HandoverPartsTests(unittest.TestCase):
         self.assertFalse(payload["format"]["additionalProperties"])
         self.assertEqual(
             payload["format"]["properties"]["transport_orientation_policy"]["enum"],
-            ["free", "keep_grasp_orientation"],
+            ["free", "preserve_gravity_tilt", "keep_grasp_orientation"],
         )
         self.assertEqual(metadata["model_digest"], "digest")
         self.assertEqual(

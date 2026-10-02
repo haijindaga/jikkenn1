@@ -21,7 +21,11 @@ HANDOVER_PARTS_SCHEMA: dict[str, Any] = {
         "receive_part": {"type": "string"},
         "transport_orientation_policy": {
             "type": "string",
-            "enum": ["free", "keep_grasp_orientation"],
+            "enum": [
+                "free",
+                "preserve_gravity_tilt",
+                "keep_grasp_orientation",
+            ],
         },
     },
     "required": [
@@ -45,8 +49,10 @@ Rules:
 - Each part phrase must be self-contained and include the complete object phrase.
 - grasp_part and receive_part must name different regions.
 - transport_orientation_policy must be exactly one of:
-  - keep_grasp_orientation: changing the object's orientation after grasping may
-    spill contents, damage the object, or violate an explicit task instruction.
+  - preserve_gravity_tilt: changing the object's tilt relative to gravity may
+    spill contents. Rotation around the world vertical axis remains acceptable.
+  - keep_grasp_orientation: the task explicitly requires the complete grasped
+    orientation, including yaw, to remain unchanged.
   - free: no such orientation-sensitive condition is stated or visibly evident.
 - Do not invent hidden contents. Use the task instruction when it states an
   orientation-sensitive condition such as a filled or open container.
@@ -124,11 +130,12 @@ class HandoverParts:
             raise ValueError("grasp_part and receive_part must be different")
         if self.transport_orientation_policy not in {
             "free",
+            "preserve_gravity_tilt",
             "keep_grasp_orientation",
         }:
             raise ValueError(
-                "transport_orientation_policy must be 'free' or "
-                "'keep_grasp_orientation'"
+                "transport_orientation_policy must be 'free', "
+                "'preserve_gravity_tilt', or 'keep_grasp_orientation'"
             )
 
     def to_dict(self) -> dict[str, str]:

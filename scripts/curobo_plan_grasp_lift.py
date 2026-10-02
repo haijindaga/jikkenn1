@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Successful VLM part-discovery report containing the bounded "
-            "free/keep_grasp_orientation transport policy"
+            "free/preserve_gravity_tilt/keep_grasp_orientation transport policy"
         ),
     )
     return parser.parse_args()
@@ -724,10 +724,13 @@ def main() -> int:
         transform_points,
     )
     from panda_handover.handover import (
+        DEFAULT_GRAVITY_YAW_DEGREES,
         DEFAULT_HANDOVER_ROLL_DEGREES,
         ORIENTATION_PRESERVATION_TOLERANCE_RAD,
         generate_affordance_handover_goals,
+        generate_gravity_tilt_preserving_handover_goals,
         generate_orientation_preserving_handover_goal,
+        gravity_tilt_deviation_rad,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
     from panda_handover.vlm_parts import load_handover_parts_report
@@ -738,12 +741,13 @@ def main() -> int:
             args.transport_orientation_policy_report
         )
         transport_orientation_policy = handover_parts.transport_orientation_policy
-    if (
-        transport_orientation_policy == "keep_grasp_orientation"
-        and args.handover_goal_quaternion_wxyz is not None
-    ):
+    if transport_orientation_policy in {
+        "preserve_gravity_tilt",
+        "keep_grasp_orientation",
+    } and args.handover_goal_quaternion_wxyz is not None:
         raise ValueError(
-            "keep_grasp_orientation conflicts with an explicit handover quaternion"
+            f"{transport_orientation_policy} conflicts with an explicit "
+            "handover quaternion"
         )
 
     subprocess.run(
@@ -877,14 +881,15 @@ def main() -> int:
     # A candidate-specific trial narrows the grasp goalset to one pose, but
     # automatic handover later submits all fixed roll variants to this same
     # planner. Reserve capacity for the largest goalset used in either phase.
-    planner_max_goalset = max(
-        len(grasp_transforms),
-        (
-            len(DEFAULT_HANDOVER_ROLL_DEGREES)
-            if automatic_handover and transport_orientation_policy == "free"
-            else 1
-        ),
-    )
+    automatic_handover_goal_count = 1
+    if automatic_handover and transport_orientation_policy == "free":
+        automatic_handover_goal_count = len(DEFAULT_HANDOVER_ROLL_DEGREES)
+    elif (
+        automatic_handover
+        and transport_orientation_policy == "preserve_gravity_tilt"
+    ):
+        automatic_handover_goal_count = len(DEFAULT_GRAVITY_YAW_DEGREES)
+    planner_max_goalset = max(len(grasp_transforms), automatic_handover_goal_count)
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
         scene_model=SceneCfg(mesh=[scene_mesh]),
@@ -1637,6 +1642,14 @@ def main() -> int:
                         effective_receiver_position,
                     )
                 )
+            elif transport_orientation_policy == "preserve_gravity_tilt":
+                handover_goal_transforms, handover_goal_diagnostics = (
+                    generate_gravity_tilt_preserving_handover_goals(
+                        grasp_transforms[selected_rank],
+                        receive_part_robot_base,
+                        effective_receiver_position,
+                    )
+                )
             else:
                 handover_goal_transforms, handover_goal_diagnostics = (
                     generate_affordance_handover_goals(
@@ -1655,8 +1668,12 @@ def main() -> int:
             handover_orientation_policy = (
                 "preserve_selected_grasp_orientation"
                 if transport_orientation_policy == "keep_grasp_orientation"
-                else "align_grasp_to_receive_part_axis_with_human_direction_then_"
-                "curobo_selects_roll"
+                else (
+                    "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
+                    if transport_orientation_policy == "preserve_gravity_tilt"
+                    else "align_grasp_to_receive_part_axis_with_human_direction_"
+                    "then_curobo_selects_roll"
+                )
             )
             np.save(
                 output / "handover_goal_candidates_robot_base.npy",
@@ -1781,7 +1798,10 @@ def main() -> int:
             transport_attached_spheres,
         )
         orientation_validation = None
-        if transport_orientation_policy == "keep_grasp_orientation":
+        if transport_orientation_policy in {
+            "preserve_gravity_tilt",
+            "keep_grasp_orientation",
+        }:
             reference_quaternion = rotation_matrix_to_quaternion_wxyz(
                 grasp_transforms[selected_rank, :3, :3]
             )
@@ -1795,20 +1815,59 @@ def main() -> int:
             transport_tool_quaternions = _tool_quaternions_wxyz(
                 planner, transport_state
             )
-            lift_deviation = quaternion_orientation_deviation_rad(
-                lift_tool_quaternions, reference_quaternion
-            )
-            transport_deviation = quaternion_orientation_deviation_rad(
-                transport_tool_quaternions, reference_quaternion
-            )
+            if transport_orientation_policy == "keep_grasp_orientation":
+                lift_deviation = quaternion_orientation_deviation_rad(
+                    lift_tool_quaternions, reference_quaternion
+                )
+                transport_deviation = quaternion_orientation_deviation_rad(
+                    transport_tool_quaternions, reference_quaternion
+                )
+                validation_reference = "selected grasp panda_hand orientation"
+                implementation = (
+                    "goal orientation fixed to grasp orientation, followed by "
+                    "full-orientation FK validation at every saved lift and "
+                    "transport waypoint"
+                )
+                deviation_label = "orientation"
+            else:
+                lift_rotations = np.asarray(
+                    [
+                        rotation_matrix_from_quaternion_wxyz(quaternion)
+                        for quaternion in lift_tool_quaternions
+                    ]
+                )
+                transport_rotations = np.asarray(
+                    [
+                        rotation_matrix_from_quaternion_wxyz(quaternion)
+                        for quaternion in transport_tool_quaternions
+                    ]
+                )
+                lift_deviation = gravity_tilt_deviation_rad(
+                    lift_rotations, grasp_transforms[selected_rank, :3, :3]
+                )
+                transport_deviation = gravity_tilt_deviation_rad(
+                    transport_rotations, grasp_transforms[selected_rank, :3, :3]
+                )
+                validation_reference = (
+                    "gravity direction expressed in selected grasp panda_hand frame"
+                )
+                implementation = (
+                    "endpoint goalset rotates the grasp pose only about robot-base "
+                    "vertical; gravity-relative tilt is FK-validated at every "
+                    "saved lift and transport waypoint"
+                )
+                deviation_label = "gravity_tilt"
             np.save(output / "lift_tool_quaternions_wxyz.npy", lift_tool_quaternions)
             np.save(
                 output / "transport_tool_quaternions_wxyz.npy",
                 transport_tool_quaternions,
             )
-            np.save(output / "lift_orientation_deviation_rad.npy", lift_deviation)
             np.save(
-                output / "transport_orientation_deviation_rad.npy",
+                output / f"lift_{deviation_label}_deviation_rad.npy",
+                lift_deviation,
+            )
+            np.save(
+                output / f"transport_{deviation_label}_deviation_rad.npy",
                 transport_deviation,
             )
             maximum_deviation = float(
@@ -1816,8 +1875,12 @@ def main() -> int:
             )
             orientation_validation = {
                 "policy": transport_orientation_policy,
-                "reference": "selected grasp panda_hand orientation",
+                "reference": validation_reference,
                 "reference_quaternion_wxyz": reference_quaternion.tolist(),
+                "deviation_metric": deviation_label,
+                "yaw_unconstrained": bool(
+                    transport_orientation_policy == "preserve_gravity_tilt"
+                ),
                 "tolerance_rad": ORIENTATION_PRESERVATION_TOLERANCE_RAD,
                 "tolerance_deg": float(
                     np.rad2deg(ORIENTATION_PRESERVATION_TOLERANCE_RAD)
@@ -1830,10 +1893,7 @@ def main() -> int:
                 "passed": bool(
                     maximum_deviation <= ORIENTATION_PRESERVATION_TOLERANCE_RAD
                 ),
-                "implementation": (
-                    "goal orientation fixed to grasp orientation, followed by "
-                    "FK validation at every saved lift and transport waypoint"
-                ),
+                "implementation": implementation,
             }
             if not orientation_validation["passed"]:
                 failure_report = {
@@ -2093,7 +2153,8 @@ def main() -> int:
             "handover_transport_planned": transport_report is not None,
             "path_orientation_preservation_postvalidated": bool(
                 transport_report is not None
-                and transport_orientation_policy == "keep_grasp_orientation"
+                and transport_orientation_policy
+                in {"preserve_gravity_tilt", "keep_grasp_orientation"}
             ),
             "held_object_collision_checked_during_transport": (
                 transport_report is not None and transport_cost_np is not None

@@ -4,7 +4,9 @@ import numpy as np
 
 from panda_handover.handover import (
     generate_affordance_handover_goals,
+    generate_gravity_tilt_preserving_handover_goals,
     generate_orientation_preserving_handover_goal,
+    gravity_tilt_deviation_rad,
     receive_clear_score_order,
 )
 
@@ -88,6 +90,62 @@ class HandoverGeometryTests(unittest.TestCase):
             atol=1e-6,
         )
         self.assertFalse(report["human_direction_alignment_enforced"])
+
+    def test_gravity_tilt_goals_keep_tilt_allow_yaw_and_place_receive_part(self):
+        angle = np.deg2rad(20.0)
+        grasp_transform = np.eye(4)
+        grasp_transform[:3, :3] = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, np.cos(angle), -np.sin(angle)],
+                [0.0, np.sin(angle), np.cos(angle)],
+            ]
+        )
+        grasp_transform[:3, 3] = [0.4, 0.1, 0.2]
+        receive_part = np.array(
+            [[0.5, 0.09, 0.2], [0.5, 0.11, 0.2], [0.5, 0.1, 0.2]]
+        )
+        receiver = np.array([-0.3, 0.0, 0.35])
+
+        goals, report = generate_gravity_tilt_preserving_handover_goals(
+            grasp_transform,
+            receive_part,
+            receiver,
+            yaw_degrees=(0.0, 90.0, 180.0, 270.0),
+        )
+
+        self.assertEqual(goals.shape, (4, 4, 4))
+        receive_center_hand = np.asarray(report["receive_part_center_panda_hand_m"])
+        for goal in goals:
+            np.testing.assert_allclose(
+                goal[:3, :3] @ receive_center_hand + goal[:3, 3],
+                receiver,
+                atol=1e-6,
+            )
+        deviations = gravity_tilt_deviation_rad(
+            goals[:, :3, :3], grasp_transform[:3, :3]
+        )
+        np.testing.assert_allclose(deviations, 0.0, atol=1e-7)
+        self.assertEqual(report["yaw_degrees"], [0.0, 90.0, 180.0, 270.0])
+
+    def test_gravity_tilt_deviation_rejects_changed_tilt_but_not_world_yaw(self):
+        reference = np.eye(3)
+        yaw = np.array(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        angle = np.deg2rad(10.0)
+        tilted = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, np.cos(angle), -np.sin(angle)],
+                [0.0, np.sin(angle), np.cos(angle)],
+            ]
+        )
+        deviations = gravity_tilt_deviation_rad(
+            np.stack((reference, yaw, tilted)), reference
+        )
+        np.testing.assert_allclose(deviations[:2], 0.0, atol=1e-7)
+        self.assertAlmostEqual(deviations[2], angle, places=7)
 
 
 if __name__ == "__main__":
