@@ -27,9 +27,9 @@ from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
 
 RECEIVER_CHARACTER_USD = {
-    "male-medical": (
-        "Isaac/People/Characters/origial_male_adult_medical_01/"
-        "male_adult_medical_01.usd"
+    "male-police": (
+        "Isaac/People/Characters/original_male_adult_police_04/"
+        "male_adult_police_04.usd"
     ),
 }
 
@@ -133,6 +133,7 @@ simulation_app = SimulationApp({"headless": args.exit_after_save})
 
 try:
     import numpy as np
+    import omni.client
     import omni.timeline
     import omni.usd
 
@@ -348,6 +349,13 @@ try:
             args.static_receiver_character
         ]
         character_usd = f"{assets_root.rstrip('/')}/{character_relative_path}"
+        character_stat_result, _ = omni.client.stat(character_usd)
+        if character_stat_result != omni.client.Result.OK:
+            raise RuntimeError(
+                "official receiver USD is unavailable: "
+                f"{character_usd} "
+                f"({omni.client.get_result_string(character_stat_result)})"
+            )
         receiver_wrapper = UsdGeom.Xform.Define(stage, "/World/Receiver")
         receiver_asset_prim = stage.DefinePrim("/World/Receiver/Asset", "Xform")
         if not receiver_asset_prim.GetReferences().AddReference(character_usd):
@@ -459,6 +467,9 @@ try:
             "source": "NVIDIA Isaac Sim 5.1 character assets",
             "character": args.static_receiver_character,
             "source_usd": character_usd,
+            "source_stat_result": omni.client.get_result_string(
+                character_stat_result
+            ),
             "wrapper_prim": "/World/Receiver",
             "asset_prim": "/World/Receiver/Asset",
             "requested_center_xy_m": list(args.receiver_center_xy),

@@ -79,7 +79,7 @@ trajectory human-safe.
 python scripts/isaac_edit_tabletop_scene.py \
   --output scenes/mug_handover_01.usda \
   --target-usd /home/suzutaro/RoboLab-current/assets/objects/hot3d/mug.usd \
-  --static-receiver-character male-medical \
+  --static-receiver-character male-police \
   --receiver-center-xy -1.15 0.0 \
   --receiver-yaw-deg 90 \
   --exit-after-save
