@@ -109,9 +109,17 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn('"1x-neo"', script)
         self.assertIn("omni.client.stat(character_usd)", script)
         self.assertIn('stage.DefinePrim("/World/Receiver/Asset", "Xform")', script)
-        self.assertIn("CreateRigidBodyEnabledAttr(False)", script)
-        self.assertIn("CreateCollisionEnabledAttr(False)", script)
-        self.assertIn('"human_collision_model_present": False', script)
+        self.assertIn('"source_asset_is_not_modified": True', script)
+        self.assertIn('"physics_apis_modified": False', script)
+        self.assertIn('"geometry_dependent_autoplacement": False', script)
+        self.assertIn('"approved_use": "presentation and figure capture only"', script)
+        receiver_block = script.split(
+            "if args.static_receiver_character is not None:", 1
+        )[1].split("saved = bool(stage_utils.save_stage", 1)[0]
+        self.assertNotIn("compute_aabb(", receiver_block)
+        self.assertNotIn("Usd.PrimRange", receiver_block)
+        self.assertNotIn("CreateRigidBodyEnabledAttr", receiver_block)
+        self.assertNotIn("CreateCollisionEnabledAttr", receiver_block)
         self.assertIn(
             '"receiver_is_visual_only_not_a_human_safety_model"', script
         )

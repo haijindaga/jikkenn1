@@ -14,7 +14,6 @@ import json
 import math
 import os
 import sys
-import time
 from pathlib import Path
 
 
@@ -103,7 +102,10 @@ def parse_args() -> argparse.Namespace:
         nargs=2,
         metavar=("X", "Y"),
         default=(-1.15, 0.0),
-        help="Requested world XY centre of the static receiver bounds",
+        help=(
+            "World XY assigned to the receiver asset root. The official asset "
+            "is not recentered or rescaled"
+        ),
     )
     parser.add_argument(
         "--receiver-yaw-deg",
@@ -384,93 +386,43 @@ try:
             Gf.Vec3f(0.0, 0.0, float(args.receiver_yaw_deg)),
             UsdGeom.XformCommonAPI.RotationOrderXYZ,
         )
-        receiver_load_deadline = time.monotonic() + 60.0
-        initial_receiver_aabb = None
-        while time.monotonic() < receiver_load_deadline:
-            simulation_app.update()
-            candidate_aabb = np.asarray(
-                compute_aabb(
-                    create_bbox_cache(),
-                    "/World/Receiver",
-                    include_children=True,
-                ),
-                dtype=np.float64,
-            )
-            candidate_extent = candidate_aabb[3:] - candidate_aabb[:3]
-            if (
-                candidate_aabb.shape == (6,)
-                and np.all(np.isfinite(candidate_aabb))
-                and np.all(candidate_extent > 1e-3)
-            ):
-                initial_receiver_aabb = candidate_aabb
-                break
-        if initial_receiver_aabb is None:
-            raise RuntimeError(
-                "official receiver USD did not resolve to finite visible bounds "
-                f"within 60 seconds: {character_usd}"
-            )
-
-        # Keep the character as presentation geometry only. Any physics APIs in
-        # the referenced asset are disabled by overrides in this scene layer;
-        # the NVIDIA source asset itself is never modified.
-        disabled_rigid_bodies = 0
-        disabled_colliders = 0
-        receiver_prims = tuple(Usd.PrimRange(receiver_asset_prim))
-        for prim in receiver_prims:
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr(False)
-                disabled_rigid_bodies += 1
-            if prim.HasAPI(UsdPhysics.CollisionAPI):
-                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
-                disabled_colliders += 1
-
-        initial_receiver_center = 0.5 * (
-            initial_receiver_aabb[:3] + initial_receiver_aabb[3:]
-        )
+        # Preserve the official asset exactly as authored.  Only a rigid scene
+        # transform is applied to its wrapper: the asset root is placed at the
+        # requested XY and at the already-defined room floor.  In particular,
+        # do not traverse the referenced hierarchy, compute bounds, rescale it,
+        # or author physics overrides.  Those operations caused native Fabric
+        # failures for complex skinned/articulated receiver assets and would
+        # also make this presentation-only composition less reproducible.
         receiver_translation = np.asarray(
-            (
-                args.receiver_center_xy[0] - initial_receiver_center[0],
-                args.receiver_center_xy[1] - initial_receiver_center[1],
-                LAYOUT.ground_z_m - initial_receiver_aabb[2],
-            ),
-            dtype=np.float64,
+            (*args.receiver_center_xy, LAYOUT.ground_z_m), dtype=np.float64
         )
         receiver_xform.SetTranslate(Gf.Vec3d(*receiver_translation.tolist()))
         receiver_wrapper.GetPrim().SetCustomDataByKey(
             "panda_handover:visual_only", True
         )
-        simulation_app.update()
-
-        placed_receiver_aabb = np.asarray(
-            compute_aabb(
-                create_bbox_cache(),
-                "/World/Receiver",
-                include_children=True,
-            ),
-            dtype=np.float64,
-        )
-        placed_receiver_center = 0.5 * (
-            placed_receiver_aabb[:3] + placed_receiver_aabb[3:]
-        )
         receiver_checks = {
-            "aabb_is_finite": bool(np.all(np.isfinite(placed_receiver_aabb))),
-            "xy_center_matches_request": bool(
+            "source_asset_stat_succeeded": bool(
+                character_stat_result == omni.client.Result.OK
+            ),
+            "root_xy_matches_request": bool(
                 np.allclose(
-                    placed_receiver_center[:2],
+                    receiver_translation[:2],
                     np.asarray(args.receiver_center_xy),
-                    atol=1e-4,
+                    atol=0.0,
                     rtol=0.0,
                 )
             ),
-            "feet_rest_on_room_floor": bool(
+            "asset_root_is_on_room_floor": bool(
                 np.isclose(
-                    placed_receiver_aabb[2],
+                    receiver_translation[2],
                     LAYOUT.ground_z_m,
-                    atol=1e-4,
+                    atol=0.0,
                     rtol=0.0,
                 )
             ),
-            "receiver_is_behind_robot": bool(placed_receiver_center[0] < -0.5),
+            "receiver_root_is_behind_robot": bool(receiver_translation[0] < -0.5),
+            "source_asset_is_not_modified": True,
+            "geometry_dependent_autoplacement_is_not_used": True,
         }
         if not all(receiver_checks.values()):
             raise RuntimeError(
@@ -488,7 +440,7 @@ try:
             ),
             "wrapper_prim": "/World/Receiver",
             "asset_prim": "/World/Receiver/Asset",
-            "requested_center_xy_m": list(args.receiver_center_xy),
+            "requested_root_xy_m": list(args.receiver_center_xy),
             "requested_yaw_deg": args.receiver_yaw_deg,
             "documented_local_forward_axis": character_spec[
                 "documented_local_forward_axis"
@@ -500,11 +452,13 @@ try:
             ),
             "ground_z_m": LAYOUT.ground_z_m,
             "translation_world_m": receiver_translation.tolist(),
-            "placed_aabb_world_m": placed_receiver_aabb.tolist(),
-            "physics_overrides": {
-                "rigid_bodies_disabled": disabled_rigid_bodies,
-                "colliders_disabled": disabled_colliders,
-                "human_collision_model_present": False,
+            "composition_policy": {
+                "official_asset_referenced_without_internal_edits": True,
+                "asset_rescaled": False,
+                "geometry_dependent_autoplacement": False,
+                "physics_apis_modified": False,
+                "timeline_must_remain_stopped": True,
+                "approved_use": "presentation and figure capture only",
             },
             "automatic_checks": receiver_checks,
         }

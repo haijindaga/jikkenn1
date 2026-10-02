@@ -69,10 +69,11 @@ GraspGenX and cuRobo through `/home/suzutaro/GraspGenX/.venv/bin/python`.
 
 For presentation-only handover scenes, the scene authoring command can add an
 official NVIDIA Isaac Sim 5.1 humanoid proxy behind the robot. The asset is
-referenced from the configured Isaac asset root and placed with its lowest
-visible bound on the room floor. Physics and collision APIs below the reference
-are disabled in the authored scene layer. This is a visual receiver only: it is
-not a human collision model and does not make the planned trajectory human-safe.
+referenced from the configured Isaac asset root without editing, rescaling, or
+traversing its internal hierarchy. Only the wrapper root translation and yaw
+are authored. This is a stopped-timeline presentation scene only: it is not a
+human collision model, must not be used for physical replay, and does not make
+the planned trajectory human-safe.
 
 ```bash
 python scripts/isaac_edit_tabletop_scene.py \
@@ -87,10 +88,11 @@ The reviewed coordinate convention puts the robot base at the origin, the
 table in world +X, and this visual receiver in world -X. The Humanoid proxy's
 facing direction is intentionally left for visual review; change
 `--receiver-yaw-deg` if it appears sideways or backward. The generated scene
-check records the resolved source USD, bounds, placement, requested yaw, and
-visual-only physics overrides. `male-police` remains available when a realistic
-skinned character is needed, and `1x-neo` selects the official human-shaped 1X
-NEO robot asset shipped with Isaac Sim 5.1.
+check records the resolved source USD and explicit wrapper transform. It does
+not infer a transform from geometry bounds or change the source asset's physics.
+`male-police` remains available when a realistic skinned character is needed,
+and `1x-neo` selects the official human-shaped 1X NEO robot asset shipped with
+Isaac Sim 5.1.
 
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:
