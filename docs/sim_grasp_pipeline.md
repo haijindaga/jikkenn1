@@ -67,32 +67,37 @@ GraspGenX and cuRobo through `/home/suzutaro/GraspGenX/.venv/bin/python`.
 
 ## Static visual receiver
 
-For presentation-only handover scenes, the scene authoring command can add an
-official NVIDIA Isaac Sim 5.1 humanoid proxy behind the robot. The asset is
-referenced from the configured Isaac asset root without editing, rescaling, or
-traversing its internal hierarchy. Only the wrapper root translation and yaw
-are authored. This is a stopped-timeline presentation scene only: it is not a
-human collision model, must not be used for physical replay, and does not make
-the planned trajectory human-safe.
+For presentation-only handover scenes, compose the official Isaac Sim 5.1 1X
+NEO asset over an already saved tabletop scene. Receiver composition is kept
+out of the running Isaac Sim authoring process because live composition of the
+complex articulated asset caused a native Fabric shutdown. The overlay writer
+is pure OpenUSD text composition: it neither opens nor changes either source.
 
 ```bash
 python scripts/isaac_edit_tabletop_scene.py \
-  --output scenes/mug_handover_humanoid_v1.usda \
+  --output scenes/mug_handover_base_v1.usda \
   --target-usd /home/suzutaro/RoboLab-current/assets/objects/hot3d/mug.usd \
-  --static-receiver-character humanoid-proxy \
-  --receiver-center-xy -1.15 0.0 \
-  --receiver-yaw-deg 90
+  --exit-after-save
+
+python scripts/create_receiver_overlay.py \
+  --base-scene scenes/mug_handover_base_v1.usda \
+  --output scenes/mug_handover_1x_neo_v1.usda \
+  --receiver-root-xy -1.15 0.0 \
+  --receiver-yaw-deg 0
+
+python scripts/isaac_open_stage.py \
+  --stage scenes/mug_handover_1x_neo_v1.usda
 ```
 
 The reviewed coordinate convention puts the robot base at the origin, the
-table in world +X, and this visual receiver in world -X. The Humanoid proxy's
-facing direction is intentionally left for visual review; change
-`--receiver-yaw-deg` if it appears sideways or backward. The generated scene
-check records the resolved source USD and explicit wrapper transform. It does
-not infer a transform from geometry bounds or change the source asset's physics.
-`male-police` remains available when a realistic skinned character is needed,
-and `1x-neo` selects the official human-shaped 1X NEO robot asset shipped with
-Isaac Sim 5.1.
+table in world +X, and the visual receiver in world -X. Isaac Sim uses +X as
+the world forward direction, so zero yaw is the documented convention-based
+starting point and remains subject to visual confirmation of this asset's local
+facing direction. The receiver Z is not chosen by eye: the checked-in evidence
+records the measured official NEO lower bound as `-0.8406724618970056 m`, and
+the generator applies `root_z = floor_z - measured_lower_bound_z`. The source
+asset is not rescaled, its physics is not edited, and the resulting overlay is
+not authorized for physical replay or human-safety evaluation.
 
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:

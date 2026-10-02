@@ -1,0 +1,34 @@
+{
+  "status": "measured",
+  "asset_name": "1x-neo",
+  "asset_kind": "1X NEO humanoid robot",
+  "isaac_sim_version": "5.1",
+  "documentation_url": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/assets/usd_assets_robots.html",
+  "usd_url": "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/1X/Neo/Neo.usd",
+  "measurement": {
+    "method": "UsdGeom.BBoxCache world-aligned bounds on the official asset at its authored root transform",
+    "root_prim": "/neo_alpha1_5",
+    "minimum_xyz_m": [
+      -0.11937997551158122,
+      -0.22597026545458157,
+      -0.8406724618970056
+    ],
+    "maximum_xyz_m": [
+      0.1650209580729687,
+      0.22597026545458157,
+      0.8350697057320415
+    ],
+    "dimensions_xyz_m": [
+      0.28440093358454993,
+      0.45194053090916314,
+      1.6757421676290472
+    ],
+    "root_to_lowest_z_m": -0.8406724618970056
+  },
+  "scope": {
+    "source_asset_modified": false,
+    "physics_validated": false,
+    "human_safety_model": false,
+    "approved_use": "stopped-timeline presentation and figure capture only"
+  }
+}

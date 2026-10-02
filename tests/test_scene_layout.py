@@ -92,37 +92,24 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn("UsdPhysics.MassAPI", script)
         self.assertIn('"source_assets_are_not_modified": True', script)
 
-    def test_scene_editor_adds_only_an_explicit_visual_receiver(self):
+    def test_scene_editor_does_not_compose_complex_receiver_assets_live(self):
         script = (
             Path(__file__).resolve().parents[1]
             / "scripts"
             / "isaac_edit_tabletop_scene.py"
         ).read_text(encoding="utf-8")
-        self.assertIn('"--static-receiver-character"', script)
-        self.assertIn('"--receiver-center-xy"', script)
-        self.assertIn('"--receiver-yaw-deg"', script)
-        self.assertIn("Isaac/People/Characters/", script)
-        self.assertIn("original_male_adult_police_04", script)
-        self.assertIn("Isaac/Robots/IsaacSim/Humanoid/humanoid.usd", script)
-        self.assertIn('"humanoid-proxy"', script)
-        self.assertIn("Isaac/Robots/1X/Neo/Neo.usd", script)
-        self.assertIn('"1x-neo"', script)
-        self.assertIn("omni.client.stat(character_usd)", script)
-        self.assertIn('stage.DefinePrim("/World/Receiver/Asset", "Xform")', script)
-        self.assertIn('"source_asset_is_not_modified": True', script)
-        self.assertIn('"physics_apis_modified": False', script)
-        self.assertIn('"geometry_dependent_autoplacement": False', script)
-        self.assertIn('"approved_use": "presentation and figure capture only"', script)
-        receiver_block = script.split(
-            "if args.static_receiver_character is not None:", 1
-        )[1].split("saved = bool(stage_utils.save_stage", 1)[0]
-        self.assertNotIn("compute_aabb(", receiver_block)
-        self.assertNotIn("Usd.PrimRange", receiver_block)
-        self.assertNotIn("CreateRigidBodyEnabledAttr", receiver_block)
-        self.assertNotIn("CreateCollisionEnabledAttr", receiver_block)
-        self.assertIn(
-            '"receiver_is_visual_only_not_a_human_safety_model"', script
-        )
+        self.assertNotIn('"--static-receiver-character"', script)
+        self.assertNotIn("Isaac/People/Characters/", script)
+        self.assertNotIn("Isaac/Robots/1X/Neo/Neo.usd", script)
+
+        overlay = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "create_receiver_overlay.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("OpenUSD subLayer plus reference", overlay)
+        self.assertIn('"physics_apis_modified": False', overlay)
+        self.assertIn('"source_asset_modified": False', overlay)
 
 
 if __name__ == "__main__":
