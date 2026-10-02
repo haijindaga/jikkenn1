@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -24,6 +25,13 @@ from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
 
 
 LAYOUT = DEFAULT_TABLETOP_LAYOUT
+
+RECEIVER_CHARACTER_USD = {
+    "male-medical": (
+        "Isaac/People/Characters/origial_male_adult_medical_01/"
+        "male_adult_medical_01.usd"
+    ),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +74,31 @@ def parse_args() -> argparse.Namespace:
         default=0.002,
         help="Initial gap above the tabletop before capture-time settling",
     )
+    parser.add_argument(
+        "--static-receiver-character",
+        choices=tuple(RECEIVER_CHARACTER_USD),
+        help=(
+            "Add an official NVIDIA character as a static visual-only receiver; "
+            "it is not included as a human collision or safety model"
+        ),
+    )
+    parser.add_argument(
+        "--receiver-center-xy",
+        type=float,
+        nargs=2,
+        metavar=("X", "Y"),
+        default=(-1.15, 0.0),
+        help="Requested world XY centre of the static receiver bounds",
+    )
+    parser.add_argument(
+        "--receiver-yaw-deg",
+        type=float,
+        default=90.0,
+        help=(
+            "Receiver yaw about world +Z; 90 degrees maps the NVIDIA "
+            "character's documented local -Y forward axis toward world +X"
+        ),
+    )
     args = parser.parse_args()
     if args.output.suffix.lower() not in {".usd", ".usda", ".usdc"}:
         parser.error("--output must end in .usd, .usda, or .usdc")
@@ -83,6 +116,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-center-xy values must be finite")
     if not math.isfinite(args.target_clearance_m) or args.target_clearance_m < 0.0:
         parser.error("--target-clearance-m must be finite and non-negative")
+    if not all(math.isfinite(value) for value in args.receiver_center_xy):
+        parser.error("--receiver-center-xy values must be finite")
+    if not math.isfinite(args.receiver_yaw_deg):
+        parser.error("--receiver-yaw-deg must be finite")
     return args
 
 
@@ -297,6 +334,148 @@ try:
             "automatic_checks": placement_checks,
         }
 
+    receiver_authoring = None
+    if args.static_receiver_character is not None:
+        from isaacsim.storage.native import get_assets_root_path
+
+        assets_root = get_assets_root_path()
+        if not assets_root:
+            raise RuntimeError(
+                "Isaac Sim assets root could not be resolved; install or configure "
+                "the Isaac Sim 5.1 assets before adding the static receiver"
+            )
+        character_relative_path = RECEIVER_CHARACTER_USD[
+            args.static_receiver_character
+        ]
+        character_usd = f"{assets_root.rstrip('/')}/{character_relative_path}"
+        receiver_wrapper = UsdGeom.Xform.Define(stage, "/World/Receiver")
+        receiver_asset_prim = stage.DefinePrim("/World/Receiver/Asset", "Xform")
+        if not receiver_asset_prim.GetReferences().AddReference(character_usd):
+            raise RuntimeError(
+                f"failed to reference official receiver USD: {character_usd}"
+            )
+        print(f"loading official receiver asset: {character_usd}", flush=True)
+
+        receiver_xform = UsdGeom.XformCommonAPI(receiver_wrapper.GetPrim())
+        receiver_xform.SetRotate(
+            Gf.Vec3f(0.0, 0.0, float(args.receiver_yaw_deg)),
+            UsdGeom.XformCommonAPI.RotationOrderXYZ,
+        )
+        receiver_load_deadline = time.monotonic() + 60.0
+        initial_receiver_aabb = None
+        while time.monotonic() < receiver_load_deadline:
+            simulation_app.update()
+            candidate_aabb = np.asarray(
+                compute_aabb(
+                    create_bbox_cache(),
+                    "/World/Receiver",
+                    include_children=True,
+                ),
+                dtype=np.float64,
+            )
+            candidate_extent = candidate_aabb[3:] - candidate_aabb[:3]
+            if (
+                candidate_aabb.shape == (6,)
+                and np.all(np.isfinite(candidate_aabb))
+                and np.all(candidate_extent > 1e-3)
+            ):
+                initial_receiver_aabb = candidate_aabb
+                break
+        if initial_receiver_aabb is None:
+            raise RuntimeError(
+                "official receiver USD did not resolve to finite visible bounds "
+                f"within 60 seconds: {character_usd}"
+            )
+
+        # Keep the character as presentation geometry only. Any physics APIs in
+        # the referenced asset are disabled by overrides in this scene layer;
+        # the NVIDIA source asset itself is never modified.
+        disabled_rigid_bodies = 0
+        disabled_colliders = 0
+        receiver_prims = tuple(Usd.PrimRange(receiver_asset_prim))
+        for prim in receiver_prims:
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr(False)
+                disabled_rigid_bodies += 1
+            if prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+                disabled_colliders += 1
+
+        initial_receiver_center = 0.5 * (
+            initial_receiver_aabb[:3] + initial_receiver_aabb[3:]
+        )
+        receiver_translation = np.asarray(
+            (
+                args.receiver_center_xy[0] - initial_receiver_center[0],
+                args.receiver_center_xy[1] - initial_receiver_center[1],
+                LAYOUT.ground_z_m - initial_receiver_aabb[2],
+            ),
+            dtype=np.float64,
+        )
+        receiver_xform.SetTranslate(Gf.Vec3d(*receiver_translation.tolist()))
+        receiver_wrapper.GetPrim().SetCustomDataByKey(
+            "panda_handover:visual_only", True
+        )
+        simulation_app.update()
+
+        placed_receiver_aabb = np.asarray(
+            compute_aabb(
+                create_bbox_cache(),
+                "/World/Receiver",
+                include_children=True,
+            ),
+            dtype=np.float64,
+        )
+        placed_receiver_center = 0.5 * (
+            placed_receiver_aabb[:3] + placed_receiver_aabb[3:]
+        )
+        receiver_checks = {
+            "aabb_is_finite": bool(np.all(np.isfinite(placed_receiver_aabb))),
+            "xy_center_matches_request": bool(
+                np.allclose(
+                    placed_receiver_center[:2],
+                    np.asarray(args.receiver_center_xy),
+                    atol=1e-4,
+                    rtol=0.0,
+                )
+            ),
+            "feet_rest_on_room_floor": bool(
+                np.isclose(
+                    placed_receiver_aabb[2],
+                    LAYOUT.ground_z_m,
+                    atol=1e-4,
+                    rtol=0.0,
+                )
+            ),
+            "receiver_is_behind_robot": bool(placed_receiver_center[0] < -0.5),
+        }
+        if not all(receiver_checks.values()):
+            raise RuntimeError(
+                "static receiver placement failed validation: "
+                + json.dumps(receiver_checks, sort_keys=True)
+            )
+        receiver_authoring = {
+            "role": "visual-only static human receiver",
+            "source": "NVIDIA Isaac Sim 5.1 character assets",
+            "character": args.static_receiver_character,
+            "source_usd": character_usd,
+            "wrapper_prim": "/World/Receiver",
+            "asset_prim": "/World/Receiver/Asset",
+            "requested_center_xy_m": list(args.receiver_center_xy),
+            "requested_yaw_deg": args.receiver_yaw_deg,
+            "documented_local_forward_axis": "-Y",
+            "world_facing_direction": "+X",
+            "ground_z_m": LAYOUT.ground_z_m,
+            "translation_world_m": receiver_translation.tolist(),
+            "placed_aabb_world_m": placed_receiver_aabb.tolist(),
+            "physics_overrides": {
+                "rigid_bodies_disabled": disabled_rigid_bodies,
+                "colliders_disabled": disabled_colliders,
+                "human_collision_model_present": False,
+            },
+            "automatic_checks": receiver_checks,
+        }
+
     saved = bool(stage_utils.save_stage(str(output)))
     required_prims = [
         "/World",
@@ -309,6 +488,8 @@ try:
         required_prims.extend(
             ("/World/Objects/Target", "/World/Objects/Target/Asset")
         )
+    if receiver_authoring is not None:
+        required_prims.extend(("/World/Receiver", "/World/Receiver/Asset"))
     prim_checks = {
         prim_path: bool(stage.GetPrimAtPath(prim_path).IsValid())
         for prim_path in required_prims
@@ -321,11 +502,15 @@ try:
         },
         "scene_usd": str(output),
         "target_authoring": target_authoring,
+        "receiver_authoring": receiver_authoring,
         "authoring_contract": {
             "objects_scope": "/World/Objects",
             "single_target_prim": "/World/Objects/Target",
             "source_assets_are_not_modified": True,
             "save_while_timeline_stopped": True,
+            "receiver_is_visual_only_not_a_human_safety_model": bool(
+                receiver_authoring is not None
+            ),
         },
         "automatic_checks": {
             "stage_saved": saved,

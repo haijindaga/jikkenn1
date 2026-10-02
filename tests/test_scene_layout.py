@@ -92,6 +92,24 @@ class SceneLayoutTests(unittest.TestCase):
         self.assertIn("UsdPhysics.MassAPI", script)
         self.assertIn('"source_assets_are_not_modified": True', script)
 
+    def test_scene_editor_adds_only_an_explicit_visual_receiver(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_edit_tabletop_scene.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"--static-receiver-character"', script)
+        self.assertIn('"--receiver-center-xy"', script)
+        self.assertIn('"--receiver-yaw-deg"', script)
+        self.assertIn("Isaac/People/Characters/", script)
+        self.assertIn('stage.DefinePrim("/World/Receiver/Asset", "Xform")', script)
+        self.assertIn("CreateRigidBodyEnabledAttr(False)", script)
+        self.assertIn("CreateCollisionEnabledAttr(False)", script)
+        self.assertIn('"human_collision_model_present": False', script)
+        self.assertIn(
+            '"receiver_is_visual_only_not_a_human_safety_model"', script
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

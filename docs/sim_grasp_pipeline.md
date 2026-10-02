@@ -65,6 +65,32 @@ boundaries but executes them in order:
 The runner must be launched with the Isaac Lab environment's Python. It invokes
 GraspGenX and cuRobo through `/home/suzutaro/GraspGenX/.venv/bin/python`.
 
+## Static visual receiver
+
+For presentation-only handover scenes, the scene authoring command can add an
+official NVIDIA Isaac Sim 5.1 character behind the robot. The character is
+referenced from the configured Isaac asset root, placed with its feet on the
+room floor, and turned toward the robot. Physics and collision APIs below the
+character reference are disabled in the authored scene layer. This is a visual
+receiver only: it is not a human collision model and does not make the planned
+trajectory human-safe.
+
+```bash
+python scripts/isaac_edit_tabletop_scene.py \
+  --output scenes/mug_handover_01.usda \
+  --target-usd /home/suzutaro/RoboLab-current/assets/objects/hot3d/mug.usd \
+  --static-receiver-character male-medical \
+  --receiver-center-xy -1.15 0.0 \
+  --receiver-yaw-deg 90 \
+  --exit-after-save
+```
+
+The reviewed coordinate convention puts the robot base at the origin, the
+table in world +X, and this visual receiver in world -X. NVIDIA documents its
+character forward axis as local -Y, so +90 degrees of world-Z yaw points the
+character toward world +X and the robot. The generated scene check records the
+resolved source USD, bounds, placement, and visual-only physics overrides.
+
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:
 
