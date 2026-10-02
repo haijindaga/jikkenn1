@@ -89,11 +89,12 @@ python scripts/isaac_open_stage.py \
   --stage scenes/mug_handover_1x_neo_v1.usda
 ```
 
-The viewer selects the scene's existing `/World/camera_0`, which is the same
-authored and validated camera used for RGB-D capture. It does not reconstruct a
-look-at rotation, change or save the scene, or modify the receiver. Use
-`--camera-prim PATH` only when inspecting a scene with a different authored
-camera path.
+The default `side` view creates an upright, temporary camera that frames the
+robot/table and receiver from the side. It uses the same world-axis camera pose
+conversion as the RGB-D capture pipeline and is authored only in the USD
+session layer, so it is never saved into the scene. Use `--view capture` to see
+the exact authored `/World/camera_0` RGB-D view; use `--camera-prim PATH` with
+that mode only when the authored camera has a different path.
 
 The reviewed coordinate convention puts the robot base at the origin, the
 table in world +X, and the visual receiver in world -X. Isaac Sim uses +X as

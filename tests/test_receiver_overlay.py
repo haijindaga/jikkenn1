@@ -18,12 +18,17 @@ def load_module():
 
 
 class ReceiverOverlayTests(unittest.TestCase):
-    def test_stage_viewer_reuses_the_authored_rgbd_camera(self):
+    def test_stage_viewer_has_side_and_capture_views_without_saving(self):
         script = (REPO_ROOT / "scripts" / "isaac_open_stage.py").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("set_camera_view(", script)
-        self.assertIn("set_active_viewport_camera(args.camera_prim)", script)
+        self.assertIn('choices=("side", "capture")', script)
+        self.assertIn('default="side"', script)
+        self.assertIn('active_camera_path = "/ViewerCamera"', script)
+        self.assertIn('camera_axes="world"', script)
+        self.assertIn("stage.GetSessionLayer()", script)
+        self.assertIn("set_active_viewport_camera(active_camera_path)", script)
         self.assertIn('"--camera-prim"', script)
         self.assertIn('default="/World/camera_0"', script)
         self.assertIn("camera_prim.IsA(UsdGeom.Camera)", script)
