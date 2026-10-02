@@ -10,20 +10,9 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument("--stage", type=Path, required=True)
 parser.add_argument(
-    "--eye",
-    type=float,
-    nargs=3,
-    metavar=("X", "Y", "Z"),
-    default=(2.2, -2.7, 1.6),
-    help="Initial presentation viewport eye position in world metres",
-)
-parser.add_argument(
-    "--target",
-    type=float,
-    nargs=3,
-    metavar=("X", "Y", "Z"),
-    default=(-0.2, 0.0, 0.35),
-    help="Initial presentation viewport look-at target in world metres",
+    "--camera-prim",
+    default="/World/camera_0",
+    help="Existing authored camera to use for the viewport",
 )
 args = parser.parse_args()
 stage_path = args.stage.expanduser().resolve()
@@ -35,13 +24,10 @@ from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": False})
 try:
-    import numpy as np
     import omni.timeline
     import omni.usd
-    from isaacsim.core.utils.viewports import (
-        set_active_viewport_camera,
-        set_camera_view,
-    )
+    from isaacsim.core.utils.viewports import set_active_viewport_camera
+    from pxr import UsdGeom
 
     timeline = omni.timeline.get_timeline_interface()
     timeline.stop()
@@ -53,22 +39,19 @@ try:
     stage = context.get_stage()
     if stage is None:
         raise RuntimeError(f"USD stage did not open: {stage_path}")
-    # The active Kit perspective camera can retain an unrelated previous
-    # viewport roll.  Reset only that transient display camera; do not edit or
-    # save the inspected USD stage or its authored sensor camera.
-    set_camera_view(
-        eye=np.asarray(args.eye, dtype=np.float64),
-        target=np.asarray(args.target, dtype=np.float64),
-        camera_prim_path="/OmniverseKit_Persp",
-    )
-    set_active_viewport_camera("/OmniverseKit_Persp")
+    camera_prim = stage.GetPrimAtPath(args.camera_prim)
+    if not camera_prim.IsValid() or not camera_prim.IsA(UsdGeom.Camera):
+        raise RuntimeError(
+            f"authored camera does not exist or is not a Camera: {args.camera_prim}"
+        )
+    # Reuse the exact authored RGB-D camera pose that the capture pipeline
+    # already validated.  Do not reconstruct a look-at rotation: doing so can
+    # introduce a 180-degree roll through a camera-axis convention mismatch.
+    set_active_viewport_camera(args.camera_prim)
     for _ in range(2):
         simulation_app.update()
     print(f"opened stage: {stage.GetRootLayer().identifier}", flush=True)
-    print(
-        f"presentation view: eye={tuple(args.eye)} target={tuple(args.target)}",
-        flush=True,
-    )
+    print(f"viewport camera: {args.camera_prim}", flush=True)
     print("Timeline is stopped. Close the Isaac Sim window when done.", flush=True)
     while simulation_app.is_running():
         simulation_app.update()

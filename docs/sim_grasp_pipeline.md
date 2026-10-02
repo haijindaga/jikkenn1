@@ -89,10 +89,11 @@ python scripts/isaac_open_stage.py \
   --stage scenes/mug_handover_1x_neo_v1.usda
 ```
 
-The viewer resets only Kit's transient perspective camera to a Z-up oblique
-presentation view. It does not change or save the scene, the receiver, or the
-authored RGB-D camera. Override the display view explicitly with `--eye X Y Z`
-and `--target X Y Z` when needed.
+The viewer selects the scene's existing `/World/camera_0`, which is the same
+authored and validated camera used for RGB-D capture. It does not reconstruct a
+look-at rotation, change or save the scene, or modify the receiver. Use
+`--camera-prim PATH` only when inspecting a scene with a different authored
+camera path.
 
 The reviewed coordinate convention puts the robot base at the origin, the
 table in world +X, and the visual receiver in world -X. Isaac Sim uses +X as

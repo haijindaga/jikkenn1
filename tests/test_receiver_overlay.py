@@ -18,14 +18,15 @@ def load_module():
 
 
 class ReceiverOverlayTests(unittest.TestCase):
-    def test_stage_viewer_resets_only_the_transient_viewport_camera(self):
+    def test_stage_viewer_reuses_the_authored_rgbd_camera(self):
         script = (REPO_ROOT / "scripts" / "isaac_open_stage.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("set_camera_view(", script)
-        self.assertIn('set_active_viewport_camera("/OmniverseKit_Persp")', script)
-        self.assertIn('"--eye"', script)
-        self.assertIn('"--target"', script)
+        self.assertNotIn("set_camera_view(", script)
+        self.assertIn("set_active_viewport_camera(args.camera_prim)", script)
+        self.assertIn('"--camera-prim"', script)
+        self.assertIn('default="/World/camera_0"', script)
+        self.assertIn("camera_prim.IsA(UsdGeom.Camera)", script)
         self.assertNotIn("save_stage", script)
 
     def test_overlay_uses_measured_neo_bounds_without_modifying_sources(self):
