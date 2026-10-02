@@ -112,6 +112,12 @@ def infer_sam3_prompts(
         masks = result["masks"].detach().to("cpu").numpy().astype(bool, copy=False)
         boxes = result["boxes"].detach().to("cpu").numpy().astype(np.float32, copy=False)
         scores = result["scores"].detach().to("cpu").numpy().astype(np.float32, copy=False)
+        # SAM3 may leave an empty prediction at its internal mask resolution
+        # instead of resizing it to the requested target size. Preserve the
+        # zero-instance result while normalizing its spatial dimensions so the
+        # caller can report "no detection" rather than a misleading shape error.
+        if masks.ndim == 3 and masks.shape[0] == 0:
+            masks = np.zeros((0, *rgb.shape[:2]), dtype=bool)
         prediction = InstanceSegmentation(masks=masks, boxes_xyxy=boxes, scores=scores)
         prediction.validate(tuple(rgb.shape[:2]))
         predictions[prompt] = prediction

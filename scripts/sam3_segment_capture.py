@@ -44,7 +44,7 @@ def resolve_prompts(args: argparse.Namespace) -> dict[str, str]:
     if args.vlm_result is not None:
         if args.grasp_part_prompt or args.receive_part_prompt:
             raise ValueError("manual part prompts cannot be combined with --vlm-result")
-        return load_handover_parts_report(args.vlm_result).to_dict()
+        return load_handover_parts_report(args.vlm_result).to_sam3_prompts()
     object_prompt = str(args.prompt).strip()
     if not object_prompt:
         raise ValueError("manual object prompt must not be empty")

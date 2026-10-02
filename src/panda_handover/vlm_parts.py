@@ -134,6 +134,14 @@ class HandoverParts:
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
 
+    def to_sam3_prompts(self) -> dict[str, str]:
+        """Return only the image-groundable fields intended for SAM3."""
+        return {
+            "object": self.object,
+            "grasp_part": self.grasp_part,
+            "receive_part": self.receive_part,
+        }
+
 
 def build_user_prompt(
     target_object: str, *, task_instruction: str | None = None

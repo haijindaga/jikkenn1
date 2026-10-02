@@ -11,6 +11,7 @@ from panda_handover.segmentation import (
     save_prompt_overlap_report,
     save_segmentation_artifacts,
     select_masked_points,
+    union_mask,
     write_ascii_ply,
 )
 
@@ -25,6 +26,15 @@ class SegmentationTests(unittest.TestCase):
         prediction.validate((2, 3))
         with self.assertRaisesRegex(ValueError, "masks must have shape"):
             prediction.validate((3, 2))
+
+    def test_zero_instance_prediction_accepts_original_resolution_shape(self):
+        prediction = InstanceSegmentation(
+            masks=np.zeros((0, 2, 3), dtype=bool),
+            boxes_xyxy=np.zeros((0, 4), dtype=np.float32),
+            scores=np.zeros(0, dtype=np.float32),
+        )
+        prediction.validate((2, 3))
+        self.assertEqual(union_mask(prediction, (2, 3)).shape, (2, 3))
 
     def test_mask_selects_pixel_aligned_camera_and_world_points(self):
         depth = np.ones((2, 2), dtype=np.float32)

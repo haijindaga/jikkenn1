@@ -25,6 +25,23 @@ class HandoverPartsTests(unittest.TestCase):
         )
         self.assertEqual(parts.object, "scissors")
 
+    def test_sam3_prompts_exclude_non_visual_orientation_policy(self) -> None:
+        parts = HandoverParts(
+            object="mug",
+            grasp_part="mug body",
+            receive_part="mug handle",
+            transport_orientation_policy="keep_grasp_orientation",
+        )
+        self.assertEqual(
+            parts.to_sam3_prompts(),
+            {
+                "object": "mug",
+                "grasp_part": "mug body",
+                "receive_part": "mug handle",
+            },
+        )
+        self.assertNotIn("transport_orientation_policy", parts.to_sam3_prompts())
+
     def test_rejects_extra_vlm_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "exactly"):
             HandoverParts.from_mapping(
