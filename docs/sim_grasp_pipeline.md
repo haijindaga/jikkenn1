@@ -192,6 +192,12 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
+When the receiver height is not part of the task, add
+`--handover-height-policy preserve-lift-end`. The requested receiver X/Y are
+still used, while its Z is replaced by the measured receive-part height at the
+end of the existing lift phase. This requests no additional vertical motion
+during transport; it does not remove the initial table-clearance lift.
+
 This mode first rejects candidates whose official Franka collision mesh enters
 the observed receive-part clearance region (15 mm by default), then preserves
 the original GraspGenX score order. It adds no weighted handover score. For each

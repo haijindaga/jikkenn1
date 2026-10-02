@@ -90,6 +90,15 @@ def parse_args() -> argparse.Namespace:
         help="Automatic handover direction from the robot-held part toward the human",
     )
     parser.add_argument(
+        "--handover-height-policy",
+        choices=("receiver-position", "preserve-lift-end"),
+        default="receiver-position",
+        help=(
+            "Use the requested receiver Z or preserve the receive-part height at "
+            "the end of the existing lift phase."
+        ),
+    )
+    parser.add_argument(
         "--transport-orientation-policy-report",
         type=Path,
         help=(
@@ -372,6 +381,15 @@ def _normalized_quaternion(value: Any) -> np.ndarray:
 def _tool_quaternions_wxyz(planner: Any, joint_state: Any) -> np.ndarray:
     """Read the reviewed main tool pose from cuRobo V2 kinematics."""
 
+    _, quaternions = _tool_positions_and_quaternions_wxyz(planner, joint_state)
+    return quaternions
+
+
+def _tool_positions_and_quaternions_wxyz(
+    planner: Any, joint_state: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read reviewed main-tool positions and orientations from cuRobo V2."""
+
     state = planner.compute_kinematics(joint_state)
     tool_poses = getattr(state, "tool_poses", None)
     if tool_poses is None or not hasattr(tool_poses, "get_link_pose"):
@@ -379,11 +397,18 @@ def _tool_quaternions_wxyz(planner: Any, joint_state: Any) -> np.ndarray:
     if len(planner.tool_frames) != 1:
         raise RuntimeError("orientation validation requires exactly one tool frame")
     pose = tool_poses.get_link_pose(planner.tool_frames[0])
+    positions = _cpu_numpy(pose.position).astype(np.float32, copy=False)
+    positions = positions.reshape(-1, 3)
     quaternions = _cpu_numpy(pose.quaternion).astype(np.float32, copy=False)
     quaternions = quaternions.reshape(-1, 4)
-    if len(quaternions) == 0 or not np.isfinite(quaternions).all():
-        raise RuntimeError("cuRobo returned invalid tool quaternions")
-    return quaternions
+    if (
+        len(positions) == 0
+        or len(positions) != len(quaternions)
+        or not np.isfinite(positions).all()
+        or not np.isfinite(quaternions).all()
+    ):
+        raise RuntimeError("cuRobo returned invalid tool poses")
+    return positions, quaternions
 
 
 def _collision_sphere_link_names(
@@ -682,6 +707,8 @@ def main() -> int:
             or np.linalg.norm(handover_human_direction) <= 1e-8
         ):
             raise ValueError("handover human direction must be finite and non-zero")
+    elif args.handover_height_policy != "receiver-position":
+        raise ValueError("--handover-height-policy requires automatic handover")
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root / "src"))
 
@@ -692,7 +719,10 @@ def main() -> int:
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
     )
-    from panda_handover.geometry import transform_points
+    from panda_handover.geometry import (
+        rotation_matrix_from_quaternion_wxyz,
+        transform_points,
+    )
     from panda_handover.handover import (
         DEFAULT_HANDOVER_ROLL_DEGREES,
         ORIENTATION_PRESERVATION_TOLERANCE_RAD,
@@ -1554,12 +1584,57 @@ def main() -> int:
             assert handover_human_direction is not None
             assert grasp_part_robot_base is not None
             assert receive_part_robot_base is not None
+            effective_receiver_position = handover_receiver_position.copy()
+            receiver_height_diagnostics = {
+                "policy": args.handover_height_policy,
+                "requested_receiver_z_m": float(handover_receiver_position[2]),
+            }
+            if args.handover_height_policy == "preserve-lift-end":
+                lift_positions, lift_quaternions = (
+                    _tool_positions_and_quaternions_wxyz(planner, lift_end)
+                )
+                if len(lift_positions) != 1:
+                    raise RuntimeError(
+                        "lift endpoint height policy requires one tool pose"
+                    )
+                grasp_transform = grasp_transforms[selected_rank]
+                receive_center_base = np.median(receive_part_robot_base, axis=0)
+                receive_center_hand = grasp_transform[:3, :3].T @ (
+                    receive_center_base - grasp_transform[:3, 3]
+                )
+                lift_rotation = rotation_matrix_from_quaternion_wxyz(
+                    lift_quaternions[0]
+                )
+                lifted_receive_center = (
+                    lift_positions[0] + lift_rotation @ receive_center_hand
+                )
+                effective_receiver_position[2] = lifted_receive_center[2]
+                receiver_height_diagnostics.update(
+                    {
+                        "effective_receiver_z_m": float(
+                            effective_receiver_position[2]
+                        ),
+                        "lift_end_receive_part_center_robot_base_m": (
+                            lifted_receive_center.astype(float).tolist()
+                        ),
+                        "additional_vertical_transport_requested": False,
+                    }
+                )
+            else:
+                receiver_height_diagnostics.update(
+                    {
+                        "effective_receiver_z_m": float(
+                            effective_receiver_position[2]
+                        ),
+                        "additional_vertical_transport_requested": None,
+                    }
+                )
             if transport_orientation_policy == "keep_grasp_orientation":
                 handover_goal_transforms, handover_goal_diagnostics = (
                     generate_orientation_preserving_handover_goal(
                         grasp_transforms[selected_rank],
                         receive_part_robot_base,
-                        handover_receiver_position,
+                        effective_receiver_position,
                     )
                 )
             else:
@@ -1568,10 +1643,11 @@ def main() -> int:
                         grasp_transforms[selected_rank],
                         grasp_part_robot_base,
                         receive_part_robot_base,
-                        handover_receiver_position,
+                        effective_receiver_position,
                         handover_human_direction,
                     )
                 )
+            handover_goal_diagnostics["height"] = receiver_height_diagnostics
             handover_goal_positions = handover_goal_transforms[:, :3, 3]
             handover_goal_quaternions = rotation_matrix_to_quaternion_wxyz(
                 handover_goal_transforms[:, :3, :3]
@@ -1929,6 +2005,7 @@ def main() -> int:
                 if handover_receiver_position is not None
                 else None
             ),
+            "handover_height_policy": args.handover_height_policy,
             "handover_human_direction_robot_base": (
                 (
                     handover_human_direction

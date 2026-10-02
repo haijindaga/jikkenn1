@@ -314,6 +314,8 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                 "0",
                 "-1",
                 "0",
+                "--handover-height-policy",
+                "preserve-lift-end",
             ]
         )
         paths = MODULE.pipeline_paths(args.output)
@@ -339,6 +341,10 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         planner = stages["curobo_grasp_lift_trials"].command
         self.assertIn("--handover-receiver-position-robot-base-m", planner)
         self.assertIn("--handover-human-direction-robot-base", planner)
+        self.assertEqual(
+            planner[planner.index("--handover-height-policy") + 1],
+            "preserve-lift-end",
+        )
         self.assertIn("--transport-orientation-policy-report", planner)
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(

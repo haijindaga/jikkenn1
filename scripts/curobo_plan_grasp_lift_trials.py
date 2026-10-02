@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         nargs=3,
         metavar=("DX", "DY", "DZ"),
     )
+    parser.add_argument(
+        "--handover-height-policy",
+        choices=("receiver-position", "preserve-lift-end"),
+        default="receiver-position",
+    )
     parser.add_argument("--transport-orientation-policy-report", type=Path)
     parser.add_argument(
         "--allow-reviewed-support-contact-preflight", action="store_true"
@@ -75,6 +80,11 @@ def parse_args() -> argparse.Namespace:
             "automatic affordance-aware handover cannot be combined with a fixed "
             "panda_hand goal"
         )
+    if (
+        args.handover_height_policy != "receiver-position"
+        and args.handover_receiver_position_robot_base_m is None
+    ):
+        parser.error("--handover-height-policy requires automatic handover")
     return args
 
 
@@ -144,8 +154,12 @@ def main() -> int:
             "handover_human_direction_robot_base": (
                 args.handover_human_direction_robot_base
             ),
+            "handover_height_policy": args.handover_height_policy,
             "handover_orientation_policy": (
-                "affordance-axis alignment with fixed roll variants"
+                "from transport-orientation-policy report"
+                if args.handover_receiver_position_robot_base_m is not None
+                and args.transport_orientation_policy_report is not None
+                else "affordance-axis alignment with fixed roll variants"
                 if args.handover_receiver_position_robot_base_m is not None
                 else "manual panda_hand goal"
                 if args.handover_goal_position_robot_base_m is not None
@@ -226,6 +240,8 @@ def main() -> int:
                         str(value)
                         for value in args.handover_human_direction_robot_base
                     ],
+                    "--handover-height-policy",
+                    args.handover_height_policy,
                 ]
             )
         if args.transport_orientation_policy_report is not None:

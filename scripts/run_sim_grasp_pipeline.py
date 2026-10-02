@@ -140,6 +140,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--handover-height-policy",
+        choices=("receiver-position", "preserve-lift-end"),
+        default="receiver-position",
+        help=(
+            "Automatic handover Z policy. preserve-lift-end ignores the requested "
+            "receiver Z and keeps the receive part at its post-lift height."
+        ),
+    )
+    parser.add_argument(
         "--grasp-retention-mode",
         choices=(
             "physics",
@@ -270,6 +279,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         assert position is not None
         if not all(math.isfinite(value) for value in position):
             parser.error("handover receiver position must be finite")
+    elif args.handover_height_policy != "receiver-position":
+        parser.error("--handover-height-policy requires automatic handover")
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = (
             "rigid-attachment"
@@ -693,6 +704,8 @@ def build_stages(
                 ],
                 "--handover-human-direction-robot-base",
                 *[str(value) for value in args.handover_human_direction_robot_base],
+                "--handover-height-policy",
+                args.handover_height_policy,
             ]
         )
 
@@ -873,6 +886,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 if args.handover_human_direction_robot_base is not None
                 else None
             ),
+            "handover_height_policy": args.handover_height_policy,
             "handover_receive_clearance_m": args.handover_receive_clearance,
             "handover_candidate_policy": (
                 "receive-part clearance hard gate, then original GraspGenX score"
