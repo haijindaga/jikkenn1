@@ -82,6 +82,7 @@ def read_plan_status(directory: Path) -> tuple[str, str | None]:
         "grasp_lift_plan_check.json",
         "grasp_preflight_failure.json",
         "grasp_lift_failure.json",
+        "handover_transport_failure.json",
     )
     for name in report_names:
         path = directory / name

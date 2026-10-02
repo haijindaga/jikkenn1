@@ -391,6 +391,23 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn(
             '"--handover-receiver-position-robot-base-m"', planner_runner
         )
+        self.assertIn('"handover_transport_failure.json"', planner_runner)
+
+    def test_handover_transport_rejection_is_a_reported_candidate_failure(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            trial = Path(directory)
+            report = trial / "handover_transport_failure.json"
+            report.write_text(
+                json.dumps({"status": "handover_transport_planning_failed"}),
+                encoding="utf-8",
+            )
+            status, path = namespace["read_plan_status"](trial)
+        self.assertEqual(status, "handover_transport_planning_failed")
+        self.assertEqual(path, str(report))
 
     def test_pregrasp_accepts_handover_rerank_with_static_filter_provenance(self):
         source = (PROJECT / "scripts" / "curobo_plan_pregrasp_a.py").read_text(
