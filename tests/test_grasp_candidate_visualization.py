@@ -12,6 +12,7 @@ from panda_handover.grasp_visualization import (
     classify_candidate_states,
     representative_gripper_mesh,
     resolve_saved_gripper_identity,
+    select_representative_candidate,
     state_counts,
     verify_saved_world_grasps,
 )
@@ -41,6 +42,34 @@ class GraspCandidateVisualizationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "collision mesh is empty"):
             representative_gripper_mesh(gripper)
+
+    def test_representative_candidate_prefers_successful_plan(self) -> None:
+        index, reason = select_representative_candidate(
+            scores=np.array([0.99, 0.75, 0.80]),
+            collision_free_mask=np.array([True, True, True]),
+            states=np.array(
+                [STATIC_COLLISION_FREE, CUROBO_PLAN_SUCCESS, CUROBO_PLAN_SUCCESS]
+            ),
+        )
+
+        self.assertEqual(index, 2)
+        self.assertEqual(reason, "highest-score cuRobo planning success")
+
+    def test_representative_candidate_falls_back_to_static_filter(self) -> None:
+        index, reason = select_representative_candidate(
+            scores=np.array([0.90, 0.85, 0.80]),
+            collision_free_mask=np.array([False, True, True]),
+            states=np.array(
+                [
+                    STATIC_COLLISION_REJECTED,
+                    CUROBO_PLAN_REJECTED,
+                    STATIC_COLLISION_FREE,
+                ]
+            ),
+        )
+
+        self.assertEqual(index, 1)
+        self.assertEqual(reason, "highest-score static collision-free fallback")
 
     def test_legacy_reports_resolve_to_historical_franka_default(self) -> None:
         self.assertEqual(

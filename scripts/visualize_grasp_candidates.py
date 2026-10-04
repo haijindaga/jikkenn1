@@ -74,6 +74,7 @@ def main() -> int:
         classify_candidate_states,
         representative_gripper_mesh,
         resolve_saved_gripper_identity,
+        select_representative_candidate,
         state_counts,
         verify_saved_world_grasps,
     )
@@ -163,10 +164,10 @@ def main() -> int:
     order = np.argsort(-scores, kind="stable")
     if args.max_candidates:
         order = order[: min(args.max_candidates, len(order))]
-    best_static_index = (
-        int(np.flatnonzero(collision_free_mask)[np.argmax(scores[collision_free_mask])])
-        if np.any(collision_free_mask)
-        else None
+    representative_index, representative_reason = select_representative_candidate(
+        scores,
+        collision_free_mask,
+        states,
     )
 
     gripper = resolve_gripper_info(gripper_name)
@@ -183,12 +184,13 @@ def main() -> int:
                 "- **Yellow**: cuRobo planning rejected",
                 "- **Blue**: cuRobo plan succeeded",
                 "- **Magenta**: planner/infrastructure error",
-            (
-                "- **Light-blue collision mesh**: top-score static collision-free "
-                f"candidate {best_static_index}"
-                if best_static_index is not None
-                else "- **Light-blue collision mesh**: no collision-free candidate"
-            ),
+                (
+                    "- **Light-blue collision mesh**: "
+                    f"candidate {representative_index} "
+                    f"({representative_reason})"
+                    if representative_index is not None
+                    else f"- **Light-blue collision mesh**: {representative_reason}"
+                ),
                 "",
                 "All geometry is displayed in the saved Isaac world frame (+Z up).",
             ]
@@ -224,18 +226,18 @@ def main() -> int:
             gripper_info=gripper,
             linewidth=(
                 args.grasp_line_width * 2.5
-                if candidate_index == best_static_index
+                if candidate_index == representative_index
                 or state == CUROBO_PLAN_SUCCESS
                 else args.grasp_line_width
             ),
         )
-    if best_static_index is not None and best_static_index in set(order.tolist()):
+    if representative_index is not None and representative_index in set(order.tolist()):
         visualize_mesh(
             vis,
-            "selection/top_score_collision_free_gripper_mesh",
+            "selection/representative_gripper_mesh",
             representative_mesh,
             color=[80, 200, 255],
-            transform=grasps_world[best_static_index],
+            transform=grasps_world[representative_index],
         )
 
     print(
@@ -245,7 +247,8 @@ def main() -> int:
                 "candidate_count": candidate_count,
                 "displayed_candidate_count": int(len(order)),
                 "state_counts": counts,
-                "top_score_collision_free_candidate": best_static_index,
+                "representative_candidate": representative_index,
+                "representative_candidate_reason": representative_reason,
                 "gripper": gripper_name,
                 "representative_gripper_geometry": (
                     "official GraspGenX XGripperInfo.collision_mesh"

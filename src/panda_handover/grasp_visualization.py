@@ -34,6 +34,40 @@ def representative_gripper_mesh(gripper: object) -> object:
     return mesh
 
 
+def select_representative_candidate(
+    scores: np.ndarray,
+    collision_free_mask: np.ndarray,
+    states: np.ndarray,
+) -> tuple[int | None, str]:
+    """Select one display-only representative using saved pipeline evidence.
+
+    A successfully planned candidate is more representative of the executable
+    result than a candidate that only passed the static filter.  Score breaks
+    ties within the selected evidence level.  This function does not rescore or
+    reclassify candidates.
+    """
+
+    values = np.asarray(scores, dtype=np.float64).reshape(-1)
+    collision_free = np.asarray(collision_free_mask, dtype=bool).reshape(-1)
+    candidate_states = np.asarray(states).reshape(-1)
+    if not (len(values) == len(collision_free) == len(candidate_states)):
+        raise ValueError("scores, collision mask and states have different lengths")
+    if not np.isfinite(values).all():
+        raise ValueError("candidate scores contain non-finite values")
+
+    planned = np.flatnonzero(candidate_states == CUROBO_PLAN_SUCCESS)
+    if planned.size:
+        index = int(planned[np.argmax(values[planned])])
+        return index, "highest-score cuRobo planning success"
+
+    static = np.flatnonzero(collision_free)
+    if static.size:
+        index = int(static[np.argmax(values[static])])
+        return index, "highest-score static collision-free fallback"
+
+    return None, "no collision-free candidate"
+
+
 def resolve_saved_gripper_identity(
     candidate_report: Mapping[str, object],
     filter_report: Mapping[str, object],
