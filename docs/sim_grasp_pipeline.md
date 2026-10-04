@@ -65,6 +65,47 @@ boundaries but executes them in order:
 The runner must be launched with the Isaac Lab environment's Python. It invokes
 GraspGenX and cuRobo through `/home/suzutaro/GraspGenX/.venv/bin/python`.
 
+## Handle-supported hammer-head diagnostic
+
+To isolate tabletop clearance from grasp force, create a separate diagnostic
+scene from the saved hammer-head segmentation.  The source scene is not
+modified.  The support position is selected from observed handle points and is
+required to leave the observed head projection clear.
+
+```bash
+cd /home/suzutaro/projects/jikkenn1
+conda activate env_isaaclab
+
+python scripts/isaac_create_elevated_head_scene.py \
+  --base-scene scenes/hammer_01.usda \
+  --reference-capture outputs/hammer_head_handover_fixedjoint_e2e_v1/capture/camera_0 \
+  --reference-segmentation outputs/hammer_head_handover_fixedjoint_e2e_v1/capture/sam3 \
+  --output scenes/hammer_head_handle_supported_v1.usda \
+  --head-clearance-m 0.03
+
+python scripts/isaac_open_stage.py \
+  --stage scenes/hammer_head_handle_supported_v1.usda \
+  --view side
+```
+
+Before planning, visually confirm that the cyan block is below the handle and
+that the head has air below it after physics settling.  Then run a fresh
+pipeline with fixed manual part prompts so only the support condition changes:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/hammer_head_handle_supported_v1.usda \
+  --prompt hammer \
+  --grasp-part-prompt "hammer head" \
+  --receive-part-prompt "hammer handle" \
+  --output outputs/hammer_head_handle_supported_e2e_v1 \
+  --allow-reviewed-support-contact-preflight
+```
+
+This is a simulation-only controlled diagnostic, not a proposed deployment
+fixture.  Candidate generation, scores, collision thresholds, cuRobo settings,
+and finger drives remain unchanged relative to the baseline command.
+
 ## Static visual receiver
 
 For presentation-only handover scenes, compose the official Isaac Sim 5.1 1X
