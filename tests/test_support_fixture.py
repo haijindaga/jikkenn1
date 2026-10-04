@@ -3,7 +3,11 @@ from pathlib import Path
 
 import numpy as np
 
-from panda_handover.support_fixture import masked_points_world, plan_handle_support
+from panda_handover.support_fixture import (
+    masked_points_world,
+    plan_handle_support,
+    plan_part_support_patch,
+)
 
 
 class SupportFixtureTests(unittest.TestCase):
@@ -22,10 +26,14 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertIn('"--support-part-label"', source)
         self.assertIn('"--grasp-mask-role"', source)
         self.assertIn('"--support-mask-role"', source)
+        self.assertIn('"--support-geometry-policy"', source)
         self.assertIn('/ args.grasp_mask_role', source)
         self.assertIn('/ args.support_mask_role', source)
         self.assertIn('"grasp_mask_role": args.grasp_mask_role', source)
         self.assertIn('"support_mask_role": args.support_mask_role', source)
+        self.assertIn(
+            '"support_geometry_policy": args.support_geometry_policy', source
+        )
         self.assertIn("traceback.print_exc()", source)
         self.assertIn("UsdPhysics.CollisionAPI.Apply", source)
         self.assertIn('"panda_handover:diagnostic_support_prim"', source)
@@ -98,6 +106,53 @@ class SupportFixtureTests(unittest.TestCase):
                 handle,
                 support_width_m=0.02,
                 head_projection_margin_m=0.005,
+                target_lift_m=0.03,
+            )
+
+    def test_part_patch_uses_dense_support_region_clear_of_grasp(self) -> None:
+        grasp = np.array(
+            [
+                [0.00, -0.01, 0.03],
+                [0.00, 0.00, 0.03],
+                [0.00, 0.01, 0.03],
+            ]
+        )
+        support = np.array(
+            [
+                [0.05, -0.01, 0.02],
+                [0.05, 0.00, 0.02],
+                [0.05, 0.01, 0.02],
+                [0.06, -0.01, 0.02],
+                [0.06, 0.00, 0.02],
+                [0.06, 0.01, 0.02],
+            ]
+        )
+        plan = plan_part_support_patch(
+            grasp,
+            support,
+            support_width_m=0.02,
+            grasp_projection_margin_m=0.005,
+            target_lift_m=0.03,
+        )
+        self.assertGreater(plan.support_center_xy_world_m[0], 0.04)
+        self.assertEqual(plan.support_length_m, 0.02)
+        self.assertGreater(
+            plan.minimum_head_to_support_footprint_distance_m, 0.005
+        )
+
+    def test_part_patch_fails_without_grasp_clear_support_region(self) -> None:
+        grasp = np.array(
+            [[0.00, 0.00, 0.03], [0.01, 0.00, 0.03], [0.00, 0.01, 0.03]]
+        )
+        support = np.array(
+            [[0.00, 0.00, 0.02], [0.01, 0.00, 0.02], [0.00, 0.01, 0.02]]
+        )
+        with self.assertRaisesRegex(ValueError, "no dense patch"):
+            plan_part_support_patch(
+                grasp,
+                support,
+                support_width_m=0.02,
+                grasp_projection_margin_m=0.005,
                 target_lift_m=0.03,
             )
 

@@ -142,7 +142,8 @@ python scripts/isaac_create_elevated_head_scene.py \
   --grasp-part-label "scissors blades" \
   --support-part-label "scissors handles" \
   --grasp-mask-role receive_part \
-  --support-mask-role grasp_part
+  --support-mask-role grasp_part \
+  --support-geometry-policy part-mask-patch
 
 python scripts/isaac_open_stage.py \
   --stage scenes/scissors_handles_supported_v1.usda \
@@ -154,7 +155,9 @@ The historical `scissors_vlm_e2e_v1` artifact labels the handles as
 arguments above reuse those reviewed masks without relabelling files or
 rerunning segmentation.  The complete blade mask is a conservative clearance
 proxy; the subsequent fresh pipeline may still request a grasp near the pivot.
-Hammer artifacts keep the default mapping
+The patch policy selects the densest observed handle patch whose expanded
+footprint contains no observed blade point; it does not assume an elongated
+hammer-like handle. Hammer artifacts keep the default mapping and rail policy
 (`grasp_part` is clear, `receive_part` locates the support).
 
 After visually confirming the support placement, run a fresh zero-depth

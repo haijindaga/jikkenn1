@@ -1,4 +1,4 @@
-"""Geometry for a controlled handle-supported, head-clear diagnostic scene."""
+"""Geometry for controlled part-supported, grasp-region-clear diagnostics."""
 
 from __future__ import annotations
 
@@ -155,5 +155,119 @@ def plan_handle_support(
         head_projection_margin_m=float(head_projection_margin_m),
         nearest_head_projection_distance_m=nearest_head_distance,
         minimum_head_to_support_footprint_distance_m=minimum_footprint_distance,
+        target_lift_m=float(target_lift_m),
+    )
+
+
+def plan_part_support_patch(
+    grasp_points_world: np.ndarray,
+    support_points_world: np.ndarray,
+    *,
+    support_width_m: float,
+    grasp_projection_margin_m: float,
+    target_lift_m: float,
+) -> ElevatedHeadSupportPlan:
+    """Choose a dense square support-part patch clear of the grasp part.
+
+    Candidate centers are observed support-part points. The selected square
+    covers the largest number of observed support points while its expanded
+    footprint contains no observed grasp-part point. Unlike
+    :func:`plan_handle_support`, this policy assumes no elongated handle.
+    """
+
+    grasp = np.asarray(grasp_points_world, dtype=np.float64)
+    support = np.asarray(support_points_world, dtype=np.float64)
+    for label, points in (("grasp", grasp), ("support", support)):
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) < 3:
+            raise ValueError(f"{label} points must have shape (N,3), N>=3")
+        if not np.all(np.isfinite(points)):
+            raise ValueError(f"{label} points contain non-finite values")
+    if not np.isfinite(support_width_m) or support_width_m <= 0.0:
+        raise ValueError("support_width_m must be positive and finite")
+    if (
+        not np.isfinite(grasp_projection_margin_m)
+        or grasp_projection_margin_m < 0.0
+    ):
+        raise ValueError("grasp_projection_margin_m must be finite and non-negative")
+    if not np.isfinite(target_lift_m) or target_lift_m <= 0.0:
+        raise ValueError("target_lift_m must be positive and finite")
+
+    grasp_xy = grasp[:, :2]
+    support_xy = support[:, :2]
+    grasp_center = np.median(grasp_xy, axis=0)
+    support_center = np.median(support_xy, axis=0)
+    centered_support = support_xy - support_center[None, :]
+    covariance = centered_support.T @ centered_support / float(len(support_xy))
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    axis = eigenvectors[:, int(np.argmax(eigenvalues))]
+    if float(np.linalg.norm(axis)) <= 1e-8:
+        raise ValueError("support-part projection has no measurable principal axis")
+    axis = axis / np.linalg.norm(axis)
+    # PCA axis signs are arbitrary; fix one for deterministic reports.
+    dominant = int(np.argmax(np.abs(axis)))
+    if axis[dominant] < 0.0:
+        axis = -axis
+    lateral = np.array((-axis[1], axis[0]), dtype=np.float64)
+
+    half_width = 0.5 * support_width_m
+    expanded_half_width = half_width + grasp_projection_margin_m
+    best_count = -1
+    best_clearance = -np.inf
+    best_center_distance = np.inf
+    best_center: np.ndarray | None = None
+    for candidate in support_xy:
+        support_relative = support_xy - candidate[None, :]
+        support_axial = np.abs(support_relative @ axis)
+        support_lateral = np.abs(support_relative @ lateral)
+        covered_support_count = int(
+            np.count_nonzero(
+                (support_axial <= half_width)
+                & (support_lateral <= half_width)
+            )
+        )
+
+        grasp_relative = grasp_xy - candidate[None, :]
+        grasp_axial = np.abs(grasp_relative @ axis)
+        grasp_lateral = np.abs(grasp_relative @ lateral)
+        if np.any(
+            (grasp_axial <= expanded_half_width)
+            & (grasp_lateral <= expanded_half_width)
+        ):
+            continue
+
+        outside_axial = np.maximum(grasp_axial - half_width, 0.0)
+        outside_lateral = np.maximum(grasp_lateral - half_width, 0.0)
+        footprint_clearance = float(
+            np.min(np.hypot(outside_axial, outside_lateral))
+        )
+        center_distance = float(np.linalg.norm(candidate - support_center))
+        score = (covered_support_count, footprint_clearance, -center_distance)
+        best_score = (best_count, best_clearance, -best_center_distance)
+        if score > best_score:
+            best_count = covered_support_count
+            best_clearance = footprint_clearance
+            best_center_distance = center_distance
+            best_center = candidate.copy()
+
+    if best_center is None or best_count < 3:
+        raise ValueError(
+            "observed support part has no dense patch clear of the grasp projection"
+        )
+
+    nearest_grasp_distance = float(
+        np.min(np.linalg.norm(grasp_xy - best_center[None, :], axis=1))
+    )
+    yaw_deg = float(np.degrees(np.arctan2(axis[1], axis[0])))
+    return ElevatedHeadSupportPlan(
+        support_center_xy_world_m=(float(best_center[0]), float(best_center[1])),
+        support_axis_xy_world=(float(axis[0]), float(axis[1])),
+        support_yaw_deg=yaw_deg,
+        support_length_m=float(support_width_m),
+        head_center_xy_world_m=(float(grasp_center[0]), float(grasp_center[1])),
+        handle_center_xy_world_m=(float(support_center[0]), float(support_center[1])),
+        support_width_m=float(support_width_m),
+        head_projection_margin_m=float(grasp_projection_margin_m),
+        nearest_head_projection_distance_m=nearest_grasp_distance,
+        minimum_head_to_support_footprint_distance_m=float(best_clearance),
         target_lift_m=float(target_lift_m),
     )

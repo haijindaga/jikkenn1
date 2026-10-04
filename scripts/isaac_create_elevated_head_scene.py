@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         default="receive_part",
         help="saved SAM3 part role used to locate the support fixture",
     )
+    parser.add_argument(
+        "--support-geometry-policy",
+        choices=("handle-axis-rail", "part-mask-patch"),
+        default="handle-axis-rail",
+        help="geometry rule used to place support inside the saved support part",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -131,7 +137,11 @@ try:
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
     from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
-    from panda_handover.support_fixture import masked_points_world, plan_handle_support
+    from panda_handover.support_fixture import (
+        masked_points_world,
+        plan_handle_support,
+        plan_part_support_patch,
+    )
 
     required_capture_files = (
         "points_camera.npy",
@@ -162,23 +172,32 @@ try:
     T_world_camera = np.load(
         args.reference_capture / "T_world_camera.npy", allow_pickle=False
     )
-    head_points_world = masked_points_world(
+    grasp_points_world = masked_points_world(
         points_camera,
         np.load(head_mask_path, allow_pickle=False),
         T_world_camera,
     )
-    handle_points_world = masked_points_world(
+    support_points_world = masked_points_world(
         points_camera,
         np.load(handle_mask_path, allow_pickle=False),
         T_world_camera,
     )
-    support_plan = plan_handle_support(
-        head_points_world,
-        handle_points_world,
-        support_width_m=args.support_width_m,
-        head_projection_margin_m=args.grasp_part_projection_margin_m,
-        target_lift_m=args.target_clearance_m,
-    )
+    if args.support_geometry_policy == "handle-axis-rail":
+        support_plan = plan_handle_support(
+            grasp_points_world,
+            support_points_world,
+            support_width_m=args.support_width_m,
+            head_projection_margin_m=args.grasp_part_projection_margin_m,
+            target_lift_m=args.target_clearance_m,
+        )
+    else:
+        support_plan = plan_part_support_patch(
+            grasp_points_world,
+            support_points_world,
+            support_width_m=args.support_width_m,
+            grasp_projection_margin_m=args.grasp_part_projection_margin_m,
+            target_lift_m=args.target_clearance_m,
+        )
 
     base_hash_before = _sha256(args.base_scene)
     timeline = omni.timeline.get_timeline_interface()
@@ -340,6 +359,7 @@ try:
                 f"{args.support_part_label} used only to locate support"
             ),
             "support_mask_role": args.support_mask_role,
+            "support_geometry_policy": args.support_geometry_policy,
             "geometry_implementation_names": {
                 "head_points": "grasp_part",
                 "handle_points": "support_part",
