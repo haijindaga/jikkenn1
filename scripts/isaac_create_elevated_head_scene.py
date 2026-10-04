@@ -215,8 +215,12 @@ try:
         UsdGeom.XformCommonAPI.RotationOrderXYZ,
     )
     UsdPhysics.CollisionAPI.Apply(support.GetPrim())
-    stage.GetPrimAtPath("/World").SetCustomDataByKey(
+    world_prim = stage.GetPrimAtPath("/World")
+    world_prim.SetCustomDataByKey(
         "panda_handover:diagnostic_scene", "handle-supported-head-clear"
+    )
+    world_prim.SetCustomDataByKey(
+        "panda_handover:diagnostic_support_prim", args.support_prim
     )
     simulation_app.update()
 

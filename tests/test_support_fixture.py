@@ -18,8 +18,20 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertIn('"parts" / "grasp_part" / "union_mask.npy"', source)
         self.assertIn('"parts" / "receive_part" / "union_mask.npy"', source)
         self.assertIn("UsdPhysics.CollisionAPI.Apply", source)
+        self.assertIn('"panda_handover:diagnostic_support_prim"', source)
         self.assertIn('"source_scene_modified": False', source)
         self.assertIn('"candidate_or_planner_parameters_changed": False', source)
+
+        capture_source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "isaac_capture_smoke.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"handle-supported-head-clear"', capture_source)
+        self.assertIn(
+            '"target_remains_clear_of_table_after_settling"', capture_source
+        )
+        self.assertIn('"target_is_near_support_top_after_settling"', capture_source)
 
     def test_masked_points_are_transformed_to_world(self) -> None:
         points = np.array(

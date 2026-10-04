@@ -265,6 +265,66 @@ try:
     table_max = table_aabb[3:]
     table_top_z_m = float(table_max[2])
     target_extent = target_aabb[3:] - target_aabb[:3]
+    diagnostic_support = None
+    if scene_usd is not None:
+        world_prim = stage.GetPrimAtPath("/World")
+        diagnostic_kind = world_prim.GetCustomDataByKey(
+            "panda_handover:diagnostic_scene"
+        )
+        support_prim_path = world_prim.GetCustomDataByKey(
+            "panda_handover:diagnostic_support_prim"
+        )
+        if diagnostic_kind is not None or support_prim_path is not None:
+            if diagnostic_kind != "handle-supported-head-clear":
+                raise RuntimeError(
+                    f"unsupported diagnostic scene kind: {diagnostic_kind!r}"
+                )
+            if not isinstance(support_prim_path, str) or not support_prim_path.startswith("/"):
+                raise RuntimeError("diagnostic scene has no valid support prim path")
+            support_prim = stage.GetPrimAtPath(support_prim_path)
+            if not support_prim.IsValid():
+                raise RuntimeError(
+                    f"diagnostic support prim does not exist: {support_prim_path}"
+                )
+            support_aabb = np.asarray(
+                compute_aabb(
+                    create_bbox_cache(), support_prim_path, include_children=True
+                ),
+                dtype=np.float64,
+            )
+            if support_aabb.shape != (6,) or not np.all(np.isfinite(support_aabb)):
+                raise RuntimeError(f"invalid diagnostic support AABB: {support_aabb}")
+            support_checks = {
+                "support_is_static_collision_geometry": bool(
+                    support_prim.HasAPI(UsdPhysics.CollisionAPI)
+                    and not support_prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                ),
+                "support_starts_at_tabletop": bool(
+                    abs(float(support_aabb[2]) - table_top_z_m) <= 0.01
+                ),
+                "support_has_diagnostic_height": bool(
+                    float(support_aabb[5]) >= table_top_z_m + 0.03
+                ),
+                "target_remains_clear_of_table_after_settling": bool(
+                    float(target_aabb[2]) >= table_top_z_m + 0.01
+                ),
+                "target_is_near_support_top_after_settling": bool(
+                    float(target_aabb[2])
+                    <= float(support_aabb[5]) + 0.03
+                ),
+                "target_and_support_footprints_overlap": bool(
+                    target_aabb[0] <= support_aabb[3]
+                    and support_aabb[0] <= target_aabb[3]
+                    and target_aabb[1] <= support_aabb[4]
+                    and support_aabb[1] <= target_aabb[4]
+                ),
+            }
+            diagnostic_support = {
+                "kind": diagnostic_kind,
+                "prim_path": support_prim_path,
+                "aabb_world_m": support_aabb.astype(float).tolist(),
+                "automatic_checks": support_checks,
+            }
     runtime_target_checks = {
         "aabb_extent_is_positive": bool(np.all(target_extent > 1e-4)),
         "footprint_is_on_table": bool(
@@ -274,14 +334,18 @@ try:
             and target_aabb[4] <= table_max[1]
         ),
         "bottom_is_not_below_table": bool(target_aabb[2] >= table_top_z_m - 0.01),
-        "bottom_is_near_table_after_settling": bool(
-            target_aabb[2] <= table_top_z_m + 0.03
-        ),
     }
+    if diagnostic_support is None:
+        runtime_target_checks["bottom_is_near_table_after_settling"] = bool(
+            target_aabb[2] <= table_top_z_m + 0.03
+        )
+    else:
+        runtime_target_checks.update(diagnostic_support["automatic_checks"])
     target_asset["table_aabb_world_m"] = table_aabb.astype(float).tolist()
     target_asset["settled_aabb_world_m"] = target_aabb.astype(float).tolist()
     target_asset["settled_extent_m"] = target_extent.astype(float).tolist()
     target_asset["automatic_checks"] = runtime_target_checks
+    target_asset["diagnostic_support"] = diagnostic_support
 
     frame = camera.get_current_frame()
     rgba = frame.get("rgba")
