@@ -209,13 +209,26 @@ def plan_part_support_patch(
         axis = -axis
     lateral = np.array((-axis[1], axis[0]), dtype=np.float64)
 
-    half_width = 0.5 * support_width_m
-    expanded_half_width = half_width + grasp_projection_margin_m
+    requested_half_width = 0.5 * support_width_m
     best_count = -1
+    best_width = -np.inf
     best_clearance = -np.inf
     best_center_distance = np.inf
     best_center: np.ndarray | None = None
     for candidate in support_xy:
+        grasp_relative = grasp_xy - candidate[None, :]
+        grasp_axial = np.abs(grasp_relative @ axis)
+        grasp_lateral = np.abs(grasp_relative @ lateral)
+        nearest_grasp_linf = float(
+            np.min(np.maximum(grasp_axial, grasp_lateral))
+        )
+        half_width = min(
+            requested_half_width,
+            nearest_grasp_linf - grasp_projection_margin_m - 1e-9,
+        )
+        if half_width <= 0.0:
+            continue
+
         support_relative = support_xy - candidate[None, :]
         support_axial = np.abs(support_relative @ axis)
         support_lateral = np.abs(support_relative @ lateral)
@@ -225,14 +238,7 @@ def plan_part_support_patch(
                 & (support_lateral <= half_width)
             )
         )
-
-        grasp_relative = grasp_xy - candidate[None, :]
-        grasp_axial = np.abs(grasp_relative @ axis)
-        grasp_lateral = np.abs(grasp_relative @ lateral)
-        if np.any(
-            (grasp_axial <= expanded_half_width)
-            & (grasp_lateral <= expanded_half_width)
-        ):
+        if covered_support_count < 3:
             continue
 
         outside_axial = np.maximum(grasp_axial - half_width, 0.0)
@@ -241,10 +247,22 @@ def plan_part_support_patch(
             np.min(np.hypot(outside_axial, outside_lateral))
         )
         center_distance = float(np.linalg.norm(candidate - support_center))
-        score = (covered_support_count, footprint_clearance, -center_distance)
-        best_score = (best_count, best_clearance, -best_center_distance)
+        actual_width = 2.0 * half_width
+        score = (
+            covered_support_count,
+            actual_width,
+            footprint_clearance,
+            -center_distance,
+        )
+        best_score = (
+            best_count,
+            best_width,
+            best_clearance,
+            -best_center_distance,
+        )
         if score > best_score:
             best_count = covered_support_count
+            best_width = actual_width
             best_clearance = footprint_clearance
             best_center_distance = center_distance
             best_center = candidate.copy()
@@ -262,10 +280,10 @@ def plan_part_support_patch(
         support_center_xy_world_m=(float(best_center[0]), float(best_center[1])),
         support_axis_xy_world=(float(axis[0]), float(axis[1])),
         support_yaw_deg=yaw_deg,
-        support_length_m=float(support_width_m),
+        support_length_m=float(best_width),
         head_center_xy_world_m=(float(grasp_center[0]), float(grasp_center[1])),
         handle_center_xy_world_m=(float(support_center[0]), float(support_center[1])),
-        support_width_m=float(support_width_m),
+        support_width_m=float(best_width),
         head_projection_margin_m=float(grasp_projection_margin_m),
         nearest_head_projection_distance_m=nearest_grasp_distance,
         minimum_head_to_support_footprint_distance_m=float(best_clearance),

@@ -157,7 +157,11 @@ rerunning segmentation.  The complete blade mask is a conservative clearance
 proxy; the subsequent fresh pipeline may still request a grasp near the pivot.
 The patch policy selects the densest observed handle patch whose expanded
 footprint contains no observed blade point; it does not assume an elongated
-hammer-like handle. Hammer artifacts keep the default mapping and rail policy
+hammer-like handle. The requested 30 mm width is an upper bound: when needed,
+the patch is reduced to the largest data-derived width at that location that
+still covers at least three observed handle points and retains the fixed 5 mm
+blade margin. The requested and authored widths are both saved in the report.
+Hammer artifacts keep the default mapping and rail policy
 (`grasp_part` is clear, `receive_part` locates the support).
 
 After visually confirming the support placement, run a fresh zero-depth

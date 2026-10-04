@@ -39,7 +39,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.06,
     )
-    parser.add_argument("--support-width-m", type=float, default=0.03)
+    parser.add_argument(
+        "--support-width-m",
+        type=float,
+        default=0.03,
+        help="rail width, or maximum square width for part-mask-patch",
+    )
     parser.add_argument(
         "--grasp-part-projection-margin-m",
         "--head-projection-margin-m",
@@ -271,7 +276,7 @@ try:
     support_xform.SetScale(
         Gf.Vec3f(
             support_plan.support_length_m,
-            args.support_width_m,
+            support_plan.support_width_m,
             support_height_m,
         )
     )
@@ -377,9 +382,10 @@ try:
             "support_center_world_m": list(support_center),
             "support_size_m": [
                 support_plan.support_length_m,
-                args.support_width_m,
+                support_plan.support_width_m,
                 support_height_m,
             ],
+            "requested_support_width_m": args.support_width_m,
             "support_yaw_deg": support_plan.support_yaw_deg,
             "support_aabb_world_m": support_aabb.tolist(),
         },

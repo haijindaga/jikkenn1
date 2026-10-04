@@ -156,6 +156,33 @@ class SupportFixtureTests(unittest.TestCase):
                 target_lift_m=0.03,
             )
 
+    def test_part_patch_shrinks_to_mask_derived_safe_width(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.001, 0.03], [0.00, 0.00, 0.03], [0.00, 0.001, 0.03]]
+        )
+        support = np.array(
+            [
+                [0.015, -0.004, 0.02],
+                [0.015, 0.000, 0.02],
+                [0.015, 0.004, 0.02],
+                [0.017, -0.004, 0.02],
+                [0.017, 0.000, 0.02],
+                [0.017, 0.004, 0.02],
+            ]
+        )
+        plan = plan_part_support_patch(
+            grasp,
+            support,
+            support_width_m=0.03,
+            grasp_projection_margin_m=0.005,
+            target_lift_m=0.03,
+        )
+        self.assertLess(plan.support_width_m, 0.03)
+        self.assertGreater(plan.support_width_m, 0.015)
+        self.assertGreater(
+            plan.minimum_head_to_support_footprint_distance_m, 0.005
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
