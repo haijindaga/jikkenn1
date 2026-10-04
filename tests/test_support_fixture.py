@@ -51,8 +51,14 @@ class SupportFixtureTests(unittest.TestCase):
             head_projection_margin_m=0.005,
             target_lift_m=0.03,
         )
-        self.assertEqual(plan.support_center_xy_world_m, (0.02, 0.0))
-        self.assertGreater(plan.nearest_head_projection_distance_m, 0.015)
+        self.assertGreater(plan.support_center_xy_world_m[0], 0.02)
+        self.assertAlmostEqual(plan.support_center_xy_world_m[1], 0.0)
+        self.assertGreater(plan.support_length_m, 0.04)
+        self.assertAlmostEqual(abs(plan.support_axis_xy_world[0]), 1.0)
+        self.assertAlmostEqual(plan.support_axis_xy_world[1], 0.0)
+        self.assertGreater(
+            plan.minimum_head_to_support_footprint_distance_m, 0.005
+        )
         self.assertEqual(plan.target_lift_m, 0.03)
 
     def test_support_fails_when_every_handle_point_overlaps_head(self) -> None:
@@ -62,7 +68,7 @@ class SupportFixtureTests(unittest.TestCase):
         handle = np.array(
             [[0.001, 0.000, 0.02], [0.002, 0.000, 0.02], [0.003, 0.000, 0.02]]
         )
-        with self.assertRaisesRegex(ValueError, "without covering"):
+        with self.assertRaisesRegex(ValueError, "too short"):
             plan_handle_support(
                 head,
                 handle,

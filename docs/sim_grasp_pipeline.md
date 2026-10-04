@@ -80,11 +80,11 @@ python scripts/isaac_create_elevated_head_scene.py \
   --base-scene scenes/hammer_01.usda \
   --reference-capture outputs/hammer_head_handover_fixedjoint_e2e_v1/capture/camera_0 \
   --reference-segmentation outputs/hammer_head_handover_fixedjoint_e2e_v1/capture/sam3 \
-  --output scenes/hammer_head_handle_supported_v1.usda \
-  --head-clearance-m 0.03
+  --output scenes/hammer_head_handle_supported_v2.usda \
+  --head-clearance-m 0.06
 
 python scripts/isaac_open_stage.py \
-  --stage scenes/hammer_head_handle_supported_v1.usda \
+  --stage scenes/hammer_head_handle_supported_v2.usda \
   --view side
 ```
 
@@ -94,11 +94,11 @@ pipeline with fixed manual part prompts so only the support condition changes:
 
 ```bash
 python scripts/run_sim_grasp_pipeline.py \
-  --scene-usd scenes/hammer_head_handle_supported_v1.usda \
+  --scene-usd scenes/hammer_head_handle_supported_v2.usda \
   --prompt hammer \
   --grasp-part-prompt "hammer head" \
   --receive-part-prompt "hammer handle" \
-  --output outputs/hammer_head_handle_supported_e2e_v1 \
+  --output outputs/hammer_head_handle_supported_e2e_v2 \
   --allow-reviewed-support-contact-preflight
 ```
 
