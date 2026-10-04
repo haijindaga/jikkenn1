@@ -139,13 +139,23 @@ python scripts/isaac_create_elevated_head_scene.py \
   --output scenes/scissors_handles_supported_v1.usda \
   --target-clearance-m 0.06 \
   --object-label scissors \
-  --grasp-part-label "scissors blade near the pivot" \
-  --support-part-label "scissors handles"
+  --grasp-part-label "scissors blades" \
+  --support-part-label "scissors handles" \
+  --grasp-mask-role receive_part \
+  --support-mask-role grasp_part
 
 python scripts/isaac_open_stage.py \
   --stage scenes/scissors_handles_supported_v1.usda \
   --view side
 ```
+
+The historical `scissors_vlm_e2e_v1` artifact labels the handles as
+`grasp_part` and the blades as `receive_part`.  The two explicit mask-role
+arguments above reuse those reviewed masks without relabelling files or
+rerunning segmentation.  The complete blade mask is a conservative clearance
+proxy; the subsequent fresh pipeline may still request a grasp near the pivot.
+Hammer artifacts keep the default mapping
+(`grasp_part` is clear, `receive_part` locates the support).
 
 After visually confirming the support placement, run a fresh zero-depth
 baseline so that support geometry is the only experimental change:

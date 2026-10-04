@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -49,6 +50,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--object-label", default="hammer")
     parser.add_argument("--grasp-part-label", default="hammer head")
     parser.add_argument("--support-part-label", default="hammer handle")
+    parser.add_argument(
+        "--grasp-mask-role",
+        choices=("grasp_part", "receive_part"),
+        default="grasp_part",
+        help="saved SAM3 part role used as the grasp-clear region",
+    )
+    parser.add_argument(
+        "--support-mask-role",
+        choices=("grasp_part", "receive_part"),
+        default="receive_part",
+        help="saved SAM3 part role used to locate the support fixture",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -84,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     ):
         if not value.strip():
             parser.error(f"{label} must not be empty")
+    if args.grasp_mask_role == args.support_mask_role:
+        parser.error("--grasp-mask-role and --support-mask-role must differ")
     for value, label in (
         (args.target_prim, "--target-prim"),
         (args.table_prim, "--table-prim"),
@@ -126,10 +141,16 @@ try:
         if not (args.reference_capture / name).is_file():
             raise FileNotFoundError(args.reference_capture / name)
     head_mask_path = (
-        args.reference_segmentation / "parts" / "grasp_part" / "union_mask.npy"
+        args.reference_segmentation
+        / "parts"
+        / args.grasp_mask_role
+        / "union_mask.npy"
     )
     handle_mask_path = (
-        args.reference_segmentation / "parts" / "receive_part" / "union_mask.npy"
+        args.reference_segmentation
+        / "parts"
+        / args.support_mask_role
+        / "union_mask.npy"
     )
     for path in (head_mask_path, handle_mask_path):
         if not path.is_file():
@@ -314,9 +335,11 @@ try:
         "part_roles": {
             "object": args.object_label,
             "grasp_part": args.grasp_part_label,
+            "grasp_mask_role": args.grasp_mask_role,
             "support_part": (
                 f"{args.support_part_label} used only to locate support"
             ),
+            "support_mask_role": args.support_mask_role,
             "geometry_implementation_names": {
                 "head_points": "grasp_part",
                 "handle_points": "support_part",
@@ -356,5 +379,10 @@ try:
     print(json.dumps(report, indent=2), flush=True)
     print(f"saved: {args.output}", flush=True)
     print(f"saved: {report_path}", flush=True)
+except BaseException:
+    # Isaac Sim shutdown can hide a pending Python exception on some builds.
+    # Emit it before closing so a failed diagnostic never looks successful.
+    traceback.print_exc()
+    raise
 finally:
     simulation_app.close()
