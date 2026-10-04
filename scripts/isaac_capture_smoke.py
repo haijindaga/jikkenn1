@@ -275,7 +275,10 @@ try:
             "panda_handover:diagnostic_support_prim"
         )
         if diagnostic_kind is not None or support_prim_path is not None:
-            if diagnostic_kind != "handle-supported-head-clear":
+            if diagnostic_kind not in {
+                "handle-supported-head-clear",
+                "support-part-supported-grasp-clear",
+            }:
                 raise RuntimeError(
                     f"unsupported diagnostic scene kind: {diagnostic_kind!r}"
                 )

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Create a diagnostic hammer scene supported only below the handle.
+"""Create a diagnostic scene supported below a non-grasp object part.
 
-The source scene is copied to a new USD.  A fixed cuboid is placed below a
-support point derived from the saved handle segmentation, while the complete
-target is translated upward by the requested clearance.  The support footprint
-is required to remain outside the saved head-part projection.
+The source scene is copied to a new USD. A fixed cuboid is placed below a
+support point derived from the saved receive-part segmentation, while the
+complete target is translated upward. The support footprint must remain
+outside the saved grasp-part projection. Historical hammer option names remain
+accepted for reproducibility.
 """
 
 from __future__ import annotations
@@ -30,9 +31,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--table-prim", default="/World/Table")
     parser.add_argument("--support-prim", default="/World/HandleSupport")
-    parser.add_argument("--head-clearance-m", type=float, default=0.06)
+    parser.add_argument(
+        "--target-clearance-m",
+        "--head-clearance-m",
+        dest="target_clearance_m",
+        type=float,
+        default=0.06,
+    )
     parser.add_argument("--support-width-m", type=float, default=0.03)
-    parser.add_argument("--head-projection-margin-m", type=float, default=0.005)
+    parser.add_argument(
+        "--grasp-part-projection-margin-m",
+        "--head-projection-margin-m",
+        dest="grasp_part_projection_margin_m",
+        type=float,
+        default=0.005,
+    )
+    parser.add_argument("--object-label", default="hammer")
+    parser.add_argument("--grasp-part-label", default="hammer head")
+    parser.add_argument("--support-part-label", default="hammer handle")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -49,16 +65,25 @@ def parse_args() -> argparse.Namespace:
     if args.output.exists() and not args.overwrite:
         parser.error(f"output already exists: {args.output}; use --overwrite intentionally")
     for value, label in (
-        (args.head_clearance_m, "--head-clearance-m"),
+        (args.target_clearance_m, "--target-clearance-m"),
         (args.support_width_m, "--support-width-m"),
     ):
         if not math.isfinite(value) or value <= 0.0:
             parser.error(f"{label} must be positive and finite")
     if (
-        not math.isfinite(args.head_projection_margin_m)
-        or args.head_projection_margin_m < 0.0
+        not math.isfinite(args.grasp_part_projection_margin_m)
+        or args.grasp_part_projection_margin_m < 0.0
     ):
-        parser.error("--head-projection-margin-m must be finite and non-negative")
+        parser.error(
+            "--grasp-part-projection-margin-m must be finite and non-negative"
+        )
+    for value, label in (
+        (args.object_label, "--object-label"),
+        (args.grasp_part_label, "--grasp-part-label"),
+        (args.support_part_label, "--support-part-label"),
+    ):
+        if not value.strip():
+            parser.error(f"{label} must not be empty")
     for value, label in (
         (args.target_prim, "--target-prim"),
         (args.table_prim, "--table-prim"),
@@ -130,8 +155,8 @@ try:
         head_points_world,
         handle_points_world,
         support_width_m=args.support_width_m,
-        head_projection_margin_m=args.head_projection_margin_m,
-        target_lift_m=args.head_clearance_m,
+        head_projection_margin_m=args.grasp_part_projection_margin_m,
+        target_lift_m=args.target_clearance_m,
     )
 
     base_hash_before = _sha256(args.base_scene)
@@ -188,11 +213,11 @@ try:
     translation, _, _, _, _ = target_xform.GetXformVectors(Usd.TimeCode.Default())
     target_translation_before = np.asarray(translation, dtype=np.float64)
     target_translation_after = target_translation_before.copy()
-    target_translation_after[2] += args.head_clearance_m
+    target_translation_after[2] += args.target_clearance_m
     if not target_xform.SetTranslate(Gf.Vec3d(*target_translation_after.tolist())):
         raise RuntimeError("failed to translate target wrapper")
 
-    support_height_m = args.head_clearance_m
+    support_height_m = args.target_clearance_m
     support_center = (
         support_plan.support_center_xy_world_m[0],
         support_plan.support_center_xy_world_m[1],
@@ -217,7 +242,7 @@ try:
     UsdPhysics.CollisionAPI.Apply(support.GetPrim())
     world_prim = stage.GetPrimAtPath("/World")
     world_prim.SetCustomDataByKey(
-        "panda_handover:diagnostic_scene", "handle-supported-head-clear"
+        "panda_handover:diagnostic_scene", "support-part-supported-grasp-clear"
     )
     world_prim.SetCustomDataByKey(
         "panda_handover:diagnostic_support_prim", args.support_prim
@@ -237,7 +262,7 @@ try:
         "target_raised_by_requested_amount": bool(
             np.isclose(
                 target_aabb_after[2] - target_aabb_before[2],
-                args.head_clearance_m,
+                args.target_clearance_m,
                 atol=1e-5,
                 rtol=0.0,
             )
@@ -248,14 +273,14 @@ try:
         "support_top_matches_target_lift": bool(
             np.isclose(
                 support_aabb[5],
-                table_top_z_m + args.head_clearance_m,
+                table_top_z_m + args.target_clearance_m,
                 atol=1e-5,
                 rtol=0.0,
             )
         ),
         "support_footprint_excludes_saved_head_projection": bool(
             support_plan.minimum_head_to_support_footprint_distance_m
-            > args.head_projection_margin_m
+            > args.grasp_part_projection_margin_m
         ),
         "support_is_static_collision_geometry": bool(
             support.GetPrim().HasAPI(UsdPhysics.CollisionAPI)
@@ -278,8 +303,8 @@ try:
     report = {
         "status": "success",
         "purpose": (
-            "controlled simulation-only test of whether tabletop clearance limits "
-            "hammer-head grasp insertion"
+            "controlled simulation-only test of whether tabletop clearance "
+            f"limits {args.grasp_part_label} grasp insertion"
         ),
         "source_scene": str(args.base_scene),
         "source_scene_sha256": base_hash_before,
@@ -287,8 +312,15 @@ try:
         "reference_capture": str(args.reference_capture),
         "reference_segmentation": str(args.reference_segmentation),
         "part_roles": {
-            "grasp_part": "hammer head",
-            "receive_part": "hammer handle used only to locate support",
+            "object": args.object_label,
+            "grasp_part": args.grasp_part_label,
+            "support_part": (
+                f"{args.support_part_label} used only to locate support"
+            ),
+            "geometry_implementation_names": {
+                "head_points": "grasp_part",
+                "handle_points": "support_part",
+            },
         },
         "support_plan": support_plan.as_dict(),
         "authored": {
@@ -314,8 +346,9 @@ try:
         "manual_review_required": True,
         "next_gate": (
             "Open the scene without playing physics, confirm the block is below "
-            "the handle and not the head, then run a fresh capture and pipeline. "
-            "The post-settle head clearance must be visually reviewed."
+            f"the {args.support_part_label} and not the {args.grasp_part_label}, "
+            "then run a fresh capture and pipeline. The post-settle grasp-part "
+            "clearance must be visually reviewed."
         ),
     }
     report_path = args.output.with_suffix(args.output.suffix + ".check.json")

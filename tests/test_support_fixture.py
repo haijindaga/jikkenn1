@@ -15,10 +15,16 @@ class SupportFixtureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('"--base-scene"', source)
         self.assertIn('"--reference-segmentation"', source)
+        self.assertIn('"--target-clearance-m"', source)
+        self.assertIn('"--head-clearance-m"', source)
+        self.assertIn('"--object-label"', source)
+        self.assertIn('"--grasp-part-label"', source)
+        self.assertIn('"--support-part-label"', source)
         self.assertIn('"parts" / "grasp_part" / "union_mask.npy"', source)
         self.assertIn('"parts" / "receive_part" / "union_mask.npy"', source)
         self.assertIn("UsdPhysics.CollisionAPI.Apply", source)
         self.assertIn('"panda_handover:diagnostic_support_prim"', source)
+        self.assertIn('"support-part-supported-grasp-clear"', source)
         self.assertIn('"source_scene_modified": False', source)
         self.assertIn('"candidate_or_planner_parameters_changed": False', source)
 
@@ -28,6 +34,7 @@ class SupportFixtureTests(unittest.TestCase):
             / "isaac_capture_smoke.py"
         ).read_text(encoding="utf-8")
         self.assertIn('"handle-supported-head-clear"', capture_source)
+        self.assertIn('"support-part-supported-grasp-clear"', capture_source)
         self.assertIn(
             '"target_remains_clear_of_table_after_settling"', capture_source
         )

@@ -127,6 +127,39 @@ behavior.  Each plan directory saves both the original and adjusted transforms
 for a controlled comparison.  A depth-refined run must be replanned; an old
 trajectory cannot be reused for this comparison.
 
+The same geometry-derived fixture can be used for scissors without changing
+candidate generation or planner settings. Here the segmented handles locate
+the support rail and the segmented blade/pivot grasp region must remain clear:
+
+```bash
+python scripts/isaac_create_elevated_head_scene.py \
+  --base-scene scenes/scissors_01.usda \
+  --reference-capture outputs/scissors_vlm_e2e_v1/capture/camera_0 \
+  --reference-segmentation outputs/scissors_vlm_e2e_v1/capture/sam3 \
+  --output scenes/scissors_handles_supported_v1.usda \
+  --target-clearance-m 0.06 \
+  --object-label scissors \
+  --grasp-part-label "scissors blade near the pivot" \
+  --support-part-label "scissors handles"
+
+python scripts/isaac_open_stage.py \
+  --stage scenes/scissors_handles_supported_v1.usda \
+  --view side
+```
+
+After visually confirming the support placement, run a fresh zero-depth
+baseline so that support geometry is the only experimental change:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/scissors_handles_supported_v1.usda \
+  --prompt scissors \
+  --grasp-part-prompt "scissors blade near the pivot" \
+  --receive-part-prompt "scissors handles" \
+  --output outputs/scissors_handles_supported_e2e_v1 \
+  --allow-reviewed-support-contact-preflight
+```
+
 ## Static visual receiver
 
 For presentation-only handover scenes, compose the official Isaac Sim 5.1 1X
