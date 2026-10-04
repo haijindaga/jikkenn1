@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from pathlib import Path
-
 import numpy as np
 
 
@@ -23,15 +21,17 @@ STATE_COLORS_RGB = {
 }
 
 
-def require_gripper_visual_mesh(asset_directory: str | Path) -> Path:
-    """Return the official canonical visual mesh, rejecting missing LFS data."""
+def representative_gripper_mesh(gripper: object) -> object:
+    """Return the canonical mesh used by GraspGenX for a grasp transform."""
 
-    path = Path(asset_directory) / "vis_mesh.obj"
-    if not path.is_file() or path.stat().st_size == 0:
-        raise FileNotFoundError(f"official gripper visual mesh is missing: {path}")
-    if b"git-lfs.github.com/spec" in path.read_bytes()[:256]:
-        raise ValueError(f"official gripper visual mesh is still a Git LFS pointer: {path}")
-    return path
+    mesh = getattr(gripper, "collision_mesh", None)
+    if (
+        mesh is None
+        or len(mesh.vertices) == 0
+        or len(mesh.faces) == 0
+    ):
+        raise ValueError("official GraspGenX gripper collision mesh is empty")
+    return mesh
 
 
 def resolve_saved_gripper_identity(

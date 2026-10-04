@@ -1,6 +1,5 @@
 import unittest
-import tempfile
-from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -11,7 +10,7 @@ from panda_handover.grasp_visualization import (
     STATIC_COLLISION_FREE,
     STATIC_COLLISION_REJECTED,
     classify_candidate_states,
-    require_gripper_visual_mesh,
+    representative_gripper_mesh,
     resolve_saved_gripper_identity,
     state_counts,
     verify_saved_world_grasps,
@@ -19,21 +18,29 @@ from panda_handover.grasp_visualization import (
 
 
 class GraspCandidateVisualizationTests(unittest.TestCase):
-    def test_requires_real_official_visual_mesh(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            mesh = root / "vis_mesh.obj"
-            with self.assertRaises(FileNotFoundError):
-                require_gripper_visual_mesh(root)
-            mesh.write_text(
-                "version https://git-lfs.github.com/spec/v1\n"
-                "oid sha256:deadbeef\nsize 1234\n",
-                encoding="utf-8",
+    def test_representative_mesh_uses_graspgenx_collision_mesh(self) -> None:
+        collision_mesh = SimpleNamespace(
+            vertices=np.zeros((3, 3)),
+            faces=np.zeros((1, 3), dtype=np.int64),
+        )
+        unrelated_visual_mesh = object()
+        gripper = SimpleNamespace(
+            collision_mesh=collision_mesh,
+            visual_mesh=unrelated_visual_mesh,
+        )
+
+        self.assertIs(representative_gripper_mesh(gripper), collision_mesh)
+
+    def test_representative_mesh_rejects_empty_collision_mesh(self) -> None:
+        gripper = SimpleNamespace(
+            collision_mesh=SimpleNamespace(
+                vertices=np.zeros((0, 3)),
+                faces=np.zeros((0, 3), dtype=np.int64),
             )
-            with self.assertRaisesRegex(ValueError, "Git LFS pointer"):
-                require_gripper_visual_mesh(root)
-            mesh.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
-            self.assertEqual(require_gripper_visual_mesh(root), mesh)
+        )
+
+        with self.assertRaisesRegex(ValueError, "collision mesh is empty"):
+            representative_gripper_mesh(gripper)
 
     def test_legacy_reports_resolve_to_historical_franka_default(self) -> None:
         self.assertEqual(
