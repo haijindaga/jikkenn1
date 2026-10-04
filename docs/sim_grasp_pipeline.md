@@ -106,6 +106,27 @@ This is a simulation-only controlled diagnostic, not a proposed deployment
 fixture.  Candidate generation, scores, collision thresholds, cuRobo settings,
 and finger drives remain unchanged relative to the baseline command.
 
+If visual review shows that the final grasp is shallow, rerun into a new output
+with one common tool-frame depth refinement.  For example, the following adds
+10 mm along every candidate's GraspGenX canonical approach axis; it does not
+change the 150 mm pre-grasp approach distance or tune individual candidates:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/hammer_head_handle_supported_v2.usda \
+  --prompt hammer \
+  --grasp-part-prompt "hammer head" \
+  --receive-part-prompt "hammer handle" \
+  --output outputs/hammer_head_handle_supported_depth10mm_e2e_v1 \
+  --grasp-depth-offset-m 0.010 \
+  --allow-reviewed-support-contact-preflight
+```
+
+The default is `0.0`, so existing commands and artifacts keep their historical
+behavior.  Each plan directory saves both the original and adjusted transforms
+for a controlled comparison.  A depth-refined run must be replanned; an old
+trajectory cannot be reused for this comparison.
+
 ## Static visual receiver
 
 For presentation-only handover scenes, compose the official Isaac Sim 5.1 1X

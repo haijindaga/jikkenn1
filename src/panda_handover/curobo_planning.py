@@ -457,6 +457,29 @@ def prepare_pregrasp_goalset(
     )
 
 
+def offset_grasp_depth_tool_z(
+    grasp_transforms: np.ndarray, depth_offset_m: float
+) -> np.ndarray:
+    """Move final grasps deeper along GraspGenX's canonical tool +Z axis.
+
+    The operation changes translation only.  A zero offset is an exact copy of
+    the input and preserves the historical planning behavior.
+    """
+    transforms = np.asarray(grasp_transforms)
+    if transforms.ndim != 3 or transforms.shape[1:] != (4, 4) or len(transforms) == 0:
+        raise ValueError(
+            f"grasp_transforms must have non-empty shape (N,4,4), got {transforms.shape}"
+        )
+    if not np.isfinite(depth_offset_m) or depth_offset_m < 0.0:
+        raise ValueError("depth_offset_m must be finite and non-negative")
+    for index, transform in enumerate(transforms):
+        _require_rigid_transform(transform, label=f"grasp_transforms[{index}]")
+
+    adjusted = transforms.copy()
+    adjusted[:, :3, 3] += transforms[:, :3, 2] * float(depth_offset_m)
+    return adjusted
+
+
 def rotation_matrix_to_quaternion_wxyz(rotations: np.ndarray) -> np.ndarray:
     """Convert one or more proper rotation matrices to normalized wxyz quaternions."""
     values = np.asarray(rotations, dtype=np.float64)

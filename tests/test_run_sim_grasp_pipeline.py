@@ -72,6 +72,10 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             "--allow-reviewed-support-contact-preflight",
             stages["curobo_grasp_lift_trials"].command,
         )
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertEqual(
+            planner[planner.index("--grasp-depth-offset-m") + 1], "0.0"
+        )
         self.assertIn("--prompt", stages["sam3_segmentation"].command)
         infer = stages["graspgenx_inference"].command
         self.assertEqual(

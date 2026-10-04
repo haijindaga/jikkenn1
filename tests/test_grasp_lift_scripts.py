@@ -379,6 +379,10 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('default=5', planner_runner)
         self.assertIn('"--source-candidate-index"', planner_runner)
         self.assertIn('"candidate_specific_parameter_tuning": False', planner_runner)
+        self.assertIn('"--grasp-depth-offset-m"', planner_runner)
+        self.assertIn(
+            '"grasp_depth_offset_m_for_every_candidate"', planner_runner
+        )
         self.assertIn('default="isaaclab-franka"', replay_runner)
         self.assertIn('"--finger-drive-scale"', replay_runner)
         self.assertIn('"--visual-only-receiver-prim"', replay_runner)

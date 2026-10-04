@@ -12,6 +12,7 @@ from panda_handover.curobo_planning import (
     load_backend_a_esdf,
     load_conservative_esdf,
     load_singleview_observed_pointcloud,
+    offset_grasp_depth_tool_z,
     prepare_pregrasp_goalset,
     rotation_matrix_to_quaternion_wxyz,
     quaternion_orientation_deviation_rad,
@@ -70,6 +71,29 @@ def _backend_a_optimistic_report(shape=(2, 3, 4), voxel=0.1):
 
 
 class CuroboPlanningTests(unittest.TestCase):
+    def test_grasp_depth_offset_follows_each_tools_positive_z_axis(self):
+        transforms = np.repeat(np.eye(4)[None], 2, axis=0)
+        transforms[0, :3, 3] = [0.4, 0.1, 0.2]
+        transforms[1, :3, :3] = np.array(
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
+        )
+        transforms[1, :3, 3] = [0.2, -0.1, 0.3]
+
+        adjusted = offset_grasp_depth_tool_z(transforms, 0.01)
+
+        np.testing.assert_allclose(adjusted[0, :3, 3], [0.4, 0.1, 0.21])
+        np.testing.assert_allclose(adjusted[1, :3, 3], [0.21, -0.1, 0.3])
+        np.testing.assert_allclose(adjusted[:, :3, :3], transforms[:, :3, :3])
+        np.testing.assert_allclose(transforms[0, :3, 3], [0.4, 0.1, 0.2])
+
+    def test_zero_grasp_depth_offset_is_a_copy_and_negative_is_rejected(self):
+        transforms = np.eye(4)[None]
+        adjusted = offset_grasp_depth_tool_z(transforms, 0.0)
+        np.testing.assert_array_equal(adjusted, transforms)
+        self.assertIsNot(adjusted, transforms)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            offset_grasp_depth_tool_z(transforms, -0.001)
+
     def test_observed_pointcloud_loader_requires_reviewed_single_view_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

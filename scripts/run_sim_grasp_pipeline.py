@@ -106,6 +106,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-pregrasp-candidates", type=int, default=100)
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
+        "--grasp-depth-offset-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Simulation-only common final-grasp refinement along GraspGenX "
+            "canonical tool +Z; default 0 preserves existing behavior"
+        ),
+    )
+    parser.add_argument(
         "--handover-goal-position-robot-base-m",
         type=float,
         nargs=3,
@@ -241,6 +250,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--topk cannot exceed --num-grasps")
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if not math.isfinite(args.grasp_depth_offset_m) or args.grasp_depth_offset_m < 0.0:
+        parser.error("--grasp-depth-offset-m must be finite and non-negative")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
         parser.error("--finger-drive-scale must be positive and finite")
     if args.visual_only_receiver_prim is not None and not (
@@ -684,6 +695,8 @@ def build_stages(
         str(paths.plan_trials),
         "--max-physical-trials",
         str(args.max_physical_trials),
+        "--grasp-depth-offset-m",
+        str(args.grasp_depth_offset_m),
     ]
     if args.allow_reviewed_support_contact_preflight:
         plan_trials_command.append("--allow-reviewed-support-contact-preflight")
@@ -884,6 +897,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             "collision_threshold_m": args.collision_threshold,
             "max_pregrasp_candidates": args.max_pregrasp_candidates,
             "max_physical_trials": args.max_physical_trials,
+            "grasp_depth_offset_m": args.grasp_depth_offset_m,
+            "grasp_depth_axis": "GraspGenX canonical tool +Z",
+            "grasp_depth_policy": "same explicit offset for every candidate",
             "handover_goal_position_robot_base_m": (
                 list(args.handover_goal_position_robot_base_m)
                 if args.handover_goal_position_robot_base_m is not None

@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
     parser.add_argument(
+        "--grasp-depth-offset-m",
+        type=float,
+        default=0.0,
+        help="Apply one common tool +Z depth offset to every candidate",
+    )
+    parser.add_argument(
         "--handover-goal-position-robot-base-m",
         type=float,
         nargs=3,
@@ -76,6 +82,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-physical-trials must be positive")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
+    if not np.isfinite(args.grasp_depth_offset_m) or args.grasp_depth_offset_m < 0.0:
+        parser.error("--grasp-depth-offset-m must be finite and non-negative")
     if args.diagnostic_gravity_tilt_tolerance_deg is not None and (
         not np.isfinite(args.diagnostic_gravity_tilt_tolerance_deg)
         or not 0.0 < args.diagnostic_gravity_tilt_tolerance_deg <= 90.0
@@ -167,6 +175,8 @@ def main() -> int:
             "candidate_order": "pregrasp score order",
             "maximum_physical_trials": args.max_physical_trials,
             "candidate_specific_parameter_tuning": False,
+            "grasp_depth_offset_m_for_every_candidate": args.grasp_depth_offset_m,
+            "grasp_depth_axis": "GraspGenX canonical tool +Z",
             "excluded_previously_evaluated_source_candidate_indices": (
                 args.exclude_source_candidate_index
             ),
@@ -241,6 +251,8 @@ def main() -> int:
             args.device,
             "--lift-offset",
             str(args.lift_offset),
+            "--grasp-depth-offset-m",
+            str(args.grasp_depth_offset_m),
             "--max-attempts",
             str(args.max_attempts),
         ]

@@ -37,6 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--lift-offset", type=float, default=0.15)
+    parser.add_argument(
+        "--grasp-depth-offset-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Simulation-only common refinement applied to every final grasp: "
+            "translate along GraspGenX canonical tool +Z. Default 0 preserves "
+            "the reviewed candidate poses unchanged."
+        ),
+    )
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument(
         "--source-candidate-index",
@@ -670,6 +680,8 @@ def main() -> int:
     args = parse_args()
     if not np.isfinite(args.lift_offset) or args.lift_offset <= 0.0:
         raise ValueError("--lift-offset must be positive and finite")
+    if not np.isfinite(args.grasp_depth_offset_m) or args.grasp_depth_offset_m < 0.0:
+        raise ValueError("--grasp-depth-offset-m must be finite and non-negative")
     if args.max_attempts <= 0:
         raise ValueError("--max-attempts must be positive")
     if args.diagnostic_gravity_tilt_tolerance_deg is not None and (
@@ -730,6 +742,7 @@ def main() -> int:
     from panda_handover.curobo_bridge import select_named_joint_positions
     from panda_handover.curobo_planning import (
         load_singleview_observed_pointcloud,
+        offset_grasp_depth_tool_z,
         quaternion_orientation_deviation_rad,
         rotation_matrix_to_quaternion_wxyz,
         summarize_ik_result_arrays,
@@ -808,6 +821,10 @@ def main() -> int:
         candidate_scores,
         args.source_candidate_index,
     )
+    original_grasp_transforms = grasp_transforms.copy()
+    grasp_transforms = offset_grasp_depth_tool_z(
+        grasp_transforms, args.grasp_depth_offset_m
+    ).astype(np.float32, copy=False)
     prepared_map_value = pregrasp_report.get("inputs", {}).get("prepared_map")
     if not isinstance(prepared_map_value, str) or not prepared_map_value:
         raise ValueError("source pre-grasp report has no prepared_map provenance")
@@ -898,6 +915,16 @@ def main() -> int:
     device_cfg = DeviceCfg(device=torch.device(args.device), dtype=torch.float32)
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
+    np.save(
+        output / "original_grasp_transforms_robot_base.npy",
+        original_grasp_transforms,
+        allow_pickle=False,
+    )
+    np.save(
+        output / "depth_adjusted_grasp_transforms_robot_base.npy",
+        grasp_transforms,
+        allow_pickle=False,
+    )
     # Recreate the exact in-memory representation used by the successful
     # pre-grasp planner.  Do not round-trip Mesh.from_pointcloud through OBJ:
     # that adds a trimesh parser/exporter boundary that cuRobo does not need.
@@ -1229,6 +1256,8 @@ def main() -> int:
                     "planner_config_policy": "GraspGenX end2end official defaults",
                     "max_attempts": args.max_attempts,
                     "candidate_count": int(len(grasp_transforms)),
+                    "grasp_depth_offset_m": args.grasp_depth_offset_m,
+                    "grasp_depth_axis": "GraspGenX canonical tool +Z",
                     "planner_parameters_changed_for_diagnosis": False,
                     "reviewed_support_contact_opt_in": bool(
                         args.allow_reviewed_support_contact_preflight
@@ -1322,6 +1351,8 @@ def main() -> int:
                 "approach_offset_m": float(
                     pregrasp_report["parameters"]["approach_offset_m"]
                 ),
+                "grasp_depth_offset_m": args.grasp_depth_offset_m,
+                "grasp_depth_axis": "GraspGenX canonical tool +Z",
                 "lift_offset_m": args.lift_offset,
                 "candidate_count": int(len(grasp_transforms)),
                 "support_contact_preflight": support_contact_preflight,
@@ -1774,6 +1805,10 @@ def main() -> int:
                     "orientation_policy": handover_orientation_policy,
                     "affordance_geometry": handover_goal_diagnostics,
                 },
+                "grasp_depth_refinement": {
+                    "offset_m": args.grasp_depth_offset_m,
+                    "axis": "GraspGenX canonical tool +Z",
+                },
                 "planner_status": str(
                     getattr(transport_result, "status", "plan_pose returned no result")
                 ),
@@ -1935,6 +1970,10 @@ def main() -> int:
                         ),
                     },
                     "orientation_validation": orientation_validation,
+                    "grasp_depth_refinement": {
+                        "offset_m": args.grasp_depth_offset_m,
+                        "axis": "GraspGenX canonical tool +Z",
+                    },
                     "safety": {
                         "trajectory_saved": True,
                         "trajectory_accepted": False,
@@ -2067,6 +2106,9 @@ def main() -> int:
             "approach_offset_m": float(
                 pregrasp_report["parameters"]["approach_offset_m"]
             ),
+            "grasp_depth_offset_m": args.grasp_depth_offset_m,
+            "grasp_depth_axis": "GraspGenX canonical tool +Z",
+            "grasp_depth_policy": "same explicit offset for every candidate",
             "lift_axis": "robot-base/world +Z",
             "lift_offset_m": args.lift_offset,
             "temporarily_disabled_grasp_contact_links": contact_collision_links,
