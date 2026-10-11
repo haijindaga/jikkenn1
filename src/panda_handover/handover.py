@@ -291,6 +291,87 @@ def generate_gravity_tilt_preserving_handover_goals(
     return np.asarray(goals, dtype=np.float32), diagnostics
 
 
+def order_handover_goals_by_receive_direction(
+    goal_transforms_robot_base: np.ndarray,
+    grasp_transform_robot_base: np.ndarray,
+    grasp_part_points_robot_base: np.ndarray,
+    receive_part_points_robot_base: np.ndarray,
+    human_direction_robot_base: Iterable[float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Order an existing goalset by direct geometric handover alignment.
+
+    This does not generate a new orientation, assign a weighted score, or
+    reject a goal using a tuned threshold. It stably orders the existing goals
+    by the horizontal angle from the presented receive-part axis to the human.
+    """
+
+    goals = np.asarray(goal_transforms_robot_base, dtype=np.float64)
+    if (
+        goals.ndim != 3
+        or goals.shape[1:] != (4, 4)
+        or len(goals) == 0
+        or not np.isfinite(goals).all()
+    ):
+        raise ValueError("goal transforms must have finite shape (N,4,4)")
+    grasp_transform = np.asarray(grasp_transform_robot_base, dtype=np.float64)
+    if grasp_transform.shape != (4, 4) or not np.isfinite(grasp_transform).all():
+        raise ValueError("grasp_transform_robot_base must be a finite 4x4 matrix")
+
+    grasp_points = _points(grasp_part_points_robot_base, name="grasp part points")
+    receive_points = _points(receive_part_points_robot_base, name="receive part points")
+    human_direction = _unit(
+        np.asarray(tuple(human_direction_robot_base), dtype=np.float64),
+        name="human direction",
+    )
+    human_horizontal = human_direction.copy()
+    human_horizontal[2] = 0.0
+    human_horizontal = _unit(human_horizontal, name="horizontal human direction")
+
+    grasp_rotation = grasp_transform[:3, :3]
+    grasp_translation = grasp_transform[:3, 3]
+    grasp_center_hand = grasp_rotation.T @ (
+        np.median(grasp_points, axis=0) - grasp_translation
+    )
+    receive_center_hand = grasp_rotation.T @ (
+        np.median(receive_points, axis=0) - grasp_translation
+    )
+    part_axis_hand = receive_center_hand - grasp_center_hand
+
+    errors = []
+    presented_directions = []
+    for goal in goals:
+        presented = goal[:3, :3] @ part_axis_hand
+        presented[2] = 0.0
+        presented = _unit(
+            presented, name="horizontal presented grasp-to-receive part axis"
+        )
+        cosine = float(np.clip(np.dot(presented, human_horizontal), -1.0, 1.0))
+        errors.append(float(np.arccos(cosine)))
+        presented_directions.append(presented.tolist())
+
+    errors_array = np.asarray(errors, dtype=np.float64)
+    order = np.argsort(errors_array, kind="stable")
+    report: dict[str, Any] = {
+        "policy": (
+            "planner feasibility with existing yaw goals attempted in ascending "
+            "receive-direction angle"
+        ),
+        "metric": "horizontal angular error to supplied human direction",
+        "weighted_score_used": False,
+        "candidate_specific_tuning": False,
+        "angular_acceptance_threshold_used": False,
+        "human_direction_robot_base": human_direction.tolist(),
+        "horizontal_human_direction_robot_base": human_horizontal.tolist(),
+        "original_goal_indices_in_attempt_order": order.tolist(),
+        "alignment_error_rad_in_attempt_order": errors_array[order].tolist(),
+        "alignment_error_deg_in_attempt_order": np.rad2deg(
+            errors_array[order]
+        ).tolist(),
+        "presented_horizontal_directions_in_original_order": presented_directions,
+    }
+    return goals[order].astype(np.float32), report
+
+
 def generate_directional_gravity_tilt_handover_goal(
     grasp_transform_robot_base: np.ndarray,
     grasp_part_points_robot_base: np.ndarray,

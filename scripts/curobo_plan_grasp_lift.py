@@ -130,9 +130,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Simulation-only paper-inspired mode: use cuRobo ToolPoseCriteria "
             "as a non-terminal orientation soft cost, preserve gravity tilt "
-            "across the common uniform yaw goalset, and rank rather than "
-            "hard-reject trajectories by the default 2 degree check. Human-"
-            "direction alignment is intentionally deferred to a separate gate."
+            "across the common uniform yaw goalset, try that goalset in direct "
+            "receive-direction alignment order, and rank rather than hard-reject "
+            "trajectories by the default 2 degree check."
         ),
     )
     return parser.parse_args()
@@ -770,6 +770,7 @@ def main() -> int:
         generate_gravity_tilt_preserving_handover_goals,
         generate_orientation_preserving_handover_goal,
         gravity_tilt_deviation_rad,
+        order_handover_goals_by_receive_direction,
         orientation_soft_cost,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
@@ -1732,14 +1733,28 @@ def main() -> int:
                     )
                 )
                 if args.semantic_orientation_cost:
+                    handover_goal_transforms, direction_priority = (
+                        order_handover_goals_by_receive_direction(
+                            handover_goal_transforms,
+                            grasp_transforms[selected_rank],
+                            grasp_part_robot_base,
+                            receive_part_robot_base,
+                            handover_human_direction,
+                        )
+                    )
                     handover_goal_diagnostics["staged_validation"] = {
-                        "current_gate": "gravity_tilt_feasibility",
+                        "current_gate": "gravity_tilt_then_direction_priority",
                         "human_direction_alignment_enforced": False,
+                        "human_direction_priority_enforced": True,
                         "reason": (
-                            "separate tilt feasibility from receive-part direction "
-                            "before combining constraints"
+                            "try the unchanged gravity-tilt yaw goalset in direct "
+                            "geometric alignment order without an angular acceptance "
+                            "threshold or weighted scoring"
                         ),
                     }
+                    handover_goal_diagnostics["direction_priority"] = (
+                        direction_priority
+                    )
             else:
                 handover_goal_transforms, handover_goal_diagnostics = (
                     generate_affordance_handover_goals(
@@ -1783,17 +1798,16 @@ def main() -> int:
                 handover_orientation_policy = "explicit_quaternion_wxyz"
             handover_goal_positions = handover_goal_position[None, :]
             handover_goal_quaternions = handover_goal_quaternion[None, :]
-        handover_goal = GoalToolPose(
-            tool_frames=planner.tool_frames,
-            position=torch.from_numpy(handover_goal_positions).to(device_cfg.device)[
-                None, None, None, :, :
-            ],
-            quaternion=torch.from_numpy(handover_goal_quaternions).to(
-                device_cfg.device
-            )[
-                None, None, None, :, :
-            ],
-        )
+        def goal_tool_pose(goal_indices: slice) -> GoalToolPose:
+            return GoalToolPose(
+                tool_frames=planner.tool_frames,
+                position=torch.from_numpy(
+                    handover_goal_positions[goal_indices]
+                ).to(device_cfg.device)[None, None, None, :, :],
+                quaternion=torch.from_numpy(
+                    handover_goal_quaternions[goal_indices]
+                ).to(device_cfg.device)[None, None, None, :, :],
+            )
         semantic_orientation_cost_report = None
         if args.semantic_orientation_cost:
             # cuRobo V2 uses position-first axis factors:
@@ -1834,26 +1848,81 @@ def main() -> int:
                 "non_terminal_pose_axes_weight_factor": non_terminal_axes,
                 "project_distance_to_goal": False,
                 "candidate_specific_weights": False,
+                "goal_selection": (
+                    "try existing yaw goals in ascending receive-direction "
+                    "angle and accept the first planner-feasible goal"
+                    if transport_orientation_policy == "preserve_gravity_tilt"
+                    else "single goal or standard cuRobo goalset selection"
+                ),
                 "paper_relation": (
                     "planner-level soft orientation cost inspired by arXiv:2410.15185; "
                     "not a reproduction of its online 45 Hz QP safety filter"
                 ),
             }
-        planner.reset_seed()
-        transport_started = time.monotonic()
-        transport_result = planner.plan_pose(
-            current_state=lift_end,
-            goal_tool_poses=handover_goal,
-            max_attempts=args.max_attempts,
+        sequential_direction_selection = bool(
+            args.semantic_orientation_cost
+            and automatic_handover
+            and transport_orientation_policy == "preserve_gravity_tilt"
         )
-        transport_elapsed_s = time.monotonic() - transport_started
-        transport_success = bool(
-            transport_result is not None
-            and transport_result.success is not None
-            and transport_result.success.any().item()
-        )
+        transport_planning_attempts = []
+        transport_result = None
+        transport_success = False
         selected_transport_goal_rank = None
-        if transport_success:
+        transport_elapsed_s = 0.0
+        if sequential_direction_selection:
+            for goal_rank in range(len(handover_goal_positions)):
+                planner.reset_seed()
+                transport_started = time.monotonic()
+                transport_result = planner.plan_pose(
+                    current_state=lift_end,
+                    goal_tool_poses=goal_tool_pose(slice(goal_rank, goal_rank + 1)),
+                    max_attempts=args.max_attempts,
+                )
+                attempt_elapsed_s = time.monotonic() - transport_started
+                transport_elapsed_s += attempt_elapsed_s
+                transport_success = bool(
+                    transport_result is not None
+                    and transport_result.success is not None
+                    and transport_result.success.any().item()
+                )
+                transport_planning_attempts.append(
+                    {
+                        "attempt_rank": goal_rank,
+                        "planner_reported_success": transport_success,
+                        "wall_time_s": attempt_elapsed_s,
+                        "planner_status": str(
+                            getattr(transport_result, "status", "no result")
+                        ),
+                    }
+                )
+                if transport_success:
+                    selected_transport_goal_rank = goal_rank
+                    break
+        else:
+            planner.reset_seed()
+            transport_started = time.monotonic()
+            transport_result = planner.plan_pose(
+                current_state=lift_end,
+                goal_tool_poses=goal_tool_pose(slice(None)),
+                max_attempts=args.max_attempts,
+            )
+            transport_elapsed_s = time.monotonic() - transport_started
+            transport_success = bool(
+                transport_result is not None
+                and transport_result.success is not None
+                and transport_result.success.any().item()
+            )
+            transport_planning_attempts.append(
+                {
+                    "attempt_rank": 0,
+                    "planner_reported_success": transport_success,
+                    "wall_time_s": transport_elapsed_s,
+                    "planner_status": str(
+                        getattr(transport_result, "status", "no result")
+                    ),
+                }
+            )
+        if transport_success and not sequential_direction_selection:
             goalset_index = getattr(transport_result, "goalset_index", None)
             if goalset_index is not None:
                 selected_transport_goal_rank = int(
@@ -1865,6 +1934,36 @@ def main() -> int:
                 0 <= selected_transport_goal_rank < len(handover_goal_positions)
             ):
                 selected_transport_goal_rank = None
+        selected_direction_priority = None
+        direction_priority = handover_goal_diagnostics.get("direction_priority", {})
+        if selected_transport_goal_rank is not None and direction_priority:
+            original_indices = direction_priority.get(
+                "original_goal_indices_in_attempt_order", []
+            )
+            errors_rad = direction_priority.get(
+                "alignment_error_rad_in_attempt_order", []
+            )
+            errors_deg = direction_priority.get(
+                "alignment_error_deg_in_attempt_order", []
+            )
+            if (
+                selected_transport_goal_rank < len(original_indices)
+                and selected_transport_goal_rank < len(errors_rad)
+                and selected_transport_goal_rank < len(errors_deg)
+            ):
+                selected_direction_priority = {
+                    "attempt_rank": selected_transport_goal_rank,
+                    "original_goal_index": int(
+                        original_indices[selected_transport_goal_rank]
+                    ),
+                    "alignment_error_rad": float(
+                        errors_rad[selected_transport_goal_rank]
+                    ),
+                    "alignment_error_deg": float(
+                        errors_deg[selected_transport_goal_rank]
+                    ),
+                    "acceptance_threshold_applied": False,
+                }
         if not transport_success:
             failure_report = {
                 "status": "handover_transport_planning_failed",
@@ -1886,6 +1985,7 @@ def main() -> int:
                     "axis": "GraspGenX canonical tool +Z",
                 },
                 "semantic_orientation_cost": semantic_orientation_cost_report,
+                "planning_attempts": transport_planning_attempts,
                 "planner_status": str(
                     getattr(transport_result, "status", "plan_pose returned no result")
                 ),
@@ -2125,6 +2225,7 @@ def main() -> int:
                 "tool_frame": "panda_hand",
                 "candidate_count": int(len(handover_goal_positions)),
                 "selected_goalset_rank": selected_transport_goal_rank,
+                "selected_receive_direction_priority": selected_direction_priority,
                 "position_m": (
                     handover_goal_positions[selected_transport_goal_rank].tolist()
                     if selected_transport_goal_rank is not None
@@ -2142,6 +2243,7 @@ def main() -> int:
             },
             "orientation_validation": orientation_validation,
             "semantic_orientation_cost": semantic_orientation_cost_report,
+            "planning_attempts": transport_planning_attempts,
         }
 
     report = {

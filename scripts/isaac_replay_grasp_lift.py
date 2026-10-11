@@ -346,6 +346,7 @@ try:
         quaternion_wxyz_from_rotation_matrix,
         relative_pose,
         rotation_matrix_align_axis_to_vector,
+        rotation_matrix_from_quaternion_wxyz,
     )
 
     output = args.output
@@ -2350,6 +2351,46 @@ try:
         output / "retention_target_orientation_world_wxyz.npy",
         diagnostic_target_orientation_array,
     )
+    from panda_handover.handover import gravity_tilt_deviation_rad
+
+    target_orientation_matrices = np.stack(
+        [
+            rotation_matrix_from_quaternion_wxyz(quaternion)
+            for quaternion in diagnostic_target_orientation_array
+        ]
+    )
+    target_before_lift_rotation = rotation_matrix_from_quaternion_wxyz(
+        target_before_lift_orientation
+    )
+    target_gravity_tilt_deviation_rad = gravity_tilt_deviation_rad(
+        target_orientation_matrices, target_before_lift_rotation
+    )
+    np.save(
+        output / "retention_target_gravity_tilt_deviation_rad.npy",
+        target_gravity_tilt_deviation_rad,
+    )
+    target_tilt_by_phase = {
+        phase: {
+            "maximum_deviation_rad": float(
+                np.max(
+                    target_gravity_tilt_deviation_rad[
+                        diagnostic_phase_array == phase
+                    ]
+                )
+            ),
+            "maximum_deviation_deg": float(
+                np.rad2deg(
+                    np.max(
+                        target_gravity_tilt_deviation_rad[
+                            diagnostic_phase_array == phase
+                        ]
+                    )
+                )
+            ),
+        }
+        for phase in ("lift", "transport", "hold")
+        if np.any(diagnostic_phase_array == phase)
+    }
     np.save(
         output / "retention_finger_positions_m.npy",
         diagnostic_finger_position_array,
@@ -2562,6 +2603,18 @@ try:
             "physical_pick_evidence_is_contact_only": bool(
                 args.grasp_retention_mode == "physics"
             ),
+            "gravity_tilt_diagnostic": {
+                "reference": "target world orientation immediately before lift",
+                "metric": (
+                    "angle between gravity expressed in the target frame at "
+                    "each sample and immediately before lift"
+                ),
+                "pass_fail_applied": False,
+                "phase_maximums": target_tilt_by_phase,
+                "trace": str(
+                    output / "retention_target_gravity_tilt_deviation_rad.npy"
+                ),
+            },
         },
         "physical_parameters": {
             "finger_drive_preset": args.finger_drive_preset,

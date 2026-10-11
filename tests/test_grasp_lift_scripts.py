@@ -346,6 +346,7 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("generate_affordance_handover_goals(", source)
         self.assertNotIn("generate_directional_gravity_tilt_handover_goal(", source)
         self.assertIn("generate_gravity_tilt_preserving_handover_goals(", source)
+        self.assertIn("order_handover_goals_by_receive_direction(", source)
         self.assertIn("generate_orientation_preserving_handover_goal(", source)
         self.assertIn("gravity_tilt_deviation_rad(", source)
         self.assertIn('"--diagnostic-gravity-tilt-tolerance-deg"', source)
@@ -354,8 +355,13 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("update_tool_pose_criteria(", source)
         self.assertIn("orientation_soft_cost(", source)
         self.assertIn('"soft_cost_ranking"', source)
-        self.assertIn('"current_gate": "gravity_tilt_feasibility"', source)
+        self.assertIn(
+            '"current_gate": "gravity_tilt_then_direction_priority"', source
+        )
         self.assertIn('"human_direction_alignment_enforced": False', source)
+        self.assertIn('"human_direction_priority_enforced": True', source)
+        self.assertIn('"selected_receive_direction_priority"', source)
+        self.assertIn('"planning_attempts": transport_planning_attempts', source)
         self.assertIn('"diagnostic_tolerance_override"', source)
         self.assertIn("quaternion_orientation_deviation_rad(", source)
         self.assertIn("handover_orientation_constraint_failure.json", source)
@@ -367,6 +373,11 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"handover_release_planned": False', source)
         self.assertNotIn("transport_result.status", source)
         self.assertIn('"result_type": type(transport_result).__name__', source)
+        replay = (PROJECT / "scripts" / "isaac_replay_grasp_lift.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("retention_target_gravity_tilt_deviation_rad.npy", replay)
+        self.assertIn('"pass_fail_applied": False', replay)
 
     def test_first_lift_limitation_is_explicit_and_fail_visible(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(

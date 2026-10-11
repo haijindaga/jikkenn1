@@ -162,9 +162,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Simulation-only experimental handover mode: apply cuRobo's official "
-            "non-terminal orientation soft cost and test the common uniform yaw "
-            "goalset for gravity-tilt feasibility. Human-direction alignment is "
-            "left for a separate validation gate."
+            "non-terminal orientation soft cost and try the common uniform yaw "
+            "goalset in direct receive-part-to-human alignment order."
         ),
     )
     parser.add_argument(

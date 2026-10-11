@@ -8,6 +8,7 @@ from panda_handover.handover import (
     generate_gravity_tilt_preserving_handover_goals,
     generate_orientation_preserving_handover_goal,
     gravity_tilt_deviation_rad,
+    order_handover_goals_by_receive_direction,
     orientation_soft_cost,
     receive_clear_score_order,
 )
@@ -203,6 +204,35 @@ class HandoverGeometryTests(unittest.TestCase):
                 [0.5, 0.0, 0.5],
                 [0.0, 0.0, 1.0],
             )
+
+    def test_existing_gravity_tilt_goals_are_ordered_by_human_direction(self):
+        grasp_transform = np.eye(4)
+        grasp_part = np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0]])
+        receive_part = grasp_part + np.array([0.2, 0.0, 0.0])
+        goals, _ = generate_gravity_tilt_preserving_handover_goals(
+            grasp_transform,
+            receive_part,
+            [0.5, 0.0, 0.5],
+        )
+
+        ordered, report = order_handover_goals_by_receive_direction(
+            goals,
+            grasp_transform,
+            grasp_part,
+            receive_part,
+            [0.0, 1.0, 0.0],
+        )
+
+        self.assertEqual(ordered.shape, goals.shape)
+        self.assertEqual(report["original_goal_indices_in_attempt_order"][0], 2)
+        self.assertAlmostEqual(
+            report["alignment_error_rad_in_attempt_order"][0], 0.0
+        )
+        self.assertFalse(report["weighted_score_used"])
+        deviations = gravity_tilt_deviation_rad(
+            ordered[:, :3, :3], grasp_transform[:3, :3]
+        )
+        np.testing.assert_allclose(deviations, 0.0, atol=1e-7)
 
     def test_orientation_soft_cost_penalizes_error_and_angular_steps(self):
         identity = np.array([1.0, 0.0, 0.0, 0.0])
