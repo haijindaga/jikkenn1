@@ -489,6 +489,33 @@ class GraspLiftScriptTests(unittest.TestCase):
             [attempt["original_goalset_rank"] for attempt in selected], [1, 0]
         )
 
+    def test_trial_runner_loads_nested_validated_vlm_orientation_policy(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_policy_test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "vlm_part_discovery.json"
+            report.write_text(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "inputs": {"target_object": "mug"},
+                        "result": {
+                            "object": "mug",
+                            "grasp_part": "mug body",
+                            "receive_part": "mug handle",
+                            "transport_orientation_policy": (
+                                "preserve_gravity_tilt"
+                            ),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = namespace["load_transport_orientation_policy"](report)
+        self.assertEqual(policy, "preserve_gravity_tilt")
+
     def test_negative_radius_curobo_padding_is_not_a_failed_sphere(self):
         namespace = runpy.run_path(
             str(PROJECT / "scripts" / "curobo_plan_grasp_lift.py"),

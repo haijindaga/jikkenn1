@@ -12,6 +12,12 @@ import sys
 import numpy as np
 
 
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
+
+from panda_handover.vlm_parts import load_handover_parts_report
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", type=Path, required=True)
@@ -167,6 +173,12 @@ def _finite_metric(value: object, *, name: str, source_index: int) -> float:
     return float(value)
 
 
+def load_transport_orientation_policy(path: Path) -> str:
+    """Load the validated policy using the pipeline's canonical VLM schema."""
+
+    return load_handover_parts_report(path).transport_orientation_policy
+
+
 def select_physical_trial_attempts(
     attempts: list[dict],
     *,
@@ -214,11 +226,8 @@ def main() -> int:
 
     transport_orientation_policy = None
     if args.transport_orientation_policy_report is not None:
-        policy_report = json.loads(
-            args.transport_orientation_policy_report.read_text(encoding="utf-8")
-        )
-        transport_orientation_policy = policy_report.get(
-            "transport_orientation_policy"
+        transport_orientation_policy = load_transport_orientation_policy(
+            args.transport_orientation_policy_report
         )
     direction_aware_selection = bool(
         args.semantic_orientation_cost
@@ -280,6 +289,7 @@ def main() -> int:
                 if args.transport_orientation_policy_report is not None
                 else None
             ),
+            "transport_orientation_policy": transport_orientation_policy,
             "diagnostic_gravity_tilt_tolerance_deg_for_every_candidate": (
                 args.diagnostic_gravity_tilt_tolerance_deg
             ),
