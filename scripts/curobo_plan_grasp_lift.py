@@ -129,9 +129,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Simulation-only paper-inspired mode: use cuRobo ToolPoseCriteria "
-            "as a non-terminal orientation soft cost, point the receive part "
-            "toward the human when preserving gravity tilt, and rank rather "
-            "than hard-reject trajectories by the default 2 degree check"
+            "as a non-terminal orientation soft cost, preserve gravity tilt "
+            "across the common uniform yaw goalset, and rank rather than "
+            "hard-reject trajectories by the default 2 degree check. Human-"
+            "direction alignment is intentionally deferred to a separate gate."
         ),
     )
     return parser.parse_args()
@@ -766,7 +767,6 @@ def main() -> int:
         DEFAULT_HANDOVER_ROLL_DEGREES,
         ORIENTATION_PRESERVATION_TOLERANCE_RAD,
         generate_affordance_handover_goals,
-        generate_directional_gravity_tilt_handover_goal,
         generate_gravity_tilt_preserving_handover_goals,
         generate_orientation_preserving_handover_goal,
         gravity_tilt_deviation_rad,
@@ -965,11 +965,7 @@ def main() -> int:
         automatic_handover
         and transport_orientation_policy == "preserve_gravity_tilt"
     ):
-        automatic_handover_goal_count = (
-            1
-            if args.semantic_orientation_cost
-            else len(DEFAULT_GRAVITY_YAW_DEGREES)
-        )
+        automatic_handover_goal_count = len(DEFAULT_GRAVITY_YAW_DEGREES)
     planner_max_goalset = max(len(grasp_transforms), automatic_handover_goal_count)
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -1728,24 +1724,22 @@ def main() -> int:
                     )
                 )
             elif transport_orientation_policy == "preserve_gravity_tilt":
+                handover_goal_transforms, handover_goal_diagnostics = (
+                    generate_gravity_tilt_preserving_handover_goals(
+                        grasp_transforms[selected_rank],
+                        receive_part_robot_base,
+                        effective_receiver_position,
+                    )
+                )
                 if args.semantic_orientation_cost:
-                    handover_goal_transforms, handover_goal_diagnostics = (
-                        generate_directional_gravity_tilt_handover_goal(
-                            grasp_transforms[selected_rank],
-                            grasp_part_robot_base,
-                            receive_part_robot_base,
-                            effective_receiver_position,
-                            handover_human_direction,
-                        )
-                    )
-                else:
-                    handover_goal_transforms, handover_goal_diagnostics = (
-                        generate_gravity_tilt_preserving_handover_goals(
-                            grasp_transforms[selected_rank],
-                            receive_part_robot_base,
-                            effective_receiver_position,
-                        )
-                    )
+                    handover_goal_diagnostics["staged_validation"] = {
+                        "current_gate": "gravity_tilt_feasibility",
+                        "human_direction_alignment_enforced": False,
+                        "reason": (
+                            "separate tilt feasibility from receive-part direction "
+                            "before combining constraints"
+                        ),
+                    }
             else:
                 handover_goal_transforms, handover_goal_diagnostics = (
                     generate_affordance_handover_goals(
@@ -1765,9 +1759,7 @@ def main() -> int:
                 "preserve_selected_grasp_orientation"
                 if transport_orientation_policy == "keep_grasp_orientation"
                 else (
-                    "preserve_gravity_tilt_and_point_receive_part_toward_human"
-                    if args.semantic_orientation_cost
-                    else "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
+                    "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
                     if transport_orientation_policy == "preserve_gravity_tilt"
                     else "align_grasp_to_receive_part_axis_with_human_direction_"
                     "then_curobo_selects_roll"

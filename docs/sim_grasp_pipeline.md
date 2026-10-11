@@ -280,11 +280,13 @@ expressed in the selected grasp frame remains unchanged.
 By default these remain goal constraints plus fail-closed path validation.
 The optional `--semantic-orientation-cost` experiment uses the pinned cuRobo
 V2 `ToolPoseCriteria` API to add a non-terminal orientation soft cost. For
-`preserve_gravity_tilt`, it also solves the one world-Z yaw that points the
-horizontal grasp-part-to-receive-part axis toward the supplied human direction.
-This yaw preserves gravity tilt analytically; it is not predicted by the VLM
-and no object-specific angle is tuned. The default 2 degree value remains in
-the report as a diagnostic, but no longer hard-rejects a soft-cost trajectory.
+`preserve_gravity_tilt`, the current validation gate reuses the common uniform
+world-Z yaw goalset and tests gravity-tilt feasibility without simultaneously
+enforcing receive-part direction. This separation avoids attributing a planning
+failure to the wrong constraint and introduces no object-specific angle. Human-
+direction alignment is evaluated only after this gate succeeds. The default
+2 degree value remains in the report as a diagnostic, but no longer hard-rejects
+a soft-cost trajectory.
 Successful plans are ordered by a shared cost comprising mean squared semantic
 orientation deviation plus mean squared adjacent-waypoint angular motion.
 This is inspired by the softened orientation objective in
