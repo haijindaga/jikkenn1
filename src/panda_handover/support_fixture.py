@@ -289,3 +289,66 @@ def plan_part_support_patch(
         minimum_head_to_support_footprint_distance_m=float(best_clearance),
         target_lift_m=float(target_lift_m),
     )
+
+
+def plan_part_support_dual_patches(
+    grasp_points_world: np.ndarray,
+    support_points_world: np.ndarray,
+    *,
+    support_width_m: float,
+    grasp_projection_margin_m: float,
+    target_lift_m: float,
+) -> tuple[ElevatedHeadSupportPlan, ElevatedHeadSupportPlan]:
+    """Place one grasp-clear patch under each side of a two-lobed part.
+
+    The support-part projection is split into two equal-population groups along
+    its principal PCA axis. This distributes the fixtures across the observed
+    support-part extent, including paired structures such as scissors handles.
+    Each patch is then selected by the same observed-point density and
+    grasp-clearance rule as :func:`plan_part_support_patch`.
+    No object-specific world position is assumed.
+    """
+
+    support = np.asarray(support_points_world, dtype=np.float64)
+    if support.ndim != 2 or support.shape[1] != 3 or len(support) < 6:
+        raise ValueError("support points must have shape (N,3), N>=6")
+    if not np.all(np.isfinite(support)):
+        raise ValueError("support points contain non-finite values")
+
+    support_xy = support[:, :2]
+    center = np.median(support_xy, axis=0)
+    centered = support_xy - center[None, :]
+    covariance = centered.T @ centered / float(len(centered))
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if float(np.max(eigenvalues)) <= 1e-12:
+        raise ValueError("support-part projection has no measurable extent")
+    split_axis = eigenvectors[:, int(np.argmax(eigenvalues))]
+    dominant = int(np.argmax(np.abs(split_axis)))
+    if split_axis[dominant] < 0.0:
+        split_axis = -split_axis
+
+    lateral = centered @ split_axis
+    order = np.argsort(lateral, kind="mergesort")
+    midpoint = len(order) // 2
+    groups = (support[order[:midpoint]], support[order[midpoint:]])
+    if any(len(group) < 3 for group in groups):
+        raise ValueError("support-part projection cannot be split into two patches")
+
+    plans = tuple(
+        plan_part_support_patch(
+            grasp_points_world,
+            group,
+            support_width_m=support_width_m,
+            grasp_projection_margin_m=grasp_projection_margin_m,
+            target_lift_m=target_lift_m,
+        )
+        for group in groups
+    )
+    center_a = np.asarray(plans[0].support_center_xy_world_m)
+    center_b = np.asarray(plans[1].support_center_xy_world_m)
+    separation = float(np.linalg.norm(center_a - center_b))
+    if separation <= 0.5 * min(
+        plans[0].support_width_m, plans[1].support_width_m
+    ):
+        raise ValueError("derived dual support patches are not spatially distinct")
+    return plans

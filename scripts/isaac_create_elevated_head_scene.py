@@ -69,7 +69,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--support-geometry-policy",
-        choices=("handle-axis-rail", "part-mask-patch"),
+        choices=(
+            "handle-axis-rail",
+            "part-mask-patch",
+            "part-mask-dual-patch",
+        ),
         default="handle-axis-rail",
         help="geometry rule used to place support inside the saved support part",
     )
@@ -151,6 +155,7 @@ from pxr import Gf, Usd, UsdGeom, UsdPhysics
 from panda_handover.support_fixture import (
     masked_points_world,
     plan_handle_support,
+    plan_part_support_dual_patches,
     plan_part_support_patch,
 )
 
@@ -213,15 +218,27 @@ try:
         T_world_camera,
     )
     if args.support_geometry_policy == "handle-axis-rail":
-        support_plan = plan_handle_support(
-            grasp_points_world,
-            support_points_world,
-            support_width_m=args.support_width_m,
-            head_projection_margin_m=args.grasp_part_projection_margin_m,
-            target_lift_m=args.target_clearance_m,
+        support_plans = (
+            plan_handle_support(
+                grasp_points_world,
+                support_points_world,
+                support_width_m=args.support_width_m,
+                head_projection_margin_m=args.grasp_part_projection_margin_m,
+                target_lift_m=args.target_clearance_m,
+            ),
+        )
+    elif args.support_geometry_policy == "part-mask-patch":
+        support_plans = (
+            plan_part_support_patch(
+                grasp_points_world,
+                support_points_world,
+                support_width_m=args.support_width_m,
+                grasp_projection_margin_m=args.grasp_part_projection_margin_m,
+                target_lift_m=args.target_clearance_m,
+            ),
         )
     else:
-        support_plan = plan_part_support_patch(
+        support_plans = plan_part_support_dual_patches(
             grasp_points_world,
             support_points_world,
             support_width_m=args.support_width_m,
@@ -284,28 +301,45 @@ try:
         raise RuntimeError("failed to translate target wrapper")
 
     support_height_m = args.target_clearance_m
-    support_center = (
-        support_plan.support_center_xy_world_m[0],
-        support_plan.support_center_xy_world_m[1],
-        table_top_z_m + 0.5 * support_height_m,
+    support_root = (
+        UsdGeom.Xform.Define(stage, args.support_prim)
+        if len(support_plans) > 1
+        else None
     )
-    support = UsdGeom.Cube.Define(stage, args.support_prim)
-    support.CreateSizeAttr(1.0)
-    support.CreateDisplayColorAttr([Gf.Vec3f(0.20, 0.65, 0.95)])
-    support_xform = UsdGeom.XformCommonAPI(support.GetPrim())
-    support_xform.SetTranslate(Gf.Vec3d(*support_center))
-    support_xform.SetScale(
-        Gf.Vec3f(
-            support_plan.support_length_m,
-            support_plan.support_width_m,
-            support_height_m,
+    support_prims = []
+    support_centers = []
+    for index, support_plan in enumerate(support_plans, start=1):
+        support_path = (
+            f"{args.support_prim}/Patch_{index:02d}"
+            if len(support_plans) > 1
+            else args.support_prim
         )
-    )
-    support_xform.SetRotate(
-        Gf.Vec3f(0.0, 0.0, support_plan.support_yaw_deg),
-        UsdGeom.XformCommonAPI.RotationOrderXYZ,
-    )
-    UsdPhysics.CollisionAPI.Apply(support.GetPrim())
+        support_center = (
+            support_plan.support_center_xy_world_m[0],
+            support_plan.support_center_xy_world_m[1],
+            table_top_z_m + 0.5 * support_height_m,
+        )
+        support = UsdGeom.Cube.Define(stage, support_path)
+        support.CreateSizeAttr(1.0)
+        support.CreateDisplayColorAttr([Gf.Vec3f(0.20, 0.65, 0.95)])
+        support_xform = UsdGeom.XformCommonAPI(support.GetPrim())
+        support_xform.SetTranslate(Gf.Vec3d(*support_center))
+        support_xform.SetScale(
+            Gf.Vec3f(
+                support_plan.support_length_m,
+                support_plan.support_width_m,
+                support_height_m,
+            )
+        )
+        support_xform.SetRotate(
+            Gf.Vec3f(0.0, 0.0, support_plan.support_yaw_deg),
+            UsdGeom.XformCommonAPI.RotationOrderXYZ,
+        )
+        UsdPhysics.CollisionAPI.Apply(support.GetPrim())
+        if support_root is None:
+            support_root = support
+        support_prims.append(support.GetPrim())
+        support_centers.append(support_center)
     world_prim = stage.GetPrimAtPath("/World")
     world_prim.SetCustomDataByKey(
         "panda_handover:diagnostic_scene", "support-part-supported-grasp-clear"
@@ -316,7 +350,7 @@ try:
 
     bbox_cache.Clear()
     target_aabb_after = _world_aabb(bbox_cache, target_prim)
-    support_aabb = _world_aabb(bbox_cache, support.GetPrim())
+    support_aabb = _world_aabb(bbox_cache, support_root.GetPrim())
     checks = {
         "target_raised_by_requested_amount": bool(
             np.isclose(
@@ -338,12 +372,18 @@ try:
             )
         ),
         "support_footprint_excludes_saved_head_projection": bool(
-            support_plan.minimum_head_to_support_footprint_distance_m
-            > args.grasp_part_projection_margin_m
+            all(
+                plan.minimum_head_to_support_footprint_distance_m
+                > args.grasp_part_projection_margin_m
+                for plan in support_plans
+            )
         ),
         "support_is_static_collision_geometry": bool(
-            support.GetPrim().HasAPI(UsdPhysics.CollisionAPI)
-            and not support.GetPrim().HasAPI(UsdPhysics.RigidBodyAPI)
+            all(
+                prim.HasAPI(UsdPhysics.CollisionAPI)
+                and not prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                for prim in support_prims
+            )
         ),
     }
     if not all(checks.values()):
@@ -384,7 +424,7 @@ try:
                 "handle_points": "support_part",
             },
         },
-        "support_plan": support_plan.as_dict(),
+        "support_plans": [plan.as_dict() for plan in support_plans],
         "authored": {
             "target_prim": args.target_prim,
             "target_translation_before_m": target_translation_before.tolist(),
@@ -393,14 +433,15 @@ try:
             "target_aabb_after_m": target_aabb_after.tolist(),
             "table_top_z_m": table_top_z_m,
             "support_prim": args.support_prim,
-            "support_center_world_m": list(support_center),
-            "support_size_m": [
-                support_plan.support_length_m,
-                support_plan.support_width_m,
-                support_height_m,
+            "support_centers_world_m": [list(center) for center in support_centers],
+            "support_sizes_m": [
+                [plan.support_length_m, plan.support_width_m, support_height_m]
+                for plan in support_plans
             ],
             "requested_support_width_m": args.support_width_m,
-            "support_yaw_deg": support_plan.support_yaw_deg,
+            "support_yaw_degrees": [
+                plan.support_yaw_deg for plan in support_plans
+            ],
             "support_aabb_world_m": support_aabb.tolist(),
         },
         "automatic_checks": checks,
@@ -414,6 +455,15 @@ try:
             "clearance must be visually reviewed."
         ),
     }
+    if len(support_plans) == 1:
+        report["support_plan"] = support_plans[0].as_dict()
+        report["authored"].update(
+            {
+                "support_center_world_m": list(support_centers[0]),
+                "support_size_m": report["authored"]["support_sizes_m"][0],
+                "support_yaw_deg": support_plans[0].support_yaw_deg,
+            }
+        )
     report_path = args.output.with_suffix(args.output.suffix + ".check.json")
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2), flush=True)

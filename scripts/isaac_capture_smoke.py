@@ -297,10 +297,18 @@ try:
             )
             if support_aabb.shape != (6,) or not np.all(np.isfinite(support_aabb)):
                 raise RuntimeError(f"invalid diagnostic support AABB: {support_aabb}")
+            collision_prims = [
+                prim
+                for prim in Usd.PrimRange(support_prim)
+                if prim.HasAPI(UsdPhysics.CollisionAPI)
+            ]
             support_checks = {
                 "support_is_static_collision_geometry": bool(
-                    support_prim.HasAPI(UsdPhysics.CollisionAPI)
-                    and not support_prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                    collision_prims
+                    and all(
+                        not prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                        for prim in collision_prims
+                    )
                 ),
                 "support_starts_at_tabletop": bool(
                     abs(float(support_aabb[2]) - table_top_z_m) <= 0.01

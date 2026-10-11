@@ -6,6 +6,7 @@ import numpy as np
 from panda_handover.support_fixture import (
     masked_points_world,
     plan_handle_support,
+    plan_part_support_dual_patches,
     plan_part_support_patch,
 )
 
@@ -27,6 +28,7 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertIn('"--grasp-mask-role"', source)
         self.assertIn('"--support-mask-role"', source)
         self.assertIn('"--support-geometry-policy"', source)
+        self.assertIn('"part-mask-dual-patch"', source)
         self.assertIn('/ args.grasp_mask_role', source)
         self.assertIn('/ args.support_mask_role', source)
         self.assertIn('"grasp_mask_role": args.grasp_mask_role', source)
@@ -101,6 +103,39 @@ class SupportFixtureTests(unittest.TestCase):
             plan.minimum_head_to_support_footprint_distance_m, 0.005
         )
         self.assertEqual(plan.target_lift_m, 0.03)
+
+    def test_dual_patch_places_one_support_under_each_lobe(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.002, 0.03], [0.00, 0.0, 0.03], [0.00, 0.002, 0.03]]
+        )
+        support = np.array(
+            [
+                [0.05, -0.025, 0.02],
+                [0.055, -0.025, 0.02],
+                [0.06, -0.025, 0.02],
+                [0.05, 0.025, 0.02],
+                [0.055, 0.025, 0.02],
+                [0.06, 0.025, 0.02],
+            ]
+        )
+        plans = plan_part_support_dual_patches(
+            grasp,
+            support,
+            support_width_m=0.02,
+            grasp_projection_margin_m=0.005,
+            target_lift_m=0.03,
+        )
+        self.assertEqual(len(plans), 2)
+        centers_y = sorted(plan.support_center_xy_world_m[1] for plan in plans)
+        self.assertLess(centers_y[0], -0.02)
+        self.assertGreater(centers_y[1], 0.02)
+        self.assertTrue(
+            all(
+                plan.minimum_head_to_support_footprint_distance_m > 0.005
+                for plan in plans
+            )
+        )
+        self.assertTrue(all(plan.target_lift_m == 0.03 for plan in plans))
 
     def test_support_fails_when_every_handle_point_overlaps_head(self) -> None:
         head = np.array(

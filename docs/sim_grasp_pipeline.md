@@ -135,25 +135,28 @@ for a controlled comparison.  A depth-refined run must be replanned; an old
 trajectory cannot be reused for this comparison.
 
 The same geometry-derived fixture can be used for scissors without changing
-candidate generation or planner settings. Here the segmented handles locate
-the support rail and the segmented blade/pivot grasp region must remain clear:
+candidate generation or planner settings. Here the segmented handle points are
+split into two equal-population regions along their principal horizontal axis.
+One compact support patch is selected from each region while the segmented
+blade/pivot grasp region remains clear. This distributes support over the
+observed handles without hard-coded world coordinates:
 
 ```bash
 python scripts/isaac_create_elevated_head_scene.py \
   --base-scene scenes/scissors_01.usda \
   --reference-capture outputs/scissors_vlm_e2e_v1/capture/camera_0 \
   --reference-segmentation outputs/scissors_vlm_e2e_v1/capture/sam3 \
-  --output scenes/scissors_handles_supported_v1.usda \
+  --output scenes/scissors_handles_supported_v3.usda \
   --target-clearance-m 0.06 \
   --object-label scissors \
   --grasp-part-label "scissors blades" \
   --support-part-label "scissors handles" \
   --grasp-mask-role receive_part \
   --support-mask-role grasp_part \
-  --support-geometry-policy part-mask-patch
+  --support-geometry-policy part-mask-dual-patch
 
 python scripts/isaac_open_stage.py \
-  --stage scenes/scissors_handles_supported_v1.usda \
+  --stage scenes/scissors_handles_supported_v3.usda \
   --view side
 ```
 
