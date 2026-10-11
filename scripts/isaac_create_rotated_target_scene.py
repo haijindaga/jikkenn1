@@ -102,10 +102,13 @@ try:
     print(f"open_stage returned: {stage is not None}", flush=True)
     if stage is None:
         raise RuntimeError(f"USD stage did not open: {args.base_scene}")
-    if UsdGeom.GetStageUpAxis(stage) != UsdGeom.Tokens.z:
-        raise RuntimeError("target-yaw scene variant requires a Z-up stage")
-    if not np.isclose(UsdGeom.GetStageMetersPerUnit(stage), 1.0):
-        raise RuntimeError("target-yaw scene variant requires metre stage units")
+    stage_up_axis = str(UsdGeom.GetStageUpAxis(stage))
+    stage_meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
+    print(
+        "stage metadata: "
+        f"up_axis={stage_up_axis}, meters_per_unit={stage_meters_per_unit:g}",
+        flush=True,
+    )
 
     # Author only into the opened root layer in memory.  That layer is exported
     # to a new filename and is deliberately never saved back to the source.
@@ -221,6 +224,11 @@ try:
         "source_scene": str(args.base_scene),
         "source_scene_sha256": source_hash_before,
         "scene_usd": str(args.output),
+        "source_stage_metadata": {
+            "up_axis": stage_up_axis,
+            "meters_per_unit": stage_meters_per_unit,
+            "used_to_choose_rotation_axis": False,
+        },
         "authored": {
             "target_prim": args.target_prim,
             "yaw_axis": "world +Z",
