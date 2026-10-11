@@ -291,6 +291,159 @@ def generate_gravity_tilt_preserving_handover_goals(
     return np.asarray(goals, dtype=np.float32), diagnostics
 
 
+def generate_directional_gravity_tilt_handover_goal(
+    grasp_transform_robot_base: np.ndarray,
+    grasp_part_points_robot_base: np.ndarray,
+    receive_part_points_robot_base: np.ndarray,
+    receiver_position_robot_base_m: Iterable[float],
+    human_direction_robot_base: Iterable[float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Point the receive part toward the human without changing object tilt.
+
+    Only a rotation about robot-base/world Z is applied to the selected grasp
+    orientation.  Consequently gravity expressed in the hand frame is exactly
+    preserved.  The yaw is solved analytically by aligning the horizontal
+    projection of the grasp-to-receive-part axis with the horizontal projection
+    of ``human_direction_robot_base``.  No object-specific angle is tuned.
+    """
+
+    transform = np.asarray(grasp_transform_robot_base, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("grasp_transform_robot_base must be a finite 4x4 matrix")
+    rotation = transform[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-5
+    ):
+        raise ValueError("grasp_transform_robot_base rotation must be rigid")
+
+    grasp_points = _points(grasp_part_points_robot_base, name="grasp part points")
+    receive_points = _points(receive_part_points_robot_base, name="receive part points")
+    receiver_position = np.asarray(
+        tuple(receiver_position_robot_base_m), dtype=np.float64
+    ).reshape(3)
+    if not np.isfinite(receiver_position).all():
+        raise ValueError("receiver position must contain three finite values")
+    human_direction = _unit(
+        np.asarray(tuple(human_direction_robot_base), dtype=np.float64),
+        name="human direction",
+    )
+
+    grasp_center_base = np.median(grasp_points, axis=0)
+    receive_center_base = np.median(receive_points, axis=0)
+    grasp_to_receive_base = receive_center_base - grasp_center_base
+    source_horizontal = grasp_to_receive_base.copy()
+    source_horizontal[2] = 0.0
+    target_horizontal = human_direction.copy()
+    target_horizontal[2] = 0.0
+    source_horizontal = _unit(
+        source_horizontal, name="horizontal grasp-to-receive part axis"
+    )
+    target_horizontal = _unit(
+        target_horizontal, name="horizontal human direction"
+    )
+    yaw_rad = float(
+        np.arctan2(
+            source_horizontal[0] * target_horizontal[1]
+            - source_horizontal[1] * target_horizontal[0],
+            float(np.dot(source_horizontal, target_horizontal)),
+        )
+    )
+
+    grasp_center_hand = rotation.T @ (grasp_center_base - transform[:3, 3])
+    receive_center_hand = rotation.T @ (
+        receive_center_base - transform[:3, 3]
+    )
+    world_up = np.array([0.0, 0.0, 1.0])
+    goal_rotation = _axis_angle_rotation(world_up, yaw_rad) @ rotation
+    goal = np.eye(4, dtype=np.float64)
+    goal[:3, :3] = goal_rotation
+    goal[:3, 3] = receiver_position - goal_rotation @ receive_center_hand
+
+    presented_axis = goal_rotation @ (receive_center_hand - grasp_center_hand)
+    presented_horizontal = presented_axis.copy()
+    presented_horizontal[2] = 0.0
+    presented_horizontal = _unit(
+        presented_horizontal, name="presented horizontal part axis"
+    )
+    alignment_cosine = float(
+        np.clip(np.dot(presented_horizontal, target_horizontal), -1.0, 1.0)
+    )
+    alignment_error_rad = float(np.arccos(alignment_cosine))
+    reference_gravity_hand = rotation.T @ world_up
+    goal_gravity_hand = goal_rotation.T @ world_up
+
+    diagnostics: dict[str, Any] = {
+        "policy": (
+            "preserve gravity tilt and analytically rotate only about robot-base "
+            "vertical until the horizontal grasp-to-receive-part axis points "
+            "toward the human"
+        ),
+        "representative_point": "coordinate-wise median of segmented 3-D points",
+        "grasp_part_center_robot_base_m": grasp_center_base.tolist(),
+        "receive_part_center_robot_base_m": receive_center_base.tolist(),
+        "grasp_part_center_panda_hand_m": grasp_center_hand.tolist(),
+        "receive_part_center_panda_hand_m": receive_center_hand.tolist(),
+        "receiver_position_robot_base_m": receiver_position.tolist(),
+        "human_direction_robot_base": human_direction.tolist(),
+        "horizontal_human_direction_robot_base": target_horizontal.tolist(),
+        "solved_world_yaw_rad": yaw_rad,
+        "solved_world_yaw_deg": float(np.rad2deg(yaw_rad)),
+        "horizontal_direction_alignment_error_rad": alignment_error_rad,
+        "reference_gravity_panda_hand": reference_gravity_hand.tolist(),
+        "goal_gravity_panda_hand": goal_gravity_hand.tolist(),
+        "gravity_tilt_preserved": bool(
+            np.allclose(reference_gravity_hand, goal_gravity_hand, atol=1e-7)
+        ),
+        "goal_count": 1,
+        "human_direction_alignment_enforced": True,
+        "vertical_human_direction_component_not_constrained": True,
+    }
+    return goal[None, ...].astype(np.float32), diagnostics
+
+
+def orientation_soft_cost(
+    deviations_rad: np.ndarray,
+    quaternions_wxyz: np.ndarray,
+) -> dict[str, float | int]:
+    """Return a scale-free orientation-error plus angular-step soft cost.
+
+    The first term is the mean squared semantic orientation deviation.  The
+    second is the mean squared geodesic rotation between adjacent waypoints,
+    used as an angular-motion proxy for trajectories saved at the same planner
+    interpolation interval. Unit weights are shared by every candidate; this
+    function does not tune per object.
+    """
+
+    deviations = np.asarray(deviations_rad, dtype=np.float64).reshape(-1)
+    quaternions = np.asarray(quaternions_wxyz, dtype=np.float64)
+    if len(deviations) == 0 or not np.isfinite(deviations).all():
+        raise ValueError("deviations_rad must contain finite values")
+    if quaternions.shape != (len(deviations), 4) or not np.isfinite(
+        quaternions
+    ).all():
+        raise ValueError("quaternions_wxyz must have finite shape (N,4)")
+    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+    if np.any(norms <= 1e-8):
+        raise ValueError("quaternions_wxyz must be non-zero")
+    quaternions = quaternions / norms
+    if len(quaternions) > 1:
+        adjacent_dot = np.abs(np.sum(quaternions[:-1] * quaternions[1:], axis=1))
+        angular_steps = 2.0 * np.arccos(np.clip(adjacent_dot, -1.0, 1.0))
+        mean_squared_angular_step = float(np.mean(np.square(angular_steps)))
+        maximum_angular_step = float(np.max(angular_steps))
+    else:
+        mean_squared_angular_step = 0.0
+        maximum_angular_step = 0.0
+    mean_squared_deviation = float(np.mean(np.square(deviations)))
+    return {
+        "sample_count": int(len(deviations)),
+        "mean_squared_deviation_rad2": mean_squared_deviation,
+        "mean_squared_angular_step_rad2": mean_squared_angular_step,
+        "maximum_angular_step_rad": maximum_angular_step,
+        "total": mean_squared_deviation + mean_squared_angular_step,
+    }
+
+
 def gravity_tilt_deviation_rad(
     rotations_robot_base: np.ndarray,
     reference_rotation_robot_base: np.ndarray,

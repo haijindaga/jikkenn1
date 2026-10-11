@@ -266,7 +266,7 @@ semantic region suitable for SAM3; neither the VLM nor SAM3 output is treated
 as a measured physical center of mass. The exact instruction and resulting
 part phrase are saved in the VLM report for manual review.
 
-`transport_orientation_policy` is a closed two-value decision, never a
+`transport_orientation_policy` is a closed categorical decision, never a
 VLM-generated angle. `free` retains the existing affordance-axis handover.
 `keep_grasp_orientation` fixes the automatic handover goal to the selected
 grasp rotation while still placing the receive-part median at the requested
@@ -274,10 +274,23 @@ receiver position. The saved lift and transport trajectories are then checked
 with cuRobo FK at every waypoint against that grasp rotation. A candidate that
 changes orientation by more than the project-wide 2 degree model-alignment
 tolerance is rejected and the trial runner proceeds to the next candidate.
-This is a goal constraint plus fail-closed path validation: the pinned cuRobo
-V2 planner does not expose the legacy running pose-cost API. The report does
-not claim a path-wide constrained optimizer. When orientation is preserved,
-the potentially conflicting human-direction alignment is not enforced.
+`preserve_gravity_tilt` permits world-vertical yaw while checking that gravity
+expressed in the selected grasp frame remains unchanged.
+
+By default these remain goal constraints plus fail-closed path validation.
+The optional `--semantic-orientation-cost` experiment uses the pinned cuRobo
+V2 `ToolPoseCriteria` API to add a non-terminal orientation soft cost. For
+`preserve_gravity_tilt`, it also solves the one world-Z yaw that points the
+horizontal grasp-part-to-receive-part axis toward the supplied human direction.
+This yaw preserves gravity tilt analytically; it is not predicted by the VLM
+and no object-specific angle is tuned. The default 2 degree value remains in
+the report as a diagnostic, but no longer hard-rejects a soft-cost trajectory.
+Successful plans are ordered by a shared cost comprising mean squared semantic
+orientation deviation plus mean squared adjacent-waypoint angular motion.
+This is inspired by the softened orientation objective in
+<https://arxiv.org/abs/2410.15185> and uses cuRobo's official constrained-cost
+mechanism; it is not a reproduction of that paper's online 45 Hz QP safety
+filter and is not authorized for real-robot execution.
 
 In VLM mode, only the saved `parts/grasp_part` mask is sent to GraspGenX for
 candidate generation. The whole-object mask remains authoritative for removing
@@ -313,6 +326,11 @@ python scripts/run_sim_grasp_pipeline.py \
   --handover-human-direction-robot-base DX DY DZ \
   --allow-reviewed-support-contact-preflight
 ```
+
+Add `--semantic-orientation-cost` only when the reviewed VLM report selects
+`preserve_gravity_tilt` or `keep_grasp_orientation` (for example, when the task
+instruction says a liquid container must remain upright). The flag fails
+closed for `free`; it does not silently reinterpret a free-orientation task.
 
 When the receiver height is not part of the task, add
 `--handover-height-policy preserve-lift-end`. The requested receiver X/Y are

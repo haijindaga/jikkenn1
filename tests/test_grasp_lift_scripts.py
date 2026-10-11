@@ -344,10 +344,16 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("transport_all_waypoints_clear_of_observed_scene", source)
         self.assertIn('"human_or_receiver_collision_model_present": False', source)
         self.assertIn("generate_affordance_handover_goals(", source)
+        self.assertIn("generate_directional_gravity_tilt_handover_goal(", source)
         self.assertIn("generate_gravity_tilt_preserving_handover_goals(", source)
         self.assertIn("generate_orientation_preserving_handover_goal(", source)
         self.assertIn("gravity_tilt_deviation_rad(", source)
         self.assertIn('"--diagnostic-gravity-tilt-tolerance-deg"', source)
+        self.assertIn('"--semantic-orientation-cost"', source)
+        self.assertIn("ToolPoseCriteria(", source)
+        self.assertIn("update_tool_pose_criteria(", source)
+        self.assertIn("orientation_soft_cost(", source)
+        self.assertIn('"soft_cost_ranking"', source)
         self.assertIn('"diagnostic_tolerance_override"', source)
         self.assertIn("quaternion_orientation_deviation_rad(", source)
         self.assertIn("handover_orientation_constraint_failure.json", source)
@@ -408,6 +414,8 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn(
             '"--diagnostic-gravity-tilt-tolerance-deg"', planner_runner
         )
+        self.assertIn('"--semantic-orientation-cost"', planner_runner)
+        self.assertIn('"semantic_orientation_cost"', planner_runner)
         self.assertIn('"--exclude-source-candidate-index"', planner_runner)
         self.assertIn(
             '"excluded_previously_evaluated_source_candidate_indices"',

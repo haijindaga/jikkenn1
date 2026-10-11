@@ -386,6 +386,52 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             "rigid-attachment",
         )
 
+    def test_semantic_orientation_cost_is_explicit_and_forwarded(self):
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--target-object",
+                "mug",
+                "--ollama-model",
+                "gemma3:12b",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-receiver-position-robot-base-m",
+                "-0.3",
+                "0",
+                "0.5",
+                "--handover-human-direction-robot-base",
+                "-1",
+                "0",
+                "0",
+                "--semantic-orientation-cost",
+            ]
+        )
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=MODULE.pipeline_paths(args.output),
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertIn("--semantic-orientation-cost", planner)
+
+    def test_semantic_orientation_cost_requires_automatic_handover(self):
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "mug",
+                    "--output",
+                    "outputs/e2e",
+                    "--semantic-orientation-cost",
+                ]
+            )
+
     def test_handover_solver_iteration_diagnostic_is_forwarded(self) -> None:
         args = MODULE.parse_args(
             [

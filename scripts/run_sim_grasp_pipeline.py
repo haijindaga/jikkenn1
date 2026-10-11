@@ -158,6 +158,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--semantic-orientation-cost",
+        action="store_true",
+        help=(
+            "Simulation-only experimental handover mode: apply cuRobo's official "
+            "non-terminal orientation soft cost and, for gravity-tilt policies, "
+            "point the receive part toward the supplied human direction"
+        ),
+    )
+    parser.add_argument(
         "--grasp-retention-mode",
         choices=(
             "physics",
@@ -306,6 +315,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             parser.error("handover receiver position must be finite")
     elif args.handover_height_policy != "receiver-position":
         parser.error("--handover-height-policy requires automatic handover")
+    if (
+        args.semantic_orientation_cost
+        and args.handover_receiver_position_robot_base_m is None
+    ):
+        parser.error("--semantic-orientation-cost requires automatic handover")
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = (
             "rigid-attachment"
@@ -735,6 +749,8 @@ def build_stages(
                 args.handover_height_policy,
             ]
         )
+    if args.semantic_orientation_cost:
+        plan_trials_command.append("--semantic-orientation-cost")
 
     replay_command = [
         str(isaac_python),
@@ -921,6 +937,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 else None
             ),
             "handover_height_policy": args.handover_height_policy,
+            "semantic_orientation_cost": args.semantic_orientation_cost,
             "handover_receive_clearance_m": args.handover_receive_clearance,
             "handover_candidate_policy": (
                 "receive-part clearance hard gate, then original GraspGenX score"

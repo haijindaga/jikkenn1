@@ -4,9 +4,11 @@ import numpy as np
 
 from panda_handover.handover import (
     generate_affordance_handover_goals,
+    generate_directional_gravity_tilt_handover_goal,
     generate_gravity_tilt_preserving_handover_goals,
     generate_orientation_preserving_handover_goal,
     gravity_tilt_deviation_rad,
+    orientation_soft_cost,
     receive_clear_score_order,
 )
 
@@ -146,6 +148,78 @@ class HandoverGeometryTests(unittest.TestCase):
         )
         np.testing.assert_allclose(deviations[:2], 0.0, atol=1e-7)
         self.assertAlmostEqual(deviations[2], angle, places=7)
+
+    def test_directional_gravity_tilt_goal_points_receive_part_horizontally(self):
+        tilt = np.deg2rad(20.0)
+        grasp_transform = np.eye(4)
+        grasp_transform[:3, :3] = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, np.cos(tilt), -np.sin(tilt)],
+                [0.0, np.sin(tilt), np.cos(tilt)],
+            ]
+        )
+        grasp_transform[:3, 3] = [0.4, 0.1, 0.2]
+        grasp_part = np.array([[0.39, 0.09, 0.2], [0.41, 0.11, 0.2]])
+        receive_part = grasp_part + np.array([0.2, 0.0, 0.05])
+        receiver = np.array([-0.3, 0.0, 0.35])
+        human_direction = np.array([0.0, -1.0, 0.0])
+
+        goals, report = generate_directional_gravity_tilt_handover_goal(
+            grasp_transform,
+            grasp_part,
+            receive_part,
+            receiver,
+            human_direction,
+        )
+
+        self.assertEqual(goals.shape, (1, 4, 4))
+        receive_center_hand = np.asarray(report["receive_part_center_panda_hand_m"])
+        grasp_center_hand = np.asarray(report["grasp_part_center_panda_hand_m"])
+        np.testing.assert_allclose(
+            goals[0, :3, :3] @ receive_center_hand + goals[0, :3, 3],
+            receiver,
+            atol=1e-6,
+        )
+        presented = goals[0, :3, :3] @ (receive_center_hand - grasp_center_hand)
+        presented[2] = 0.0
+        presented /= np.linalg.norm(presented)
+        np.testing.assert_allclose(presented, human_direction, atol=1e-6)
+        deviations = gravity_tilt_deviation_rad(
+            goals[:, :3, :3], grasp_transform[:3, :3]
+        )
+        np.testing.assert_allclose(deviations, 0.0, atol=1e-7)
+        self.assertTrue(report["human_direction_alignment_enforced"])
+        self.assertTrue(report["gravity_tilt_preserved"])
+
+    def test_directional_gravity_tilt_goal_rejects_vertical_only_direction(self):
+        grasp_part = np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0]])
+        receive_part = grasp_part + np.array([0.2, 0.0, 0.0])
+        with self.assertRaisesRegex(ValueError, "horizontal human direction"):
+            generate_directional_gravity_tilt_handover_goal(
+                np.eye(4),
+                grasp_part,
+                receive_part,
+                [0.5, 0.0, 0.5],
+                [0.0, 0.0, 1.0],
+            )
+
+    def test_orientation_soft_cost_penalizes_error_and_angular_steps(self):
+        identity = np.array([1.0, 0.0, 0.0, 0.0])
+        yaw_10 = np.array(
+            [np.cos(np.deg2rad(5.0)), 0.0, 0.0, np.sin(np.deg2rad(5.0))]
+        )
+        report = orientation_soft_cost(
+            np.deg2rad([0.0, 2.0]), np.stack((identity, yaw_10))
+        )
+        self.assertEqual(report["sample_count"], 2)
+        self.assertGreater(report["mean_squared_deviation_rad2"], 0.0)
+        self.assertGreater(report["mean_squared_angular_step_rad2"], 0.0)
+        self.assertAlmostEqual(
+            report["total"],
+            report["mean_squared_deviation_rad2"]
+            + report["mean_squared_angular_step_rad2"],
+        )
 
 
 if __name__ == "__main__":

@@ -65,6 +65,14 @@ def parse_args() -> argparse.Namespace:
         help="Pass one fixed simulation-only gravity-tilt tolerance to every trial",
     )
     parser.add_argument(
+        "--semantic-orientation-cost",
+        action="store_true",
+        help=(
+            "Apply one common paper-inspired cuRobo orientation soft-cost policy "
+            "to every candidate and rank successful plans by that cost"
+        ),
+    )
+    parser.add_argument(
         "--exclude-source-candidate-index",
         type=int,
         action="append",
@@ -121,6 +129,11 @@ def parse_args() -> argparse.Namespace:
         and args.handover_receiver_position_robot_base_m is None
     ):
         parser.error("--handover-height-policy requires automatic handover")
+    if (
+        args.semantic_orientation_cost
+        and args.handover_receiver_position_robot_base_m is None
+    ):
+        parser.error("--semantic-orientation-cost requires automatic handover")
     return args
 
 
@@ -214,6 +227,14 @@ def main() -> int:
             "diagnostic_gravity_tilt_tolerance_deg_for_every_candidate": (
                 args.diagnostic_gravity_tilt_tolerance_deg
             ),
+            "semantic_orientation_cost_for_every_candidate": (
+                args.semantic_orientation_cost
+            ),
+            "successful_plan_order": (
+                "ascending semantic orientation cost, then original score rank"
+                if args.semantic_orientation_cost
+                else "original score rank"
+            ),
         },
         "candidate_pool_count": int(len(source_indices)),
         "attempts": [],
@@ -306,6 +327,8 @@ def main() -> int:
                     str(args.diagnostic_gravity_tilt_tolerance_deg),
                 ]
             )
+        if args.semantic_orientation_cost:
+            command.append("--semantic-orientation-cost")
         print(
             f"=== planning candidate {source_index} "
             f"(score rank {original_rank}, score {float(score):.6f}) ===",
@@ -314,6 +337,22 @@ def main() -> int:
         completed = subprocess.run(command, check=False)
         plan_status, report_path = read_plan_status(trial_directory)
         accepted = completed.returncode == 0 and plan_status == "success"
+        semantic_cost = None
+        if accepted and args.semantic_orientation_cost and report_path is not None:
+            plan_report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+            semantic_cost = (
+                plan_report.get("result", {})
+                .get("transport", {})
+                .get("orientation_validation", {})
+                .get("soft_cost", {})
+                .get("total")
+            )
+            if semantic_cost is None or not np.isfinite(semantic_cost):
+                raise RuntimeError(
+                    f"candidate {source_index} succeeded without a finite semantic "
+                    "orientation cost"
+                )
+            semantic_cost = float(semantic_cost)
         attempt = {
             "original_goalset_rank": original_rank,
             "source_candidate_index": source_index,
@@ -323,6 +362,7 @@ def main() -> int:
             "plan_status": plan_status,
             "report": report_path,
             "available_for_physical_trial": accepted,
+            "semantic_orientation_cost": semantic_cost,
         }
         manifest["attempts"].append(attempt)
         if accepted:
@@ -341,6 +381,21 @@ def main() -> int:
         "plans_ready" if manifest["successful_plan_directories"] else "no_plans_ready"
     )
     manifest["successful_plan_count"] = successful_plans
+    if args.semantic_orientation_cost:
+        successful_attempts = sorted(
+            (
+                attempt
+                for attempt in manifest["attempts"]
+                if attempt["available_for_physical_trial"]
+            ),
+            key=lambda attempt: (
+                attempt["semantic_orientation_cost"],
+                attempt["original_goalset_rank"],
+            ),
+        )
+        manifest["successful_plan_directories"] = [
+            attempt["output"] for attempt in successful_attempts
+        ]
     eligible_candidate_count = int(
         np.count_nonzero(
             ~np.isin(source_indices, args.exclude_source_candidate_index)

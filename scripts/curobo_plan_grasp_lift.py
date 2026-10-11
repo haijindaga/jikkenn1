@@ -124,6 +124,16 @@ def parse_args() -> argparse.Namespace:
             "postvalidation. Omitted uses the reviewed 2 degree default."
         ),
     )
+    parser.add_argument(
+        "--semantic-orientation-cost",
+        action="store_true",
+        help=(
+            "Simulation-only paper-inspired mode: use cuRobo ToolPoseCriteria "
+            "as a non-terminal orientation soft cost, point the receive part "
+            "toward the human when preserving gravity tilt, and rank rather "
+            "than hard-reject trajectories by the default 2 degree check"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -756,9 +766,11 @@ def main() -> int:
         DEFAULT_HANDOVER_ROLL_DEGREES,
         ORIENTATION_PRESERVATION_TOLERANCE_RAD,
         generate_affordance_handover_goals,
+        generate_directional_gravity_tilt_handover_goal,
         generate_gravity_tilt_preserving_handover_goals,
         generate_orientation_preserving_handover_goal,
         gravity_tilt_deviation_rad,
+        orientation_soft_cost,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
     from panda_handover.vlm_parts import load_handover_parts_report
@@ -784,6 +796,15 @@ def main() -> int:
         raise ValueError(
             "--diagnostic-gravity-tilt-tolerance-deg requires "
             "preserve_gravity_tilt"
+        )
+    if args.semantic_orientation_cost and (
+        not automatic_handover
+        or transport_orientation_policy
+        not in {"preserve_gravity_tilt", "keep_grasp_orientation"}
+    ):
+        raise ValueError(
+            "--semantic-orientation-cost requires automatic handover and a "
+            "preserve_gravity_tilt or keep_grasp_orientation VLM policy"
         )
     orientation_preservation_tolerance_rad = (
         float(np.deg2rad(args.diagnostic_gravity_tilt_tolerance_deg))
@@ -902,6 +923,7 @@ def main() -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("cuRobo grasp planning requires CUDA")
     from curobo._src.geom.collision.buffer_collision import CollisionBuffer
+    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
     from curobo._src.geom.types import Mesh, SceneCfg
     from curobo._src.motion.motion_planner import MotionPlanner
     from curobo._src.motion.motion_planner_cfg import MotionPlannerCfg
@@ -943,7 +965,11 @@ def main() -> int:
         automatic_handover
         and transport_orientation_policy == "preserve_gravity_tilt"
     ):
-        automatic_handover_goal_count = len(DEFAULT_GRAVITY_YAW_DEGREES)
+        automatic_handover_goal_count = (
+            1
+            if args.semantic_orientation_cost
+            else len(DEFAULT_GRAVITY_YAW_DEGREES)
+        )
     planner_max_goalset = max(len(grasp_transforms), automatic_handover_goal_count)
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -1702,13 +1728,24 @@ def main() -> int:
                     )
                 )
             elif transport_orientation_policy == "preserve_gravity_tilt":
-                handover_goal_transforms, handover_goal_diagnostics = (
-                    generate_gravity_tilt_preserving_handover_goals(
-                        grasp_transforms[selected_rank],
-                        receive_part_robot_base,
-                        effective_receiver_position,
+                if args.semantic_orientation_cost:
+                    handover_goal_transforms, handover_goal_diagnostics = (
+                        generate_directional_gravity_tilt_handover_goal(
+                            grasp_transforms[selected_rank],
+                            grasp_part_robot_base,
+                            receive_part_robot_base,
+                            effective_receiver_position,
+                            handover_human_direction,
+                        )
                     )
-                )
+                else:
+                    handover_goal_transforms, handover_goal_diagnostics = (
+                        generate_gravity_tilt_preserving_handover_goals(
+                            grasp_transforms[selected_rank],
+                            receive_part_robot_base,
+                            effective_receiver_position,
+                        )
+                    )
             else:
                 handover_goal_transforms, handover_goal_diagnostics = (
                     generate_affordance_handover_goals(
@@ -1728,7 +1765,9 @@ def main() -> int:
                 "preserve_selected_grasp_orientation"
                 if transport_orientation_policy == "keep_grasp_orientation"
                 else (
-                    "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
+                    "preserve_gravity_tilt_and_point_receive_part_toward_human"
+                    if args.semantic_orientation_cost
+                    else "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
                     if transport_orientation_policy == "preserve_gravity_tilt"
                     else "align_grasp_to_receive_part_axis_with_human_direction_"
                     "then_curobo_selects_roll"
@@ -1763,6 +1802,51 @@ def main() -> int:
                 None, None, None, :, :
             ],
         )
+        semantic_orientation_cost_report = None
+        if args.semantic_orientation_cost:
+            # cuRobo V2 uses position-first axis factors:
+            # [x, y, z, roll, pitch, yaw].  Keep the endpoint fully specified
+            # so the receive part faces the human, while the non-terminal soft
+            # term either preserves gravity tilt (yaw free) or the full grasp
+            # orientation.  The solver's standard transition costs continue to
+            # regularize joint velocity/acceleration.
+            non_terminal_axes = (
+                [0.0, 0.0, 0.0, 1.0, 1.0, 0.0]
+                if transport_orientation_policy == "preserve_gravity_tilt"
+                else [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+            )
+            terminal_criteria = ToolPoseCriteria(
+                terminal_pose_axes_weight_factor=[1.0] * 6,
+                non_terminal_pose_axes_weight_factor=[0.0] * 6,
+                project_distance_to_goal=False,
+                device_cfg=device_cfg,
+            )
+            trajectory_criteria = ToolPoseCriteria(
+                terminal_pose_axes_weight_factor=[1.0] * 6,
+                non_terminal_pose_axes_weight_factor=non_terminal_axes,
+                project_distance_to_goal=False,
+                device_cfg=device_cfg,
+            )
+            criteria_by_frame = {planner.tool_frames[0]: terminal_criteria}
+            planner.ik_solver.update_tool_pose_criteria(criteria_by_frame)
+            planner.trajopt_solver.update_tool_pose_criteria(
+                {planner.tool_frames[0]: trajectory_criteria}
+            )
+            planner.trajopt_solver.enable_tool_pose_tracking(planner.tool_frames)
+            semantic_orientation_cost_report = {
+                "enabled": True,
+                "implementation": "cuRobo V2 ToolPoseCriteria",
+                "tool_frame": planner.tool_frames[0],
+                "axis_order": ["x", "y", "z", "roll", "pitch", "yaw"],
+                "terminal_pose_axes_weight_factor": [1.0] * 6,
+                "non_terminal_pose_axes_weight_factor": non_terminal_axes,
+                "project_distance_to_goal": False,
+                "candidate_specific_weights": False,
+                "paper_relation": (
+                    "planner-level soft orientation cost inspired by arXiv:2410.15185; "
+                    "not a reproduction of its online 45 Hz QP safety filter"
+                ),
+            }
         planner.reset_seed()
         transport_started = time.monotonic()
         transport_result = planner.plan_pose(
@@ -1809,6 +1893,7 @@ def main() -> int:
                     "offset_m": args.grasp_depth_offset_m,
                     "axis": "GraspGenX canonical tool +Z",
                 },
+                "semantic_orientation_cost": semantic_orientation_cost_report,
                 "planner_status": str(
                     getattr(transport_result, "status", "plan_pose returned no result")
                 ),
@@ -1936,6 +2021,18 @@ def main() -> int:
             maximum_deviation = float(
                 max(np.max(lift_deviation), np.max(transport_deviation))
             )
+            combined_deviation = np.concatenate(
+                (lift_deviation, transport_deviation)
+            )
+            combined_quaternions = np.concatenate(
+                (lift_tool_quaternions, transport_tool_quaternions), axis=0
+            )
+            soft_cost = orientation_soft_cost(
+                combined_deviation, combined_quaternions
+            )
+            hard_tolerance_passed = bool(
+                maximum_deviation <= orientation_preservation_tolerance_rad
+            )
             orientation_validation = {
                 "policy": transport_orientation_policy,
                 "reference": validation_reference,
@@ -1953,10 +2050,20 @@ def main() -> int:
                     np.max(transport_deviation)
                 ),
                 "maximum_deviation_rad": maximum_deviation,
+                "hard_tolerance_passed": hard_tolerance_passed,
+                "acceptance_mode": (
+                    "soft_cost_ranking"
+                    if args.semantic_orientation_cost
+                    else "hard_postvalidation"
+                ),
                 "passed": bool(
-                    maximum_deviation <= orientation_preservation_tolerance_rad
+                    np.isfinite(soft_cost["total"])
+                    if args.semantic_orientation_cost
+                    else hard_tolerance_passed
                 ),
                 "implementation": implementation,
+                "soft_cost": soft_cost,
+                "soft_cost_configuration": semantic_orientation_cost_report,
                 "diagnostic_tolerance_override": bool(
                     args.diagnostic_gravity_tilt_tolerance_deg is not None
                 ),
@@ -2042,6 +2149,7 @@ def main() -> int:
                 "affordance_geometry": handover_goal_diagnostics,
             },
             "orientation_validation": orientation_validation,
+            "semantic_orientation_cost": semantic_orientation_cost_report,
         }
 
     report = {
@@ -2134,6 +2242,12 @@ def main() -> int:
             ),
             "diagnostic_gravity_tilt_tolerance_deg": (
                 args.diagnostic_gravity_tilt_tolerance_deg
+            ),
+            "semantic_orientation_cost": args.semantic_orientation_cost,
+            "semantic_orientation_cost_policy": (
+                "shared cuRobo ToolPoseCriteria plus trajectory soft-cost ranking"
+                if args.semantic_orientation_cost
+                else None
             ),
             "planner_max_goalset": planner_max_goalset,
             "handover_receiver_position_robot_base_m": (
@@ -2234,6 +2348,12 @@ def main() -> int:
             ),
             "gravity_tilt_tolerance_is_diagnostic_override": bool(
                 args.diagnostic_gravity_tilt_tolerance_deg is not None
+            ),
+            "orientation_constraint_is_soft_not_hard": bool(
+                args.semantic_orientation_cost
+            ),
+            "soft_orientation_cost_is_not_online_qp_safety_filter": bool(
+                args.semantic_orientation_cost
             ),
             "held_object_collision_checked_during_transport": (
                 transport_report is not None and transport_cost_np is not None
