@@ -299,14 +299,14 @@ def plan_part_support_dual_patches(
     grasp_projection_margin_m: float,
     target_lift_m: float,
 ) -> tuple[ElevatedHeadSupportPlan, ElevatedHeadSupportPlan]:
-    """Place one grasp-clear patch under each side of a two-lobed part.
+    """Place two distinct, dense, grasp-clear support-part patches.
 
-    The support-part projection is split into two equal-population groups along
-    its principal PCA axis. This distributes the fixtures across the observed
-    support-part extent, including paired structures such as scissors handles.
-    Each patch is then selected by the same observed-point density and
-    grasp-clearance rule as :func:`plan_part_support_patch`.
-    No object-specific world position is assumed.
+    The first patch is selected from the full observed support part. Points
+    covered by that footprint are then removed and the same selection rule is
+    applied again. This avoids assuming that the geometric midpoint separates
+    two usable lobes; for example, a scissors mask may include a pivot-side
+    region that is intentionally excluded by the blade clearance constraint.
+    No object-specific world position or manually selected side is assumed.
     """
 
     support = np.asarray(support_points_world, dtype=np.float64)
@@ -315,37 +315,39 @@ def plan_part_support_dual_patches(
     if not np.all(np.isfinite(support)):
         raise ValueError("support points contain non-finite values")
 
-    support_xy = support[:, :2]
-    center = np.median(support_xy, axis=0)
-    centered = support_xy - center[None, :]
-    covariance = centered.T @ centered / float(len(centered))
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    if float(np.max(eigenvalues)) <= 1e-12:
-        raise ValueError("support-part projection has no measurable extent")
-    split_axis = eigenvectors[:, int(np.argmax(eigenvalues))]
-    dominant = int(np.argmax(np.abs(split_axis)))
-    if split_axis[dominant] < 0.0:
-        split_axis = -split_axis
-
-    lateral = centered @ split_axis
-    order = np.argsort(lateral, kind="mergesort")
-    midpoint = len(order) // 2
-    groups = (support[order[:midpoint]], support[order[midpoint:]])
-    if any(len(group) < 3 for group in groups):
-        raise ValueError("support-part projection cannot be split into two patches")
-
-    plans = tuple(
-        plan_part_support_patch(
-            grasp_points_world,
-            group,
-            support_width_m=support_width_m,
-            grasp_projection_margin_m=grasp_projection_margin_m,
-            target_lift_m=target_lift_m,
-        )
-        for group in groups
+    first = plan_part_support_patch(
+        grasp_points_world,
+        support,
+        support_width_m=support_width_m,
+        grasp_projection_margin_m=grasp_projection_margin_m,
+        target_lift_m=target_lift_m,
     )
-    center_a = np.asarray(plans[0].support_center_xy_world_m)
-    center_b = np.asarray(plans[1].support_center_xy_world_m)
+
+    first_center = np.asarray(first.support_center_xy_world_m)
+    first_axis = np.asarray(first.support_axis_xy_world)
+    first_lateral = np.array((-first_axis[1], first_axis[0]), dtype=np.float64)
+    relative = support[:, :2] - first_center[None, :]
+    covered_by_first = (
+        np.abs(relative @ first_axis) <= 0.5 * first.support_length_m
+    ) & (
+        np.abs(relative @ first_lateral) <= 0.5 * first.support_width_m
+    )
+    remaining = support[~covered_by_first]
+    if len(remaining) < 3:
+        raise ValueError(
+            "observed support part has no second dense patch outside the first"
+        )
+    second = plan_part_support_patch(
+        grasp_points_world,
+        remaining,
+        support_width_m=support_width_m,
+        grasp_projection_margin_m=grasp_projection_margin_m,
+        target_lift_m=target_lift_m,
+    )
+
+    plans = (first, second)
+    center_a = np.asarray(first.support_center_xy_world_m)
+    center_b = np.asarray(second.support_center_xy_world_m)
     separation = float(np.linalg.norm(center_a - center_b))
     if separation <= 0.5 * min(
         plans[0].support_width_m, plans[1].support_width_m

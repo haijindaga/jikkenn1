@@ -137,6 +137,34 @@ class SupportFixtureTests(unittest.TestCase):
         )
         self.assertTrue(all(plan.target_lift_m == 0.03 for plan in plans))
 
+    def test_dual_patch_does_not_require_each_pca_half_to_be_safe(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.002, 0.03], [0.00, 0.0, 0.03], [0.00, 0.002, 0.03]]
+        )
+        support = np.array(
+            [
+                [0.002, -0.002, 0.02],
+                [0.004, 0.000, 0.02],
+                [0.006, 0.002, 0.02],
+                [0.040, -0.004, 0.02],
+                [0.040, 0.000, 0.02],
+                [0.040, 0.004, 0.02],
+                [0.075, -0.004, 0.02],
+                [0.075, 0.000, 0.02],
+                [0.075, 0.004, 0.02],
+            ]
+        )
+        plans = plan_part_support_dual_patches(
+            grasp,
+            support,
+            support_width_m=0.02,
+            grasp_projection_margin_m=0.005,
+            target_lift_m=0.03,
+        )
+        centers_x = sorted(plan.support_center_xy_world_m[0] for plan in plans)
+        self.assertGreater(centers_x[0], 0.03)
+        self.assertGreater(centers_x[1], 0.06)
+
     def test_support_fails_when_every_handle_point_overlaps_head(self) -> None:
         head = np.array(
             [[0.00, -0.01, 0.03], [0.00, 0.00, 0.03], [0.00, 0.01, 0.03]]

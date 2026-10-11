@@ -135,11 +135,11 @@ for a controlled comparison.  A depth-refined run must be replanned; an old
 trajectory cannot be reused for this comparison.
 
 The same geometry-derived fixture can be used for scissors without changing
-candidate generation or planner settings. Here the segmented handle points are
-split into two equal-population regions along their principal horizontal axis.
-One compact support patch is selected from each region while the segmented
-blade/pivot grasp region remains clear. This distributes support over the
-observed handles without hard-coded world coordinates:
+candidate generation or planner settings. Here one compact support patch is
+selected from the segmented handle points, its covered points are removed, and
+a second patch is selected from the remainder. Both patches must remain clear
+of the segmented blade/pivot grasp region. This distributes support over the
+observed handles without hard-coded world coordinates or an assumed midpoint:
 
 ```bash
 python scripts/isaac_create_elevated_head_scene.py \
