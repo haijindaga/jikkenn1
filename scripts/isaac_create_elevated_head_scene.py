@@ -130,6 +130,21 @@ def _sha256(path: Path) -> str:
 
 args = parse_args()
 
+from isaacsim import SimulationApp
+
+
+# Isaac Sim's packaged USD Python bindings are registered by Kit startup; they
+# are not importable from a plain env_isaaclab Python process.  This authoring
+# tool deliberately disables viewport updates and never advances the app or
+# physics timeline.  Kit is used only to make the packaged USD plugins
+# available to the standard Pixar USD APIs below.
+simulation_app = SimulationApp(
+    {
+        "headless": True,
+        "disable_viewport_updates": True,
+    }
+)
+
 import numpy as np
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
@@ -407,3 +422,5 @@ try:
 except BaseException:
     traceback.print_exc()
     raise
+finally:
+    simulation_app.close()

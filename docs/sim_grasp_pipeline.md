@@ -72,10 +72,12 @@ scene from the saved hammer-head segmentation.  The source scene is not
 modified.  The support position is selected from observed handle points and is
 required to leave the observed head projection clear.
 
-Scene composition uses Pixar USD APIs directly and does not start Isaac Sim's
-renderer or physics loop. This keeps the offline scene-authoring step independent
-of Vulkan/GPU state; Isaac Sim is started only for the later visual review and
-pipeline execution.
+Scene composition uses Pixar USD APIs directly. Because the USD Python bindings
+bundled with `env_isaaclab` are registered by Isaac Kit startup, the script starts
+a minimal headless `SimulationApp` with viewport updates disabled before importing
+`pxr`. It does not call `SimulationApp.update()`, render a frame, or advance the
+physics timeline. Isaac Sim's normal viewport and physics execution are used only
+for the later visual review and pipeline run.
 
 ```bash
 cd /home/suzutaro/projects/jikkenn1
