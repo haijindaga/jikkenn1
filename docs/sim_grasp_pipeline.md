@@ -287,9 +287,18 @@ This is a lexicographic rule rather than a weighted score: no object-specific
 angle or angular acceptance threshold is introduced. The default
 2 degree value remains in the report as a diagnostic, but no longer hard-rejects
 a soft-cost trajectory.
-Successful plans are ordered by a shared cost comprising mean squared semantic
-orientation deviation plus mean squared adjacent-waypoint angular motion.
-This is inspired by the softened orientation objective in
+For a `preserve_gravity_tilt` handover, the trial planner evaluates every
+eligible pre-grasp candidate under these same settings instead of stopping when
+the first five plans succeed. Planner-feasible candidates are selected
+lexicographically by receive-direction angular error, maximum measured
+transport orientation deviation, and finally the original GraspGenX score
+rank. This introduces neither a weighted sum nor candidate-specific thresholds;
+the manifest records every metric and the complete evaluated pool.
+The shared soft cost, comprising mean squared semantic orientation deviation
+plus mean squared adjacent-waypoint angular motion, remains recorded for every
+successful plan and is the fallback ordering for orientation policies without
+the receive-direction selection above. This is inspired by the softened
+orientation objective in
 <https://arxiv.org/abs/2410.15185> and uses cuRobo's official constrained-cost
 mechanism; it is not a reproduction of that paper's online 45 Hz QP safety
 filter and is not authorized for real-robot execution.

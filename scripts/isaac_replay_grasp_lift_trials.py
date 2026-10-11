@@ -127,10 +127,16 @@ def main() -> int:
     args = parse_args()
     plan_manifest_path = args.plan_trials / "grasp_lift_trial_plans.json"
     plan_manifest = json.loads(plan_manifest_path.read_text(encoding="utf-8"))
-    plan_attempts = [
-        attempt
+    available_attempts = {
+        attempt["output"]: attempt
         for attempt in plan_manifest.get("attempts", [])
         if attempt.get("available_for_physical_trial") is True
+    }
+    selected_directories = plan_manifest.get("successful_plan_directories", [])
+    plan_attempts = [
+        available_attempts[directory]
+        for directory in selected_directories
+        if directory in available_attempts
     ][: args.max_physical_trials]
     if not plan_attempts:
         raise RuntimeError("the planning manifest contains no executable trial plans")
@@ -186,6 +192,7 @@ def main() -> int:
             ),
             "hardware_force_calibrated": False,
             "candidate_specific_parameter_tuning": False,
+            "planning_manifest_selection_order_preserved": True,
             "visual_only_receiver_prim": args.visual_only_receiver_prim,
             "solver_iteration_override_for_every_candidate": (
                 {

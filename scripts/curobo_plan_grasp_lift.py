@@ -144,6 +144,53 @@ def _cpu_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
+def curobo_sphere_slot_report(spheres: np.ndarray) -> dict[str, Any]:
+    """Validate cuRobo spheres while respecting its negative-radius padding.
+
+    cuRobo reserves unused sphere slots with a negative radius and skips them
+    in its collision kernels.  Those slots are not collision geometry and must
+    not make an otherwise valid attached-object model fail validation.
+    """
+
+    values = np.asarray(spheres)
+    if values.ndim < 2 or values.shape[-1] != 4:
+        raise ValueError("cuRobo spheres must have shape (..., N, 4)")
+    radii = values[..., 3]
+    finite_radii = np.isfinite(radii)
+    active = finite_radii & (radii >= 0.0)
+    active_count = np.count_nonzero(active, axis=-1)
+    active_values = values[active]
+    active_radii = radii[active]
+    passed = bool(
+        finite_radii.all()
+        and np.all(active_count > 0)
+        and active_values.size > 0
+        and np.isfinite(active_values).all()
+        and np.all(active_radii > 0.0)
+    )
+    return {
+        "passed": passed,
+        "slot_policy": (
+            "negative-radius slots are cuRobo padding and are excluded; "
+            "active slots must be finite with positive radii"
+        ),
+        "sample_shape": list(values.shape),
+        "all_slot_radii_finite": bool(finite_radii.all()),
+        "all_active_values_finite": bool(
+            active_values.size > 0 and np.isfinite(active_values).all()
+        ),
+        "active_sphere_count_minimum_per_sample": int(active_count.min()),
+        "active_sphere_count_maximum_per_sample": int(active_count.max()),
+        "disabled_slot_count": int(np.count_nonzero(~active)),
+        "active_radius_minimum_m": (
+            float(active_radii.min()) if active_radii.size else None
+        ),
+        "active_radius_maximum_m": (
+            float(active_radii.max()) if active_radii.size else None
+        ),
+    }
+
+
 def _select_source_candidate(
     grasp_transforms: np.ndarray,
     source_indices: np.ndarray,
@@ -2032,6 +2079,9 @@ def main() -> int:
             transport_kinematics.robot_spheres
         ).astype(np.float32, copy=False)
         transport_attached_spheres = transport_spheres_np[..., attached_indices_np, :]
+        transport_attached_sphere_slots = curobo_sphere_slot_report(
+            transport_attached_spheres
+        )
         np.save(output / "transport_full_robot_penetration_cost.npy", transport_cost_np)
         np.save(
             output / "transport_attached_object_spheres_world.npy",
@@ -2200,9 +2250,8 @@ def main() -> int:
                     rtol=0.0,
                 )
             ),
-            "transport_attached_spheres_are_positive_and_finite": bool(
-                np.isfinite(transport_attached_spheres).all()
-                and np.all(transport_attached_spheres[..., 3] > 0.0)
+            "transport_attached_sphere_slots_are_valid": bool(
+                transport_attached_sphere_slots["passed"]
             ),
             "transport_all_waypoints_clear_of_observed_scene": bool(
                 not np.any(transport_cost_np > 0.0)
@@ -2244,6 +2293,7 @@ def main() -> int:
             "orientation_validation": orientation_validation,
             "semantic_orientation_cost": semantic_orientation_cost_report,
             "planning_attempts": transport_planning_attempts,
+            "attached_object_sphere_slots": transport_attached_sphere_slots,
         }
 
     report = {

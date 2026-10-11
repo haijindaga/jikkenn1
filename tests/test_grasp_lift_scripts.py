@@ -451,6 +451,70 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertEqual(status, "handover_transport_planning_failed")
         self.assertEqual(path, str(report))
 
+    def test_direction_aware_trial_selection_is_lexicographic_without_weights(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_selection_test",
+        )
+        attempts = [
+            {
+                "planner_feasible": True,
+                "receive_direction_alignment_error_rad": 0.8,
+                "maximum_transport_orientation_deviation_rad": 0.01,
+                "semantic_orientation_cost": 0.01,
+                "original_goalset_rank": 0,
+            },
+            {
+                "planner_feasible": True,
+                "receive_direction_alignment_error_rad": 0.1,
+                "maximum_transport_orientation_deviation_rad": 0.2,
+                "semantic_orientation_cost": 0.2,
+                "original_goalset_rank": 1,
+            },
+            {
+                "planner_feasible": False,
+                "receive_direction_alignment_error_rad": 0.0,
+                "maximum_transport_orientation_deviation_rad": 0.0,
+                "semantic_orientation_cost": 0.0,
+                "original_goalset_rank": 2,
+            },
+        ]
+        selected = namespace["select_physical_trial_attempts"](
+            attempts,
+            limit=2,
+            direction_aware=True,
+            semantic_orientation_cost=True,
+        )
+        self.assertEqual(
+            [attempt["original_goalset_rank"] for attempt in selected], [1, 0]
+        )
+
+    def test_negative_radius_curobo_padding_is_not_a_failed_sphere(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift.py"),
+            run_name="curobo_plan_grasp_lift_sphere_test",
+        )
+        spheres = np.array(
+            [
+                [
+                    [0.0, 0.0, 0.0, 0.03],
+                    [0.0, 0.0, 0.0, 0.04],
+                    [0.0, 0.0, 0.0, 0.05],
+                    [0.0, 0.0, 0.0, -100.0],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        report = namespace["curobo_sphere_slot_report"](spheres)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["disabled_slot_count"], 1)
+        self.assertEqual(report["active_sphere_count_minimum_per_sample"], 3)
+        all_disabled = spheres.copy()
+        all_disabled[..., 3] = -100.0
+        self.assertFalse(
+            namespace["curobo_sphere_slot_report"](all_disabled)["passed"]
+        )
+
     def test_pregrasp_accepts_handover_rerank_with_static_filter_provenance(self):
         source = (PROJECT / "scripts" / "curobo_plan_pregrasp_a.py").read_text(
             encoding="utf-8"

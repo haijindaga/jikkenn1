@@ -69,7 +69,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Apply one common paper-inspired cuRobo orientation soft-cost policy "
-            "to every candidate and rank successful plans by that cost"
+            "to every candidate. For preserve_gravity_tilt, exhaust the eligible "
+            "pool and select lexicographically by receive-direction error, maximum "
+            "transport deviation, then original score rank."
         ),
     )
     parser.add_argument(
@@ -157,6 +159,46 @@ def write_manifest(path: Path, manifest: dict) -> None:
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
+def _finite_metric(value: object, *, name: str, source_index: int) -> float:
+    if value is None or not np.isfinite(value):
+        raise RuntimeError(
+            f"candidate {source_index} succeeded without a finite {name}"
+        )
+    return float(value)
+
+
+def select_physical_trial_attempts(
+    attempts: list[dict],
+    *,
+    limit: int,
+    direction_aware: bool,
+    semantic_orientation_cost: bool,
+) -> list[dict]:
+    """Select planner-feasible trials with a fixed, candidate-independent rule."""
+
+    feasible = [attempt for attempt in attempts if attempt["planner_feasible"]]
+    if direction_aware:
+        return sorted(
+            feasible,
+            key=lambda attempt: (
+                attempt["receive_direction_alignment_error_rad"],
+                attempt["maximum_transport_orientation_deviation_rad"],
+                attempt["original_goalset_rank"],
+            ),
+        )[:limit]
+    if semantic_orientation_cost:
+        return sorted(
+            feasible,
+            key=lambda attempt: (
+                attempt["semantic_orientation_cost"],
+                attempt["original_goalset_rank"],
+            ),
+        )[:limit]
+    return sorted(
+        feasible, key=lambda attempt: attempt["original_goalset_rank"]
+    )[:limit]
+
+
 def main() -> int:
     args = parse_args()
     source_indices = np.load(
@@ -169,6 +211,20 @@ def main() -> int:
         raise ValueError("pre-grasp candidate indices and scores are empty or mismatched")
     if len(np.unique(source_indices)) != len(source_indices):
         raise ValueError("pre-grasp source candidate indices must be unique")
+
+    transport_orientation_policy = None
+    if args.transport_orientation_policy_report is not None:
+        policy_report = json.loads(
+            args.transport_orientation_policy_report.read_text(encoding="utf-8")
+        )
+        transport_orientation_policy = policy_report.get(
+            "transport_orientation_policy"
+        )
+    direction_aware_selection = bool(
+        args.semantic_orientation_cost
+        and args.handover_receiver_position_robot_base_m is not None
+        and transport_orientation_policy == "preserve_gravity_tilt"
+    )
 
     output = args.output
     if output.exists() and any(output.iterdir()):
@@ -231,10 +287,21 @@ def main() -> int:
                 args.semantic_orientation_cost
             ),
             "successful_plan_order": (
-                "ascending semantic orientation cost, then original score rank"
+                "lexicographic receive-direction angle, maximum transport "
+                "orientation deviation, then original score rank"
+                if direction_aware_selection
+                else "ascending semantic orientation cost, then original score rank"
                 if args.semantic_orientation_cost
                 else "original score rank"
             ),
+            "direction_aware_candidate_selection": direction_aware_selection,
+            "candidate_search_scope": (
+                "all eligible pregrasp candidates"
+                if direction_aware_selection
+                else "until the requested physical-trial count is available"
+            ),
+            "selection_uses_weighted_sum": False,
+            "selection_uses_candidate_specific_thresholds": False,
         },
         "candidate_pool_count": int(len(source_indices)),
         "attempts": [],
@@ -243,11 +310,14 @@ def main() -> int:
     write_manifest(manifest_path, manifest)
 
     planner_script = Path(__file__).with_name("curobo_plan_grasp_lift.py")
-    successful_plans = 0
+    planner_feasible_plans = 0
     for original_rank, (source_index, score) in enumerate(
         zip(source_indices, scores, strict=True)
     ):
-        if successful_plans >= args.max_physical_trials:
+        if (
+            not direction_aware_selection
+            and planner_feasible_plans >= args.max_physical_trials
+        ):
             break
         source_index = int(source_index)
         if source_index in args.exclude_source_candidate_index:
@@ -338,21 +408,39 @@ def main() -> int:
         plan_status, report_path = read_plan_status(trial_directory)
         accepted = completed.returncode == 0 and plan_status == "success"
         semantic_cost = None
+        direction_error_rad = None
+        direction_error_deg = None
+        maximum_transport_orientation_deviation_rad = None
         if accepted and args.semantic_orientation_cost and report_path is not None:
             plan_report = json.loads(Path(report_path).read_text(encoding="utf-8"))
-            semantic_cost = (
-                plan_report.get("result", {})
-                .get("transport", {})
-                .get("orientation_validation", {})
-                .get("soft_cost", {})
-                .get("total")
+            transport_report = plan_report.get("result", {}).get("transport", {})
+            orientation_validation = transport_report.get(
+                "orientation_validation", {}
             )
-            if semantic_cost is None or not np.isfinite(semantic_cost):
-                raise RuntimeError(
-                    f"candidate {source_index} succeeded without a finite semantic "
-                    "orientation cost"
+            semantic_cost = _finite_metric(
+                orientation_validation.get("soft_cost", {}).get("total"),
+                name="semantic orientation cost",
+                source_index=source_index,
+            )
+            if direction_aware_selection:
+                selected_direction = transport_report.get("goal", {}).get(
+                    "selected_receive_direction_priority", {}
                 )
-            semantic_cost = float(semantic_cost)
+                direction_error_rad = _finite_metric(
+                    selected_direction.get("alignment_error_rad"),
+                    name="receive-direction alignment error",
+                    source_index=source_index,
+                )
+                direction_error_deg = _finite_metric(
+                    selected_direction.get("alignment_error_deg"),
+                    name="receive-direction alignment error in degrees",
+                    source_index=source_index,
+                )
+                maximum_transport_orientation_deviation_rad = _finite_metric(
+                    orientation_validation.get("maximum_transport_deviation_rad"),
+                    name="maximum transport orientation deviation",
+                    source_index=source_index,
+                )
         attempt = {
             "original_goalset_rank": original_rank,
             "source_candidate_index": source_index,
@@ -361,13 +449,18 @@ def main() -> int:
             "return_code": completed.returncode,
             "plan_status": plan_status,
             "report": report_path,
-            "available_for_physical_trial": accepted,
+            "planner_feasible": accepted,
+            "available_for_physical_trial": False,
             "semantic_orientation_cost": semantic_cost,
+            "receive_direction_alignment_error_rad": direction_error_rad,
+            "receive_direction_alignment_error_deg": direction_error_deg,
+            "maximum_transport_orientation_deviation_rad": (
+                maximum_transport_orientation_deviation_rad
+            ),
         }
         manifest["attempts"].append(attempt)
         if accepted:
-            successful_plans += 1
-            manifest["successful_plan_directories"].append(str(trial_directory))
+            planner_feasible_plans += 1
         write_manifest(manifest_path, manifest)
         if plan_status == "missing_report":
             manifest["status"] = "planning_error"
@@ -377,25 +470,24 @@ def main() -> int:
                 "refusing to classify an infrastructure error as a rejected grasp"
             )
 
-    manifest["status"] = (
-        "plans_ready" if manifest["successful_plan_directories"] else "no_plans_ready"
+    selected_attempts = select_physical_trial_attempts(
+        manifest["attempts"],
+        limit=args.max_physical_trials,
+        direction_aware=direction_aware_selection,
+        semantic_orientation_cost=args.semantic_orientation_cost,
     )
-    manifest["successful_plan_count"] = successful_plans
-    if args.semantic_orientation_cost:
-        successful_attempts = sorted(
-            (
-                attempt
-                for attempt in manifest["attempts"]
-                if attempt["available_for_physical_trial"]
-            ),
-            key=lambda attempt: (
-                attempt["semantic_orientation_cost"],
-                attempt["original_goalset_rank"],
-            ),
+    selected_outputs = {attempt["output"] for attempt in selected_attempts}
+    for attempt in manifest["attempts"]:
+        attempt["available_for_physical_trial"] = (
+            attempt["output"] in selected_outputs
         )
-        manifest["successful_plan_directories"] = [
-            attempt["output"] for attempt in successful_attempts
-        ]
+    manifest["successful_plan_directories"] = [
+        attempt["output"] for attempt in selected_attempts
+    ]
+    manifest["status"] = "plans_ready" if selected_attempts else "no_plans_ready"
+    manifest["planner_feasible_plan_count"] = planner_feasible_plans
+    manifest["successful_plan_count"] = len(selected_attempts)
+    manifest["selected_physical_trial_count"] = len(selected_attempts)
     eligible_candidate_count = int(
         np.count_nonzero(
             ~np.isin(source_indices, args.exclude_source_candidate_index)
@@ -408,7 +500,7 @@ def main() -> int:
     write_manifest(manifest_path, manifest)
     print(json.dumps(manifest, indent=2), flush=True)
     print(f"saved: {manifest_path}", flush=True)
-    return 0 if successful_plans else 2
+    return 0 if selected_attempts else 2
 
 
 if __name__ == "__main__":
