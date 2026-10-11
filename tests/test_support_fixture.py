@@ -40,6 +40,10 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertIn('"support-part-supported-grasp-clear"', source)
         self.assertIn('"source_scene_modified": False', source)
         self.assertIn('"candidate_or_planner_parameters_changed": False', source)
+        self.assertNotIn("SimulationApp", source)
+        self.assertIn("Usd.Stage.Open", source)
+        self.assertIn("UsdGeom.BBoxCache", source)
+        self.assertIn("GetRootLayer().Export", source)
 
         capture_source = (
             Path(__file__).resolve().parents[1]

@@ -72,6 +72,11 @@ scene from the saved hammer-head segmentation.  The source scene is not
 modified.  The support position is selected from observed handle points and is
 required to leave the observed head projection clear.
 
+Scene composition uses Pixar USD APIs directly and does not start Isaac Sim's
+renderer or physics loop. This keeps the offline scene-authoring step independent
+of Vulkan/GPU state; Isaac Sim is started only for the later visual review and
+pipeline execution.
+
 ```bash
 cd /home/suzutaro/projects/jikkenn1
 conda activate env_isaaclab

@@ -130,24 +130,34 @@ def _sha256(path: Path) -> str:
 
 args = parse_args()
 
-from isaacsim import SimulationApp
+import numpy as np
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+from panda_handover.support_fixture import (
+    masked_points_world,
+    plan_handle_support,
+    plan_part_support_patch,
+)
 
 
-simulation_app = SimulationApp({"headless": True})
-try:
-    import numpy as np
-    import omni.timeline
-    import omni.usd
-    from isaacsim.core.experimental.utils import stage as stage_utils
-    from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
-    from pxr import Gf, Usd, UsdGeom, UsdPhysics
-
-    from panda_handover.support_fixture import (
-        masked_points_world,
-        plan_handle_support,
-        plan_part_support_patch,
+def _world_aabb(cache: UsdGeom.BBoxCache, prim: Usd.Prim) -> np.ndarray:
+    aligned = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+    minimum = aligned.GetMin()
+    maximum = aligned.GetMax()
+    return np.asarray(
+        [
+            minimum[0],
+            minimum[1],
+            minimum[2],
+            maximum[0],
+            maximum[1],
+            maximum[2],
+        ],
+        dtype=np.float64,
     )
 
+
+try:
     required_capture_files = (
         "points_camera.npy",
         "T_world_camera.npy",
@@ -205,14 +215,8 @@ try:
         )
 
     base_hash_before = _sha256(args.base_scene)
-    timeline = omni.timeline.get_timeline_interface()
-    timeline.stop()
-    context = omni.usd.get_context()
-    result = context.open_stage(str(args.base_scene))
-    print(f"open_stage returned: {result}", flush=True)
-    for _ in range(120):
-        simulation_app.update()
-    stage = context.get_stage()
+    stage = Usd.Stage.Open(str(args.base_scene))
+    print(f"open_stage returned: {stage is not None}", flush=True)
     if stage is None:
         raise RuntimeError(f"USD stage did not open: {args.base_scene}")
     if UsdGeom.GetStageUpAxis(stage) != UsdGeom.Tokens.z:
@@ -241,15 +245,17 @@ try:
             "target parent is transformed; refusing to treat world-Z lift as local-Z"
         )
 
-    bbox_cache = create_bbox_cache()
-    table_aabb = np.asarray(
-        compute_aabb(bbox_cache, args.table_prim, include_children=True),
-        dtype=np.float64,
+    bbox_cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        [
+            UsdGeom.Tokens.default_,
+            UsdGeom.Tokens.render,
+            UsdGeom.Tokens.proxy,
+        ],
+        useExtentsHint=True,
     )
-    target_aabb_before = np.asarray(
-        compute_aabb(bbox_cache, args.target_prim, include_children=True),
-        dtype=np.float64,
-    )
+    table_aabb = _world_aabb(bbox_cache, table_prim)
+    target_aabb_before = _world_aabb(bbox_cache, target_prim)
     if not np.all(np.isfinite(table_aabb)) or not np.all(np.isfinite(target_aabb_before)):
         raise RuntimeError("table or target has invalid bounds")
     table_top_z_m = float(table_aabb[5])
@@ -292,17 +298,10 @@ try:
     world_prim.SetCustomDataByKey(
         "panda_handover:diagnostic_support_prim", args.support_prim
     )
-    simulation_app.update()
 
-    bbox_cache = create_bbox_cache()
-    target_aabb_after = np.asarray(
-        compute_aabb(bbox_cache, args.target_prim, include_children=True),
-        dtype=np.float64,
-    )
-    support_aabb = np.asarray(
-        compute_aabb(bbox_cache, args.support_prim, include_children=True),
-        dtype=np.float64,
-    )
+    bbox_cache.Clear()
+    target_aabb_after = _world_aabb(bbox_cache, target_prim)
+    support_aabb = _world_aabb(bbox_cache, support.GetPrim())
     checks = {
         "target_raised_by_requested_amount": bool(
             np.isclose(
@@ -339,7 +338,7 @@ try:
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    if not stage_utils.save_stage(str(args.output)):
+    if not stage.GetRootLayer().Export(str(args.output)):
         raise RuntimeError(f"failed to save diagnostic scene: {args.output}")
     base_hash_after = _sha256(args.base_scene)
     if base_hash_after != base_hash_before:
@@ -406,9 +405,5 @@ try:
     print(f"saved: {args.output}", flush=True)
     print(f"saved: {report_path}", flush=True)
 except BaseException:
-    # Isaac Sim shutdown can hide a pending Python exception on some builds.
-    # Emit it before closing so a failed diagnostic never looks successful.
     traceback.print_exc()
     raise
-finally:
-    simulation_app.close()
