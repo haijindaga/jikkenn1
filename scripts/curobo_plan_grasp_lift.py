@@ -93,6 +93,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--handover-region-json",
+        type=Path,
+        help=(
+            "Automatic handover region exported by the Windows scene-layout "
+            "editor. The handover box and humanDirection are consumed in its "
+            "declared robot_base/metres/Z-up frame."
+        ),
+    )
+    parser.add_argument(
+        "--handover-region-samples-per-axis",
+        type=int,
+        default=3,
+        help=(
+            "Positive odd lattice resolution used to submit the bounded region "
+            "as center-first cuRobo goalsets (default: 3)."
+        ),
+    )
+    parser.add_argument(
         "--handover-human-direction-robot-base",
         type=float,
         nargs=3,
@@ -128,11 +146,9 @@ def parse_args() -> argparse.Namespace:
         "--semantic-orientation-cost",
         action="store_true",
         help=(
-            "Simulation-only paper-inspired mode: use cuRobo ToolPoseCriteria "
-            "as a non-terminal orientation soft cost, preserve gravity tilt "
-            "across the common uniform yaw goalset, try that goalset in direct "
-            "receive-direction alignment order, and rank rather than hard-reject "
-            "trajectories by the default 2 degree check."
+            "Compatibility flag retained for existing commands. Automatic "
+            "handover now always applies the VLM-selected cuRobo ToolPoseCriteria "
+            "during trajectory optimization."
         ),
     )
     return parser.parse_args()
@@ -742,6 +758,11 @@ def main() -> int:
         raise ValueError("--grasp-depth-offset-m must be finite and non-negative")
     if args.max_attempts <= 0:
         raise ValueError("--max-attempts must be positive")
+    if (
+        args.handover_region_samples_per_axis <= 0
+        or args.handover_region_samples_per_axis % 2 == 0
+    ):
+        raise ValueError("--handover-region-samples-per-axis must be positive and odd")
     if args.diagnostic_gravity_tilt_tolerance_deg is not None and (
         not np.isfinite(args.diagnostic_gravity_tilt_tolerance_deg)
         or not 0.0 < args.diagnostic_gravity_tilt_tolerance_deg <= 90.0
@@ -754,14 +775,26 @@ def main() -> int:
         and args.handover_goal_position_robot_base_m is None
     ):
         raise ValueError("a handover quaternion requires a handover goal position")
-    if (args.handover_receiver_position_robot_base_m is None) != (
-        args.handover_human_direction_robot_base is None
+    point_handover_requested = (
+        args.handover_receiver_position_robot_base_m is not None
+    )
+    region_handover_requested = args.handover_region_json is not None
+    if point_handover_requested != (
+        args.handover_human_direction_robot_base is not None
     ):
         raise ValueError(
             "automatic handover requires both receiver position and human direction"
         )
+    if region_handover_requested and (
+        point_handover_requested
+        or args.handover_human_direction_robot_base is not None
+    ):
+        raise ValueError(
+            "--handover-region-json already supplies the region and human direction; "
+            "do not combine it with point handover arguments"
+        )
     if (
-        args.handover_receiver_position_robot_base_m is not None
+        (point_handover_requested or region_handover_requested)
         and args.handover_goal_position_robot_base_m is not None
     ):
         raise ValueError(
@@ -775,10 +808,13 @@ def main() -> int:
         )
         if not np.isfinite(handover_goal_position).all():
             raise ValueError("handover goal position must contain finite values")
-    automatic_handover = args.handover_receiver_position_robot_base_m is not None
+    automatic_handover = point_handover_requested or region_handover_requested
     handover_receiver_position = None
+    handover_region_size = None
+    handover_region_report = None
+    handover_region_position_groups = None
     handover_human_direction = None
-    if automatic_handover:
+    if point_handover_requested:
         handover_receiver_position = np.asarray(
             args.handover_receiver_position_robot_base_m, dtype=np.float32
         )
@@ -792,7 +828,13 @@ def main() -> int:
             or np.linalg.norm(handover_human_direction) <= 1e-8
         ):
             raise ValueError("handover human direction must be finite and non-zero")
+        handover_region_size = np.zeros(3, dtype=np.float32)
     elif args.handover_height_policy != "receiver-position":
+        if region_handover_requested:
+            raise ValueError(
+                "a bounded handover region uses its exported Z bounds; "
+                "--handover-height-policy must remain receiver-position"
+            )
         raise ValueError("--handover-height-policy requires automatic handover")
     project_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project_root / "src"))
@@ -810,18 +852,60 @@ def main() -> int:
         transform_points,
     )
     from panda_handover.handover import (
-        DEFAULT_GRAVITY_YAW_DEGREES,
         DEFAULT_HANDOVER_ROLL_DEGREES,
         ORIENTATION_PRESERVATION_TOLERANCE_RAD,
         generate_affordance_handover_goals,
-        generate_gravity_tilt_preserving_handover_goals,
+        generate_directional_gravity_tilt_handover_goal,
         generate_orientation_preserving_handover_goal,
         gravity_tilt_deviation_rad,
+        handover_region_from_scene_layout,
         order_handover_goals_by_receive_direction,
         orientation_soft_cost,
+        sample_handover_region_center_first,
     )
     from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
     from panda_handover.vlm_parts import load_handover_parts_report
+
+    if region_handover_requested:
+        assert args.handover_region_json is not None
+        layout = json.loads(args.handover_region_json.read_text(encoding="utf-8"))
+        (
+            handover_receiver_position,
+            handover_region_size,
+            handover_human_direction,
+            handover_region_report,
+        ) = handover_region_from_scene_layout(layout)
+    elif point_handover_requested:
+        assert handover_receiver_position is not None
+        assert handover_region_size is not None
+        assert handover_human_direction is not None
+        handover_region_report = {
+            "source": "legacy point arguments",
+            "frame": "robot_base",
+            "units": "metres",
+            "shape": "point",
+            "center_robot_base_m": handover_receiver_position.tolist(),
+            "size_m": handover_region_size.tolist(),
+            "minimum_robot_base_m": handover_receiver_position.tolist(),
+            "maximum_robot_base_m": handover_receiver_position.tolist(),
+            "human_direction_robot_base": (
+                handover_human_direction
+                / np.linalg.norm(handover_human_direction)
+            ).tolist(),
+        }
+    if automatic_handover:
+        assert handover_receiver_position is not None
+        assert handover_region_size is not None
+        assert handover_human_direction is not None
+        handover_region_position_groups, handover_region_sampling = (
+            sample_handover_region_center_first(
+                handover_receiver_position,
+                handover_region_size,
+                samples_per_axis=args.handover_region_samples_per_axis,
+            )
+        )
+        assert handover_region_report is not None
+        handover_region_report["sampling"] = handover_region_sampling
 
     transport_orientation_policy = "free"
     if args.transport_orientation_policy_report is not None:
@@ -1007,13 +1091,19 @@ def main() -> int:
     # automatic handover later submits all fixed roll variants to this same
     # planner. Reserve capacity for the largest goalset used in either phase.
     automatic_handover_goal_count = 1
-    if automatic_handover and transport_orientation_policy == "free":
-        automatic_handover_goal_count = len(DEFAULT_HANDOVER_ROLL_DEGREES)
-    elif (
-        automatic_handover
-        and transport_orientation_policy == "preserve_gravity_tilt"
-    ):
-        automatic_handover_goal_count = len(DEFAULT_GRAVITY_YAW_DEGREES)
+    if automatic_handover:
+        assert handover_region_position_groups is not None
+        positions_per_group = max(
+            len(group) for group in handover_region_position_groups
+        )
+        orientations_per_position = (
+            len(DEFAULT_HANDOVER_ROLL_DEGREES)
+            if transport_orientation_policy == "free"
+            else 1
+        )
+        automatic_handover_goal_count = (
+            positions_per_group * orientations_per_position
+        )
     planner_max_goalset = max(len(grasp_transforms), automatic_handover_goal_count)
     planner_cfg = MotionPlannerCfg.create(
         robot=args.robot,
@@ -1713,8 +1803,12 @@ def main() -> int:
     transport_cost_np = None
     if handover_goal_position is not None or automatic_handover:
         handover_goal_diagnostics = None
+        handover_goal_group_slices = None
+        goal_metadata = []
         if automatic_handover:
             assert handover_receiver_position is not None
+            assert handover_region_position_groups is not None
+            assert handover_region_report is not None
             assert handover_human_direction is not None
             assert grasp_part_robot_base is not None
             assert receive_part_robot_base is not None
@@ -1763,56 +1857,135 @@ def main() -> int:
                         "additional_vertical_transport_requested": None,
                     }
                 )
-            if transport_orientation_policy == "keep_grasp_orientation":
-                handover_goal_transforms, handover_goal_diagnostics = (
-                    generate_orientation_preserving_handover_goal(
-                        grasp_transforms[selected_rank],
-                        receive_part_robot_base,
-                        effective_receiver_position,
-                    )
-                )
-            elif transport_orientation_policy == "preserve_gravity_tilt":
-                handover_goal_transforms, handover_goal_diagnostics = (
-                    generate_gravity_tilt_preserving_handover_goals(
-                        grasp_transforms[selected_rank],
-                        receive_part_robot_base,
-                        effective_receiver_position,
-                    )
-                )
-                if args.semantic_orientation_cost:
-                    handover_goal_transforms, direction_priority = (
-                        order_handover_goals_by_receive_direction(
-                            handover_goal_transforms,
+            position_groups = [group.copy() for group in handover_region_position_groups]
+            if args.handover_height_policy == "preserve-lift-end":
+                for group in position_groups:
+                    group[:, 2] = effective_receiver_position[2]
+
+            goal_arrays = []
+            goal_metadata = []
+            handover_goal_group_slices = []
+            region_group_reports = []
+            goal_start = 0
+            incompatible_keep_orientation = None
+            for group_rank, receiver_positions in enumerate(position_groups):
+                group_arrays = []
+                for receiver_position in receiver_positions:
+                    if transport_orientation_policy == "keep_grasp_orientation":
+                        goals_at_position, goal_diagnostics = (
+                            generate_orientation_preserving_handover_goal(
+                                grasp_transforms[selected_rank],
+                                receive_part_robot_base,
+                                receiver_position,
+                            )
+                        )
+                        _, direction_report = order_handover_goals_by_receive_direction(
+                            goals_at_position,
                             grasp_transforms[selected_rank],
                             grasp_part_robot_base,
                             receive_part_robot_base,
                             handover_human_direction,
                         )
-                    )
-                    handover_goal_diagnostics["staged_validation"] = {
-                        "current_gate": "gravity_tilt_then_direction_priority",
-                        "human_direction_alignment_enforced": False,
-                        "human_direction_priority_enforced": True,
-                        "reason": (
-                            "try the unchanged gravity-tilt yaw goalset in direct "
-                            "geometric alignment order without an angular acceptance "
-                            "threshold or weighted scoring"
+                        direction_error = float(
+                            direction_report["alignment_error_rad_in_attempt_order"][0]
+                        )
+                        goal_diagnostics["horizontal_direction_alignment_error_rad"] = (
+                            direction_error
+                        )
+                        goal_diagnostics["human_direction_alignment_enforced"] = bool(
+                            direction_error <= orientation_preservation_tolerance_rad
+                        )
+                        if not goal_diagnostics["human_direction_alignment_enforced"]:
+                            incompatible_keep_orientation = goal_diagnostics
+                            break
+                    elif transport_orientation_policy == "preserve_gravity_tilt":
+                        goals_at_position, goal_diagnostics = (
+                            generate_directional_gravity_tilt_handover_goal(
+                                grasp_transforms[selected_rank],
+                                grasp_part_robot_base,
+                                receive_part_robot_base,
+                                receiver_position,
+                                handover_human_direction,
+                            )
+                        )
+                    else:
+                        goals_at_position, goal_diagnostics = (
+                            generate_affordance_handover_goals(
+                                grasp_transforms[selected_rank],
+                                grasp_part_robot_base,
+                                receive_part_robot_base,
+                                receiver_position,
+                                handover_human_direction,
+                            )
+                        )
+                    group_arrays.append(goals_at_position)
+                    for local_orientation_rank in range(len(goals_at_position)):
+                        goal_metadata.append(
+                            {
+                                "horizontal_priority_rank": group_rank,
+                                "receiver_position_robot_base_m": (
+                                    receiver_position.astype(float).tolist()
+                                ),
+                                "orientation_variant_rank": local_orientation_rank,
+                                "horizontal_direction_alignment_error_rad": float(
+                                    goal_diagnostics.get(
+                                        "horizontal_direction_alignment_error_rad", 0.0
+                                    )
+                                ),
+                            }
+                        )
+                if incompatible_keep_orientation is not None:
+                    break
+                group_transforms = np.concatenate(group_arrays, axis=0)
+                goal_arrays.append(group_transforms)
+                goal_stop = goal_start + len(group_transforms)
+                handover_goal_group_slices.append((goal_start, goal_stop))
+                region_group_reports.append(
+                    {
+                        "horizontal_priority_rank": group_rank,
+                        "goal_start": goal_start,
+                        "goal_stop": goal_stop,
+                        "goal_count": len(group_transforms),
+                        "receiver_positions_robot_base_m": (
+                            receiver_positions.astype(float).tolist()
                         ),
                     }
-                    handover_goal_diagnostics["direction_priority"] = (
-                        direction_priority
-                    )
-            else:
-                handover_goal_transforms, handover_goal_diagnostics = (
-                    generate_affordance_handover_goals(
-                        grasp_transforms[selected_rank],
-                        grasp_part_robot_base,
-                        receive_part_robot_base,
-                        effective_receiver_position,
-                        handover_human_direction,
-                    )
                 )
-            handover_goal_diagnostics["height"] = receiver_height_diagnostics
+                goal_start = goal_stop
+            if incompatible_keep_orientation is not None:
+                failure_report = {
+                    "status": "handover_receive_direction_incompatible",
+                    "reason": (
+                        "keep_grasp_orientation leaves no rotational freedom for "
+                        "this grasp candidate to point the receive part at the human"
+                    ),
+                    "orientation_tolerance_rad": orientation_preservation_tolerance_rad,
+                    "geometry": incompatible_keep_orientation,
+                    "safety": {
+                        "trajectory_saved": False,
+                        "trajectory_executed": False,
+                    },
+                }
+                failure_path = output / "handover_transport_failure.json"
+                failure_path.write_text(
+                    json.dumps(failure_report, indent=2) + "\n", encoding="utf-8"
+                )
+                planner.destroy()
+                print(json.dumps(failure_report, indent=2))
+                print(f"saved: {failure_path}")
+                return 2
+            handover_goal_transforms = np.concatenate(goal_arrays, axis=0)
+            handover_goal_diagnostics = {
+                "policy": (
+                    "joint cuRobo planning over receive direction, VLM-selected "
+                    "trajectory tilt, and a bounded handover region"
+                ),
+                "region": handover_region_report,
+                "horizontal_priority_groups": region_group_reports,
+                "goal_metadata": goal_metadata,
+                "height": receiver_height_diagnostics,
+                "goal_count": len(handover_goal_transforms),
+            }
             handover_goal_positions = handover_goal_transforms[:, :3, 3]
             handover_goal_quaternions = rotation_matrix_to_quaternion_wxyz(
                 handover_goal_transforms[:, :3, :3]
@@ -1821,7 +1994,7 @@ def main() -> int:
                 "preserve_selected_grasp_orientation"
                 if transport_orientation_policy == "keep_grasp_orientation"
                 else (
-                    "preserve_selected_grasp_gravity_tilt_then_curobo_selects_yaw"
+                    "preserve_gravity_tilt_and_align_receive_direction_by_world_yaw"
                     if transport_orientation_policy == "preserve_gravity_tilt"
                     else "align_grasp_to_receive_part_axis_with_human_direction_"
                     "then_curobo_selects_roll"
@@ -1845,6 +2018,15 @@ def main() -> int:
                 handover_orientation_policy = "explicit_quaternion_wxyz"
             handover_goal_positions = handover_goal_position[None, :]
             handover_goal_quaternions = handover_goal_quaternion[None, :]
+            handover_goal_group_slices = [(0, 1)]
+            goal_metadata = [
+                {
+                    "horizontal_priority_rank": 0,
+                    "receiver_position_robot_base_m": None,
+                    "orientation_variant_rank": 0,
+                    "horizontal_direction_alignment_error_rad": None,
+                }
+            ]
         def goal_tool_pose(goal_indices: slice) -> GoalToolPose:
             return GoalToolPose(
                 tool_frames=planner.tool_frames,
@@ -1856,7 +2038,12 @@ def main() -> int:
                 ).to(device_cfg.device)[None, None, None, :, :],
             )
         semantic_orientation_cost_report = None
-        if args.semantic_orientation_cost:
+        planner_orientation_constraint_enabled = bool(
+            automatic_handover
+            and transport_orientation_policy
+            in {"preserve_gravity_tilt", "keep_grasp_orientation"}
+        )
+        if planner_orientation_constraint_enabled:
             # cuRobo V2 uses position-first axis factors:
             # [x, y, z, roll, pitch, yaw].  Keep the endpoint fully specified
             # so the receive part faces the human, while the non-terminal soft
@@ -1896,33 +2083,37 @@ def main() -> int:
                 "project_distance_to_goal": False,
                 "candidate_specific_weights": False,
                 "goal_selection": (
-                    "try existing yaw goals in ascending receive-direction "
-                    "angle and accept the first planner-feasible goal"
-                    if transport_orientation_policy == "preserve_gravity_tilt"
-                    else "single goal or standard cuRobo goalset selection"
+                    "center-first XY region groups; all sampled Z and allowed "
+                    "orientation variants in each group are one cuRobo goalset"
+                ),
+                "receive_direction": (
+                    "encoded in every terminal pose before cuRobo planning"
+                ),
+                "handover_region": "encoded as finite cuRobo terminal goalsets",
+                "trajectory_tilt": (
+                    "encoded as non-terminal ToolPoseCriteria during TrajOpt"
                 ),
                 "paper_relation": (
-                    "planner-level soft orientation cost inspired by arXiv:2410.15185; "
-                    "not a reproduction of its online 45 Hz QP safety filter"
+                    "uses cuRobo's official constrained trajectory optimization; "
+                    "not a reproduction of an external online QP safety filter"
                 ),
             }
-        sequential_direction_selection = bool(
-            args.semantic_orientation_cost
-            and automatic_handover
-            and transport_orientation_policy == "preserve_gravity_tilt"
-        )
+        sequential_region_selection = bool(automatic_handover)
         transport_planning_attempts = []
         transport_result = None
         transport_success = False
         selected_transport_goal_rank = None
         transport_elapsed_s = 0.0
-        if sequential_direction_selection:
-            for goal_rank in range(len(handover_goal_positions)):
+        if sequential_region_selection:
+            assert handover_goal_group_slices is not None
+            for group_rank, (goal_start, goal_stop) in enumerate(
+                handover_goal_group_slices
+            ):
                 planner.reset_seed()
                 transport_started = time.monotonic()
                 transport_result = planner.plan_pose(
                     current_state=lift_end,
-                    goal_tool_poses=goal_tool_pose(slice(goal_rank, goal_rank + 1)),
+                    goal_tool_poses=goal_tool_pose(slice(goal_start, goal_stop)),
                     max_attempts=args.max_attempts,
                 )
                 attempt_elapsed_s = time.monotonic() - transport_started
@@ -1934,7 +2125,10 @@ def main() -> int:
                 )
                 transport_planning_attempts.append(
                     {
-                        "attempt_rank": goal_rank,
+                        "attempt_rank": group_rank,
+                        "horizontal_priority_rank": group_rank,
+                        "goal_start": goal_start,
+                        "goal_stop": goal_stop,
                         "planner_reported_success": transport_success,
                         "wall_time_s": attempt_elapsed_s,
                         "planner_status": str(
@@ -1943,7 +2137,13 @@ def main() -> int:
                     }
                 )
                 if transport_success:
-                    selected_transport_goal_rank = goal_rank
+                    goalset_index = getattr(transport_result, "goalset_index", None)
+                    if goalset_index is not None:
+                        selected_transport_goal_rank = goal_start + int(
+                            _cpu_numpy(goalset_index).reshape(-1)[0]
+                        )
+                    elif goal_stop - goal_start == 1:
+                        selected_transport_goal_rank = goal_start
                     break
         else:
             planner.reset_seed()
@@ -1969,7 +2169,7 @@ def main() -> int:
                     ),
                 }
             )
-        if transport_success and not sequential_direction_selection:
+        if transport_success and not sequential_region_selection:
             goalset_index = getattr(transport_result, "goalset_index", None)
             if goalset_index is not None:
                 selected_transport_goal_rank = int(
@@ -1982,35 +2182,29 @@ def main() -> int:
             ):
                 selected_transport_goal_rank = None
         selected_direction_priority = None
-        direction_priority = handover_goal_diagnostics.get("direction_priority", {})
-        if selected_transport_goal_rank is not None and direction_priority:
-            original_indices = direction_priority.get(
-                "original_goal_indices_in_attempt_order", []
+        if (
+            selected_transport_goal_rank is not None
+            and selected_transport_goal_rank < len(goal_metadata)
+        ):
+            selected_metadata = goal_metadata[selected_transport_goal_rank]
+            direction_error = selected_metadata.get(
+                "horizontal_direction_alignment_error_rad"
             )
-            errors_rad = direction_priority.get(
-                "alignment_error_rad_in_attempt_order", []
-            )
-            errors_deg = direction_priority.get(
-                "alignment_error_deg_in_attempt_order", []
-            )
-            if (
-                selected_transport_goal_rank < len(original_indices)
-                and selected_transport_goal_rank < len(errors_rad)
-                and selected_transport_goal_rank < len(errors_deg)
-            ):
-                selected_direction_priority = {
-                    "attempt_rank": selected_transport_goal_rank,
-                    "original_goal_index": int(
-                        original_indices[selected_transport_goal_rank]
-                    ),
-                    "alignment_error_rad": float(
-                        errors_rad[selected_transport_goal_rank]
-                    ),
-                    "alignment_error_deg": float(
-                        errors_deg[selected_transport_goal_rank]
-                    ),
-                    "acceptance_threshold_applied": False,
-                }
+            selected_direction_priority = {
+                "horizontal_priority_rank": selected_metadata[
+                    "horizontal_priority_rank"
+                ],
+                "receiver_position_robot_base_m": selected_metadata[
+                    "receiver_position_robot_base_m"
+                ],
+                "alignment_error_rad": direction_error,
+                "alignment_error_deg": (
+                    float(np.rad2deg(direction_error))
+                    if direction_error is not None
+                    else None
+                ),
+                "direction_encoded_in_terminal_goal": bool(automatic_handover),
+            }
         if not transport_success:
             failure_report = {
                 "status": "handover_transport_planning_failed",
@@ -2194,13 +2388,13 @@ def main() -> int:
                 "maximum_deviation_rad": maximum_deviation,
                 "hard_tolerance_passed": hard_tolerance_passed,
                 "acceptance_mode": (
-                    "soft_cost_ranking"
-                    if args.semantic_orientation_cost
+                    "curobo_non_terminal_tool_pose_criteria"
+                    if planner_orientation_constraint_enabled
                     else "hard_postvalidation"
                 ),
                 "passed": bool(
                     np.isfinite(soft_cost["total"])
-                    if args.semantic_orientation_cost
+                    if planner_orientation_constraint_enabled
                     else hard_tolerance_passed
                 ),
                 "implementation": implementation,
@@ -2210,7 +2404,10 @@ def main() -> int:
                     args.diagnostic_gravity_tilt_tolerance_deg is not None
                 ),
             }
-            if not orientation_validation["passed"]:
+            if (
+                not planner_orientation_constraint_enabled
+                and not orientation_validation["passed"]
+            ):
                 failure_report = {
                     "status": "handover_orientation_constraint_failed",
                     "inputs": {
@@ -2274,6 +2471,7 @@ def main() -> int:
                 "tool_frame": "panda_hand",
                 "candidate_count": int(len(handover_goal_positions)),
                 "selected_goalset_rank": selected_transport_goal_rank,
+                "selected_handover_goal_metadata": selected_direction_priority,
                 "selected_receive_direction_priority": selected_direction_priority,
                 "position_m": (
                     handover_goal_positions[selected_transport_goal_rank].tolist()
@@ -2389,14 +2587,25 @@ def main() -> int:
             ),
             "semantic_orientation_cost": args.semantic_orientation_cost,
             "semantic_orientation_cost_policy": (
-                "shared cuRobo ToolPoseCriteria plus trajectory soft-cost ranking"
+                "compatibility flag; automatic handover uses cuRobo ToolPoseCriteria"
                 if args.semantic_orientation_cost
-                else None
+                else "automatic for constrained handover policies"
             ),
             "planner_max_goalset": planner_max_goalset,
             "handover_receiver_position_robot_base_m": (
                 handover_receiver_position.tolist()
                 if handover_receiver_position is not None
+                else None
+            ),
+            "handover_region_json": (
+                str(args.handover_region_json)
+                if args.handover_region_json is not None
+                else None
+            ),
+            "handover_region": handover_region_report,
+            "handover_region_samples_per_axis": (
+                args.handover_region_samples_per_axis
+                if automatic_handover
                 else None
             ),
             "handover_height_policy": args.handover_height_policy,
@@ -2494,10 +2703,14 @@ def main() -> int:
                 args.diagnostic_gravity_tilt_tolerance_deg is not None
             ),
             "orientation_constraint_is_soft_not_hard": bool(
-                args.semantic_orientation_cost
+                transport_report is not None
+                and transport_orientation_policy
+                in {"preserve_gravity_tilt", "keep_grasp_orientation"}
             ),
             "soft_orientation_cost_is_not_online_qp_safety_filter": bool(
-                args.semantic_orientation_cost
+                transport_report is not None
+                and transport_orientation_policy
+                in {"preserve_gravity_tilt", "keep_grasp_orientation"}
             ),
             "held_object_collision_checked_during_transport": (
                 transport_report is not None and transport_cost_np is not None

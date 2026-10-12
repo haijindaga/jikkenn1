@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
@@ -10,6 +10,153 @@ import numpy as np
 DEFAULT_HANDOVER_ROLL_DEGREES = (0.0, 45.0, -45.0, 90.0, -90.0, 180.0)
 DEFAULT_GRAVITY_YAW_DEGREES = tuple(float(value) for value in range(0, 360, 45))
 ORIENTATION_PRESERVATION_TOLERANCE_RAD = float(np.deg2rad(2.0))
+
+
+def handover_region_from_scene_layout(
+    layout: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Read the Windows scene-review handover box without changing frames.
+
+    The editor exports robot-base metres in a Z-up frame.  A point is treated
+    as a zero-size box so the existing single-position interface remains a
+    strict subset of the region interface.
+    """
+
+    if layout.get("frame") != "robot_base":
+        raise ValueError("handover region JSON must use frame='robot_base'")
+    if layout.get("units") != "metres":
+        raise ValueError("handover region JSON must use units='metres'")
+    if layout.get("up_axis") != "Z":
+        raise ValueError("handover region JSON must use up_axis='Z'")
+    entities = layout.get("entities")
+    if not isinstance(entities, Mapping):
+        raise ValueError("handover region JSON has no entities mapping")
+    handover = entities.get("handover")
+    if not isinstance(handover, Mapping):
+        raise ValueError("handover region JSON has no handover entity")
+    shape = handover.get("shape")
+    if shape not in {"box", "point"}:
+        raise ValueError("handover entity shape must be 'box' or 'point'")
+    center = np.asarray(handover.get("pos"), dtype=np.float64).reshape(-1)
+    if center.shape != (3,) or not np.isfinite(center).all():
+        raise ValueError("handover.pos must contain three finite values")
+    if shape == "box":
+        size = np.asarray(handover.get("size"), dtype=np.float64).reshape(-1)
+        if (
+            size.shape != (3,)
+            or not np.isfinite(size).all()
+            or np.any(size <= 0.0)
+        ):
+            raise ValueError("box handover.size must contain three positive values")
+    else:
+        size = np.zeros(3, dtype=np.float64)
+    human_direction = np.asarray(
+        layout.get("humanDirection"), dtype=np.float64
+    ).reshape(-1)
+    if (
+        human_direction.shape != (3,)
+        or not np.isfinite(human_direction).all()
+        or np.linalg.norm(human_direction) <= 1e-8
+    ):
+        raise ValueError("humanDirection must contain a finite non-zero vector")
+    human_direction = _unit(human_direction, name="human direction")
+    report = {
+        "source": "scene-layout-review JSON",
+        "frame": "robot_base",
+        "units": "metres",
+        "shape": shape,
+        "center_robot_base_m": center.tolist(),
+        "size_m": size.tolist(),
+        "minimum_robot_base_m": (center - 0.5 * size).tolist(),
+        "maximum_robot_base_m": (center + 0.5 * size).tolist(),
+        "human_direction_robot_base": human_direction.tolist(),
+    }
+    return (
+        center.astype(np.float32),
+        size.astype(np.float32),
+        human_direction.astype(np.float32),
+        report,
+    )
+
+
+def sample_handover_region_center_first(
+    center_robot_base_m: Iterable[float],
+    size_m: Iterable[float],
+    *,
+    samples_per_axis: int = 3,
+) -> tuple[list[np.ndarray], dict[str, Any]]:
+    """Discretize a box into cuRobo goalsets ordered by horizontal centrality.
+
+    cuRobo plans to finite pose goalsets rather than bounded Cartesian boxes.
+    We therefore use an odd Cartesian lattice that always contains the box
+    centre.  Each returned group has one X/Y location and every sampled Z, so
+    the planner is free to choose height.  Groups are ordered only by normalized
+    horizontal distance from the centre; no object-specific weighted score is
+    introduced.
+    """
+
+    if samples_per_axis <= 0 or samples_per_axis % 2 == 0:
+        raise ValueError("samples_per_axis must be a positive odd integer")
+    center = np.asarray(tuple(center_robot_base_m), dtype=np.float64).reshape(3)
+    size = np.asarray(tuple(size_m), dtype=np.float64).reshape(3)
+    if not np.isfinite(center).all():
+        raise ValueError("region center must contain three finite values")
+    if not np.isfinite(size).all() or np.any(size < 0.0):
+        raise ValueError("region size must contain three finite non-negative values")
+
+    axes = []
+    normalized_axes = []
+    for axis in range(3):
+        if size[axis] <= 1e-12:
+            axes.append(np.asarray([center[axis]], dtype=np.float64))
+            normalized_axes.append(np.asarray([0.0], dtype=np.float64))
+        else:
+            normalized = np.linspace(-1.0, 1.0, samples_per_axis)
+            normalized_axes.append(normalized)
+            axes.append(center[axis] + 0.5 * size[axis] * normalized)
+
+    xy_entries = []
+    for x_index, x_value in enumerate(axes[0]):
+        for y_index, y_value in enumerate(axes[1]):
+            radial_distance = float(
+                np.hypot(
+                    normalized_axes[0][x_index],
+                    normalized_axes[1][y_index],
+                )
+            )
+            xy_entries.append((radial_distance, x_index, y_index, x_value, y_value))
+    xy_entries.sort(key=lambda value: (value[0], value[1], value[2]))
+
+    groups = []
+    group_reports = []
+    for rank, (distance, x_index, y_index, x_value, y_value) in enumerate(xy_entries):
+        positions = np.asarray(
+            [[x_value, y_value, z_value] for z_value in axes[2]],
+            dtype=np.float32,
+        )
+        groups.append(positions)
+        group_reports.append(
+            {
+                "horizontal_priority_rank": rank,
+                "normalized_horizontal_distance_from_center": distance,
+                "x_index": x_index,
+                "y_index": y_index,
+                "positions_robot_base_m": positions.tolist(),
+            }
+        )
+    report = {
+        "method": "center-first Cartesian lattice submitted as cuRobo goalsets",
+        "samples_per_nonzero_axis": samples_per_axis,
+        "center_robot_base_m": center.tolist(),
+        "size_m": size.tolist(),
+        "horizontal_priority": "normalized XY distance from region center",
+        "height_policy_within_group": "all sampled Z values share one cuRobo goalset",
+        "candidate_specific_weights": False,
+        "group_count": len(groups),
+        "position_count": int(sum(len(group) for group in groups)),
+        "groups": group_reports,
+    }
+    return groups, report
 
 
 def receive_clear_score_order(

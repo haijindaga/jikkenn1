@@ -139,6 +139,17 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--handover-region-json",
+        type=Path,
+        help="Windows scene-layout JSON containing the handover box and human direction",
+    )
+    parser.add_argument(
+        "--handover-region-samples-per-axis",
+        type=int,
+        default=3,
+        help="Positive odd center-inclusive region lattice resolution (default: 3)",
+    )
+    parser.add_argument(
         "--handover-human-direction-robot-base",
         type=float,
         nargs=3,
@@ -161,9 +172,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--semantic-orientation-cost",
         action="store_true",
         help=(
-            "Simulation-only experimental handover mode: apply cuRobo's official "
-            "non-terminal orientation soft cost and try the common uniform yaw "
-            "goalset in direct receive-part-to-human alignment order."
+            "Compatibility flag retained for existing commands; constrained "
+            "automatic handover now applies cuRobo ToolPoseCriteria by default."
         ),
     )
     parser.add_argument(
@@ -176,8 +186,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             "kinematic-pose-lock",
         ),
         help=(
-            "Replay policy. Defaults to physics for grasp/lift-only runs and "
-            "rigid-attachment when a handover goal is requested."
+            "Replay policy. Defaults to physics. Attachment modes remain "
+            "explicit diagnostics and are never enabled by requesting handover."
         ),
     )
     parser.add_argument("--solver-position-iterations", type=int)
@@ -282,17 +292,25 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         and args.handover_goal_position_robot_base_m is None
     ):
         parser.error("handover orientation requires a handover position")
-    automatic_handover_values = (
-        args.handover_receiver_position_robot_base_m,
-        args.handover_human_direction_robot_base,
-    )
-    if (automatic_handover_values[0] is None) != (
-        automatic_handover_values[1] is None
+    if (
+        args.handover_region_samples_per_axis <= 0
+        or args.handover_region_samples_per_axis % 2 == 0
     ):
+        parser.error("--handover-region-samples-per-axis must be positive and odd")
+    point_handover = args.handover_receiver_position_robot_base_m is not None
+    region_handover = args.handover_region_json is not None
+    if point_handover != (args.handover_human_direction_robot_base is not None):
         parser.error(
             "automatic handover requires both receiver position and human direction"
         )
-    if automatic_handover_values[0] is not None:
+    if region_handover and (
+        point_handover or args.handover_human_direction_robot_base is not None
+    ):
+        parser.error(
+            "--handover-region-json cannot be combined with point handover arguments"
+        )
+    automatic_handover = point_handover or region_handover
+    if automatic_handover:
         if args.handover_goal_position_robot_base_m is not None:
             parser.error(
                 "automatic affordance-aware handover cannot be combined with a "
@@ -303,32 +321,28 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                 "automatic affordance-aware handover requires VLM or manual grasp/receive "
                 "part prompts"
             )
-        direction = automatic_handover_values[1]
-        assert direction is not None
-        if not all(math.isfinite(value) for value in direction) or math.sqrt(
-            sum(value * value for value in direction)
-        ) <= 1e-8:
-            parser.error("handover human direction must be finite and non-zero")
-        position = automatic_handover_values[0]
-        assert position is not None
-        if not all(math.isfinite(value) for value in position):
-            parser.error("handover receiver position must be finite")
+        if point_handover:
+            direction = args.handover_human_direction_robot_base
+            assert direction is not None
+            if not all(math.isfinite(value) for value in direction) or math.sqrt(
+                sum(value * value for value in direction)
+            ) <= 1e-8:
+                parser.error("handover human direction must be finite and non-zero")
+            position = args.handover_receiver_position_robot_base_m
+            assert position is not None
+            if not all(math.isfinite(value) for value in position):
+                parser.error("handover receiver position must be finite")
+        elif args.handover_height_policy != "receiver-position":
+            parser.error("a handover region uses its exported Z bounds")
     elif args.handover_height_policy != "receiver-position":
         parser.error("--handover-height-policy requires automatic handover")
     if (
         args.semantic_orientation_cost
-        and args.handover_receiver_position_robot_base_m is None
+        and not automatic_handover
     ):
         parser.error("--semantic-orientation-cost requires automatic handover")
     if args.grasp_retention_mode is None:
-        args.grasp_retention_mode = (
-            "rigid-attachment"
-            if (
-                args.handover_goal_position_robot_base_m is not None
-                or args.handover_receiver_position_robot_base_m is not None
-            )
-            else "physics"
-        )
+        args.grasp_retention_mode = "physics"
     solver_iteration_values = (
         args.solver_position_iterations,
         args.solver_velocity_iterations,
@@ -564,7 +578,10 @@ def build_stages(
     grasp_candidate_segmentation_role = (
         "grasp_part" if use_grasp_part else "whole_object"
     )
-    automatic_handover = args.handover_receiver_position_robot_base_m is not None
+    automatic_handover = bool(
+        args.handover_receiver_position_robot_base_m is not None
+        or args.handover_region_json is not None
+    )
 
     capture_command = [
         str(isaac_python),
@@ -736,19 +753,32 @@ def build_stages(
             ]
         )
     if automatic_handover:
-        plan_trials_command.extend(
-            [
-                "--handover-receiver-position-robot-base-m",
-                *[
-                    str(value)
-                    for value in args.handover_receiver_position_robot_base_m
-                ],
-                "--handover-human-direction-robot-base",
-                *[str(value) for value in args.handover_human_direction_robot_base],
-                "--handover-height-policy",
-                args.handover_height_policy,
-            ]
-        )
+        if args.handover_region_json is not None:
+            plan_trials_command.extend(
+                [
+                    "--handover-region-json",
+                    str(args.handover_region_json),
+                    "--handover-region-samples-per-axis",
+                    str(args.handover_region_samples_per_axis),
+                ]
+            )
+        else:
+            plan_trials_command.extend(
+                [
+                    "--handover-receiver-position-robot-base-m",
+                    *[
+                        str(value)
+                        for value in args.handover_receiver_position_robot_base_m
+                    ],
+                    "--handover-human-direction-robot-base",
+                    *[
+                        str(value)
+                        for value in args.handover_human_direction_robot_base
+                    ],
+                    "--handover-height-policy",
+                    args.handover_height_policy,
+                ]
+            )
     if args.semantic_orientation_cost:
         plan_trials_command.append("--semantic-orientation-cost")
 
@@ -931,6 +961,16 @@ def main(argv: Iterable[str] | None = None) -> int:
                 if args.handover_receiver_position_robot_base_m is not None
                 else None
             ),
+            "handover_region_json": (
+                str(args.handover_region_json)
+                if args.handover_region_json is not None
+                else None
+            ),
+            "handover_region_samples_per_axis": (
+                args.handover_region_samples_per_axis
+                if automatic_handover
+                else None
+            ),
             "handover_human_direction_robot_base": (
                 list(args.handover_human_direction_robot_base)
                 if args.handover_human_direction_robot_base is not None
@@ -941,7 +981,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "handover_receive_clearance_m": args.handover_receive_clearance,
             "handover_candidate_policy": (
                 "receive-part clearance hard gate, then original GraspGenX score"
-                if args.handover_receiver_position_robot_base_m is not None
+                if automatic_handover
                 else None
             ),
             "transport_orientation_policy_source": (

@@ -8,13 +8,65 @@ from panda_handover.handover import (
     generate_gravity_tilt_preserving_handover_goals,
     generate_orientation_preserving_handover_goal,
     gravity_tilt_deviation_rad,
+    handover_region_from_scene_layout,
     order_handover_goals_by_receive_direction,
     orientation_soft_cost,
     receive_clear_score_order,
+    sample_handover_region_center_first,
 )
 
 
 class HandoverGeometryTests(unittest.TestCase):
+    def test_scene_layout_box_becomes_robot_base_handover_region(self):
+        center, size, direction, report = handover_region_from_scene_layout(
+            {
+                "frame": "robot_base",
+                "units": "metres",
+                "up_axis": "Z",
+                "humanDirection": [-2.0, 0.0, 0.0],
+                "entities": {
+                    "handover": {
+                        "shape": "box",
+                        "pos": [-0.29, 0.01, 0.30],
+                        "size": [0.40, 0.25, 0.25],
+                    }
+                },
+            }
+        )
+        np.testing.assert_allclose(center, [-0.29, 0.01, 0.30])
+        np.testing.assert_allclose(size, [0.40, 0.25, 0.25])
+        np.testing.assert_allclose(direction, [-1.0, 0.0, 0.0])
+        self.assertEqual(report["shape"], "box")
+
+    def test_region_sampling_prioritizes_xy_center_and_groups_all_z(self):
+        groups, report = sample_handover_region_center_first(
+            [-0.29, 0.01, 0.30], [0.40, 0.25, 0.25], samples_per_axis=3
+        )
+        self.assertEqual(len(groups), 9)
+        self.assertEqual(groups[0].shape, (3, 3))
+        np.testing.assert_allclose(groups[0][:, :2], [[-0.29, 0.01]] * 3)
+        np.testing.assert_allclose(groups[0][:, 2], [0.175, 0.30, 0.425])
+        self.assertEqual(report["position_count"], 27)
+        distances = [
+            group["normalized_horizontal_distance_from_center"]
+            for group in report["groups"]
+        ]
+        self.assertEqual(distances, sorted(distances))
+
+    def test_point_region_is_one_goal(self):
+        groups, report = sample_handover_region_center_first(
+            [0.2, 0.0, 0.3], [0.0, 0.0, 0.0], samples_per_axis=3
+        )
+        self.assertEqual(len(groups), 1)
+        np.testing.assert_allclose(groups[0], [[0.2, 0.0, 0.3]])
+        self.assertEqual(report["position_count"], 1)
+
+    def test_region_sampling_rejects_even_resolution(self):
+        with self.assertRaisesRegex(ValueError, "positive odd"):
+            sample_handover_region_center_first(
+                [0.0, 0.0, 0.0], [0.4, 0.2, 0.2], samples_per_axis=2
+            )
+
     def test_receive_clear_gate_precedes_stable_graspgenx_score_order(self):
         order = receive_clear_score_order(
             np.array([0.7, 0.9, 0.9, 0.8]),

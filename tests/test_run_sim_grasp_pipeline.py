@@ -276,7 +276,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                 ]
             )
 
-    def test_handover_goal_enables_attached_planning_and_rigid_replay(self) -> None:
+    def test_handover_goal_keeps_physics_replay_by_default(self) -> None:
         args = MODULE.parse_args(
             [
                 "--scene-usd",
@@ -308,7 +308,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "rigid-attachment",
+            "physics",
         )
 
     def test_handover_orientation_requires_position(self) -> None:
@@ -383,7 +383,7 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         replay = stages["isaac_physical_trials"].command
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1],
-            "rigid-attachment",
+            "physics",
         )
 
     def test_semantic_orientation_cost_is_explicit_and_forwarded(self):
@@ -418,6 +418,43 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         planner = stages["curobo_grasp_lift_trials"].command
         self.assertIn("--semantic-orientation-cost", planner)
 
+    def test_handover_region_is_forwarded_and_keeps_physics_replay(self):
+        region = PROJECT / "config" / "handover_regions" / "mug_neo_behind.json"
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--target-object",
+                "mug",
+                "--ollama-model",
+                "gemma3:12b",
+                "--output",
+                str(PROJECT / "outputs" / "e2e"),
+                "--handover-region-json",
+                str(region),
+                "--handover-region-samples-per-axis",
+                "3",
+            ]
+        )
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=MODULE.pipeline_paths(args.output),
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertEqual(
+            planner[planner.index("--handover-region-json") + 1], str(region)
+        )
+        self.assertEqual(
+            planner[planner.index("--handover-region-samples-per-axis") + 1], "3"
+        )
+        replay = stages["isaac_physical_trials"].command
+        self.assertEqual(
+            replay[replay.index("--grasp-retention-mode") + 1], "physics"
+        )
+
     def test_semantic_orientation_cost_requires_automatic_handover(self):
         with self.assertRaises(SystemExit):
             MODULE.parse_args(
@@ -449,6 +486,8 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                 "64",
                 "--solver-velocity-iterations",
                 "4",
+                "--grasp-retention-mode",
+                "rigid-attachment",
             ]
         )
         paths = MODULE.pipeline_paths(args.output)

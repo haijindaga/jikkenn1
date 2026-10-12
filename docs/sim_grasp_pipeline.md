@@ -267,41 +267,23 @@ as a measured physical center of mass. The exact instruction and resulting
 part phrase are saved in the VLM report for manual review.
 
 `transport_orientation_policy` is a closed categorical decision, never a
-VLM-generated angle. `free` retains the existing affordance-axis handover.
-`keep_grasp_orientation` fixes the automatic handover goal to the selected
-grasp rotation while still placing the receive-part median at the requested
-receiver position. The saved lift and transport trajectories are then checked
-with cuRobo FK at every waypoint against that grasp rotation. A candidate that
-changes orientation by more than the project-wide 2 degree model-alignment
-tolerance is rejected and the trial runner proceeds to the next candidate.
-`preserve_gravity_tilt` permits world-vertical yaw while checking that gravity
-expressed in the selected grasp frame remains unchanged.
+VLM-generated angle. `free` leaves path orientation unconstrained.
+`keep_grasp_orientation` fixes both the terminal goal and non-terminal path to
+the selected grasp orientation. `preserve_gravity_tilt` permits only
+robot-base/world-Z yaw, so gravity expressed in the selected grasp frame stays
+unchanged. Its required yaw is solved analytically so the horizontal
+grasp-part-to-receive-part axis points toward the human.
 
-By default these remain goal constraints plus fail-closed path validation.
-The optional `--semantic-orientation-cost` experiment uses the pinned cuRobo
-V2 `ToolPoseCriteria` API to add a non-terminal orientation soft cost. For
-`preserve_gravity_tilt`, the planner reuses the common uniform world-Z yaw
-goalset, orders those unchanged goals by direct receive-part-to-human angular
-error, and tries them in that order until cuRobo finds a feasible trajectory.
-This is a lexicographic rule rather than a weighted score: no object-specific
-angle or angular acceptance threshold is introduced. The default
-2 degree value remains in the report as a diagnostic, but no longer hard-rejects
-a soft-cost trajectory.
-For a `preserve_gravity_tilt` handover, the trial planner evaluates every
-eligible pre-grasp candidate under these same settings instead of stopping when
-the first five plans succeed. Planner-feasible candidates are selected
-lexicographically by receive-direction angular error, maximum measured
-transport orientation deviation, and finally the original GraspGenX score
-rank. This introduces neither a weighted sum nor candidate-specific thresholds;
-the manifest records every metric and the complete evaluated pool.
-The shared soft cost, comprising mean squared semantic orientation deviation
-plus mean squared adjacent-waypoint angular motion, remains recorded for every
-successful plan and is the fallback ordering for orientation policies without
-the receive-direction selection above. This is inspired by the softened
-orientation objective in
-<https://arxiv.org/abs/2410.15185> and uses cuRobo's official constrained-cost
-mechanism; it is not a reproduction of that paper's online 45 Hz QP safety
-filter and is not authorized for real-robot execution.
+Automatic handover applies the pinned cuRobo V2 `ToolPoseCriteria` during
+trajectory optimization. Receive direction is encoded in every terminal pose,
+the VLM-selected tilt policy is encoded as a non-terminal pose criterion, and
+the bounded handover box is discretized into standard cuRobo goalsets. The
+horizontal centre is attempted first; at each X/Y location all sampled heights
+share one goalset. This is a lexicographic search rather than a weighted sum,
+and no object-specific cost weight is introduced. cuRobo pose criteria are soft
+optimization costs, so FK deviations remain diagnostics rather than a second
+acceptance stage. Isaac replay is reserved for physical retention/drop. Every
+eligible pre-grasp candidate is evaluated under the same three conditions.
 
 In VLM mode, only the saved `parts/grasp_part` mask is sent to GraspGenX for
 candidate generation. The whole-object mask remains authoritative for removing
@@ -338,10 +320,23 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-Add `--semantic-orientation-cost` only when the reviewed VLM report selects
-`preserve_gravity_tilt` or `keep_grasp_orientation` (for example, when the task
-instruction says a liquid container must remain upright). The flag fails
-closed for `free`; it does not silently reinterpret a free-orientation task.
+For a bounded region instead of one point, pass the JSON exported by the
+Windows layout editor. The checked-in file below is the reviewed mug/NEO region:
+
+```bash
+python scripts/run_sim_grasp_pipeline.py \
+  --scene-usd scenes/mug_handover_1x_neo_rot180_v1.usda \
+  --target-object mug \
+  --ollama-model gemma3:12b \
+  --output outputs/mug_region_handover_e2e_v1 \
+  --handover-region-json config/handover_regions/mug_neo_behind.json \
+  --handover-region-samples-per-axis 3 \
+  --allow-reviewed-support-contact-preflight
+```
+
+`--semantic-orientation-cost` remains accepted for old commands but is no
+longer required. Automatic handover applies the corresponding cuRobo criterion
+when the VLM policy is `preserve_gravity_tilt` or `keep_grasp_orientation`.
 
 When the receiver height is not part of the task, add
 `--handover-height-policy preserve-lift-end`. The requested receiver X/Y are
@@ -353,10 +348,10 @@ This mode first rejects candidates whose official Franka collision mesh enters
 the observed receive-part clearance region (15 mm by default), then preserves
 the original GraspGenX score order. It adds no weighted handover score. For each
 remaining grasp, the grasp-part-to-receive-part axis is aligned with the human
-direction, the receive-part median is placed at the requested position, and
-cuRobo tests six fixed roll variants with the whole object attached. Candidate
-planning continues until the configured number of complete attached transport
-plans is available. This is a receive-region clearance proxy; it does not model
+direction, the receive-part median is placed inside the requested region, and
+cuRobo tests the VLM-permitted orientation variants with the whole object
+attached for collision planning. Every eligible grasp is evaluated before the
+physical-trial subset is selected. This is a receive-region clearance proxy; it does not model
 the human body, gaze, or true multi-view visibility.
 
 The previous manual transport mode remains available when a fully reviewed
@@ -371,8 +366,11 @@ python scripts/run_sim_grasp_pipeline.py \
   --allow-reviewed-support-contact-preflight
 ```
 
-Supplying either handover mode makes `rigid-attachment` the replay default.
-Before reset, the runner enables Isaac Sim's standard
+Replay defaults to `physics` for both grasp/lift and handover. Attachment modes
+are explicit diagnostics only; requesting handover never enables one.
+The following FixedJoint procedure runs only when
+`--grasp-retention-mode rigid-attachment` is explicitly requested. Before
+reset, the runner enables Isaac Sim's standard
 `PhysxContactReportAPI` on the target. During closure it creates no attachment
 until both Panda finger rigid bodies report target contact in the same physics
 step and both finger joints have moved inward by at least 1 mm. `close_frames`
@@ -404,12 +402,12 @@ target-to-hand transform at every physics sample. Attachment-mode success now
 requires both lift retention and a maximum relative-pose drift of at most 5 mm
 and 5 degrees; object height alone cannot produce a false success. The cuRobo
 transport is still planned with the whole-object attached collision geometry.
-In manual mode, if
+In an explicit attachment diagnostic, if
 `--handover-goal-quaternion-wxyz W X Y Z` is omitted, the selected grasp
 orientation is preserved. Reports distinguish this explicit
-no-slip grasp assumption from contact-only physical-pick evidence. Use
-`--grasp-retention-mode physics` only when frictional retention itself is the
-quantity being evaluated.
+no-slip grasp assumption from contact-only physical-pick evidence. The normal
+`physics` replay creates no joint or pose lock and is the only mode used to
+judge whether the simulated gripper actually retains or drops the object.
 
 Use `--headless` to suppress Isaac windows. Defaults retain the current robust
 candidate policy: 500 generated grasps, top 300 returned, 5 mm static collision

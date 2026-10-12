@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "frame": "robot_base",
+  "units": "metres",
+  "up_axis": "Z",
+  "humanDirection": [
+    -1,
+    0,
+    0
+  ],
+  "entities": {
+    "robot": {
+      "label": "Panda（模式図）",
+      "shape": "robot",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        0.16,
+        0.16,
+        0.32
+      ],
+      "yaw": 0,
+      "color": "#4e8bc8",
+      "visible": true
+    },
+    "table": {
+      "label": "机",
+      "shape": "box",
+      "pos": [
+        0.5,
+        0,
+        -0.025
+      ],
+      "size": [
+        0.8,
+        1,
+        0.05
+      ],
+      "yaw": 0,
+      "color": "#9a6b3e",
+      "visible": true
+    },
+    "target": {
+      "label": "対象物（マグカップ）",
+      "shape": "cup",
+      "pos": [
+        0.4025577328090417,
+        0.0832460014359466,
+        0.06
+      ],
+      "size": [
+        0.12,
+        0.09,
+        0.12
+      ],
+      "yaw": 180,
+      "color": "#f3b84a",
+      "visible": true
+    },
+    "obstacle": {
+      "label": "障害物",
+      "shape": "box",
+      "pos": [
+        0.5,
+        -0.2,
+        0.05
+      ],
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "yaw": 0,
+      "color": "#d96064",
+      "visible": true
+    },
+    "handover": {
+      "label": "受け渡し点",
+      "shape": "box",
+      "pos": [
+        -0.29,
+        0.01,
+        0.3
+      ],
+      "size": [
+        0.401,
+        0.251,
+        0.251
+      ],
+      "yaw": 0,
+      "color": "#df57dc",
+      "visible": true
+    },
+    "receiver": {
+      "label": "受取者（模式図）",
+      "shape": "human",
+      "pos": [
+        -0.72,
+        0,
+        0
+      ],
+      "size": [
+        0.45,
+        0.28,
+        1.68
+      ],
+      "yaw": 0,
+      "color": "#77859a",
+      "visible": true
+    }
+  }
+}

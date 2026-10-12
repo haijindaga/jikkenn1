@@ -344,8 +344,7 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("transport_all_waypoints_clear_of_observed_scene", source)
         self.assertIn('"human_or_receiver_collision_model_present": False', source)
         self.assertIn("generate_affordance_handover_goals(", source)
-        self.assertNotIn("generate_directional_gravity_tilt_handover_goal(", source)
-        self.assertIn("generate_gravity_tilt_preserving_handover_goals(", source)
+        self.assertIn("generate_directional_gravity_tilt_handover_goal(", source)
         self.assertIn("order_handover_goals_by_receive_direction(", source)
         self.assertIn("generate_orientation_preserving_handover_goal(", source)
         self.assertIn("gravity_tilt_deviation_rad(", source)
@@ -354,12 +353,10 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn("ToolPoseCriteria(", source)
         self.assertIn("update_tool_pose_criteria(", source)
         self.assertIn("orientation_soft_cost(", source)
-        self.assertIn('"soft_cost_ranking"', source)
-        self.assertIn(
-            '"current_gate": "gravity_tilt_then_direction_priority"', source
-        )
-        self.assertIn('"human_direction_alignment_enforced": False', source)
-        self.assertIn('"human_direction_priority_enforced": True', source)
+        self.assertIn('"curobo_non_terminal_tool_pose_criteria"', source)
+        self.assertIn("sample_handover_region_center_first(", source)
+        self.assertIn('"direction_encoded_in_terminal_goal"', source)
+        self.assertIn('"selected_handover_goal_metadata"', source)
         self.assertIn('"selected_receive_direction_priority"', source)
         self.assertIn('"planning_attempts": transport_planning_attempts', source)
         self.assertIn('"diagnostic_tolerance_override"', source)
@@ -451,7 +448,7 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertEqual(status, "handover_transport_planning_failed")
         self.assertEqual(path, str(report))
 
-    def test_direction_aware_trial_selection_is_lexicographic_without_weights(self):
+    def test_joint_handover_trial_selection_is_lexicographic_without_weights(self):
         namespace = runpy.run_path(
             str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
             run_name="curobo_plan_grasp_lift_trials_selection_test",
@@ -459,6 +456,7 @@ class GraspLiftScriptTests(unittest.TestCase):
         attempts = [
             {
                 "planner_feasible": True,
+                "handover_horizontal_priority_rank": 1,
                 "receive_direction_alignment_error_rad": 0.8,
                 "maximum_transport_orientation_deviation_rad": 0.01,
                 "semantic_orientation_cost": 0.01,
@@ -466,6 +464,7 @@ class GraspLiftScriptTests(unittest.TestCase):
             },
             {
                 "planner_feasible": True,
+                "handover_horizontal_priority_rank": 0,
                 "receive_direction_alignment_error_rad": 0.1,
                 "maximum_transport_orientation_deviation_rad": 0.2,
                 "semantic_orientation_cost": 0.2,
@@ -473,6 +472,7 @@ class GraspLiftScriptTests(unittest.TestCase):
             },
             {
                 "planner_feasible": False,
+                "handover_horizontal_priority_rank": 0,
                 "receive_direction_alignment_error_rad": 0.0,
                 "maximum_transport_orientation_deviation_rad": 0.0,
                 "semantic_orientation_cost": 0.0,
@@ -482,8 +482,41 @@ class GraspLiftScriptTests(unittest.TestCase):
         selected = namespace["select_physical_trial_attempts"](
             attempts,
             limit=2,
-            direction_aware=True,
+            automatic_handover=True,
             semantic_orientation_cost=True,
+        )
+        self.assertEqual(
+            [attempt["original_goalset_rank"] for attempt in selected], [1, 0]
+        )
+
+    def test_free_orientation_handover_selection_needs_no_tilt_metric(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_free_selection_test",
+        )
+        attempts = [
+            {
+                "planner_feasible": True,
+                "handover_horizontal_priority_rank": 1,
+                "receive_direction_alignment_error_rad": 0.0,
+                "maximum_transport_orientation_deviation_rad": None,
+                "semantic_orientation_cost": None,
+                "original_goalset_rank": 0,
+            },
+            {
+                "planner_feasible": True,
+                "handover_horizontal_priority_rank": 0,
+                "receive_direction_alignment_error_rad": 0.0,
+                "maximum_transport_orientation_deviation_rad": None,
+                "semantic_orientation_cost": None,
+                "original_goalset_rank": 1,
+            },
+        ]
+        selected = namespace["select_physical_trial_attempts"](
+            attempts,
+            limit=2,
+            automatic_handover=True,
+            semantic_orientation_cost=False,
         )
         self.assertEqual(
             [attempt["original_goalset_rank"] for attempt in selected], [1, 0]
