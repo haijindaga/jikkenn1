@@ -439,6 +439,7 @@ def plan_reviewed_support_layout(
     support_points_world: np.ndarray,
     *,
     grasp_projection_margin_m: float,
+    allow_grasp_part_overlap: bool = False,
 ) -> tuple[ElevatedHeadSupportPlan, ...]:
     """Validate user-reviewed cuboids against the saved segmented 3-D parts.
 
@@ -528,7 +529,10 @@ def plan_reviewed_support_layout(
         outside_lateral = np.maximum(grasp_lateral - 0.5 * size[1], 0.0)
         footprint_distances = np.hypot(outside_axial, outside_lateral)
         minimum_clearance = float(np.min(footprint_distances))
-        if minimum_clearance <= grasp_projection_margin_m:
+        if (
+            minimum_clearance <= grasp_projection_margin_m
+            and not allow_grasp_part_overlap
+        ):
             raise ValueError(
                 f"support {index} is only {minimum_clearance:.6g} m from the "
                 "grasp-part projection; it must exceed the common margin "

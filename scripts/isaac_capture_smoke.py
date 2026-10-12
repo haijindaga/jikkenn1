@@ -278,6 +278,7 @@ try:
             if diagnostic_kind not in {
                 "handle-supported-head-clear",
                 "support-part-supported-grasp-clear",
+                "support-part-supported-reviewed-overlap",
             }:
                 raise RuntimeError(
                     f"unsupported diagnostic scene kind: {diagnostic_kind!r}"

@@ -8,15 +8,21 @@
     {
       "name": "support_1",
       "center_xy_world_m": [
-        0.3727456956459691,
-        0.04779746007844402
+        0.5024448150613784,
+        0.15085665002418608
       ],
       "size_xy_m": [
-        0.061,
-        0.061
+        0.111,
+        0.111
       ],
       "height_m": 0.06,
-      "yaw_deg": 180.0
+      "yaw_deg": 180
     }
-  ]
+  ],
+  "review_evidence": {
+    "capture": "/home/suzutaro/projects/jikkenn1/outputs/scissors_vlm_e2e_v1/capture/camera_0",
+    "segmentation": "/home/suzutaro/projects/jikkenn1/outputs/scissors_vlm_e2e_v1/capture/sam3",
+    "grasp_mask_role": "receive_part",
+    "support_mask_role": "grasp_part"
+  }
 }

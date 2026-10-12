@@ -221,16 +221,20 @@ python scripts/isaac_create_elevated_head_scene.py \
   --support-part-label "scissors handles" \
   --grasp-mask-role receive_part \
   --support-mask-role grasp_part \
-  --support-layout-json config/support_layouts/scissors_reviewed.json
+  --support-layout-json config/support_layouts/scissors_reviewed.json \
+  --allow-reviewed-grasp-part-overlap
 ```
 
 The scene authoring command does not trust the browser preview. It rejects a
 box unless its footprint contains at least three saved support-part 3-D points,
-stays outside the saved grasp-part projection by the common margin, uses metre
-world coordinates with Z-up, and has the same height as every other support.
-Thus Windows editing changes only the reviewed fixture geometry; grasp
-candidates, collision thresholds, planner settings, and robot controls remain
-unchanged.
+uses metre world coordinates with Z-up, and has the same height as every other
+support. By default it also requires the common grasp-part projection margin.
+The explicit reviewed-overlap option records that this conservative part-level
+gate was waived; it does not waive collision checking. A fresh static collision
+filter and cuRobo plan must still reject every candidate whose gripper geometry
+collides with the support. Thus Windows editing changes only the reviewed
+fixture geometry; grasp candidates, collision thresholds, planner settings,
+and robot controls remain unchanged.
 
 After visually confirming the support placement, run a fresh zero-depth
 baseline so that support geometry is the only experimental change:

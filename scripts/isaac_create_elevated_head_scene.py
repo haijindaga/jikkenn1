@@ -85,6 +85,15 @@ def parse_args() -> argparse.Namespace:
             "scene editor; replaces automatic support footprint selection"
         ),
     )
+    parser.add_argument(
+        "--allow-reviewed-grasp-part-overlap",
+        action="store_true",
+        help=(
+            "for an explicitly reviewed support-layout JSON, allow the support "
+            "footprint to overlap the saved grasp-part projection and defer "
+            "gripper clearance to downstream candidate collision checks"
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -107,6 +116,10 @@ def parse_args() -> argparse.Namespace:
     if args.support_layout_json is not None and not args.support_layout_json.is_file():
         parser.error(
             f"--support-layout-json does not exist: {args.support_layout_json}"
+        )
+    if args.allow_reviewed_grasp_part_overlap and args.support_layout_json is None:
+        parser.error(
+            "--allow-reviewed-grasp-part-overlap requires --support-layout-json"
         )
     for value, label in (
         (args.target_clearance_m, "--target-clearance-m"),
@@ -244,6 +257,7 @@ try:
             grasp_points_world,
             support_points_world,
             grasp_projection_margin_m=args.grasp_part_projection_margin_m,
+            allow_grasp_part_overlap=args.allow_reviewed_grasp_part_overlap,
         )
         target_clearance_m = support_plans[0].target_lift_m
     elif args.support_geometry_policy == "handle-axis-rail":
@@ -373,8 +387,20 @@ try:
         support_prims.append(support.GetPrim())
         support_centers.append(support_center)
     world_prim = stage.GetPrimAtPath("/World")
+    grasp_projection_clear = bool(
+        all(
+            plan.minimum_head_to_support_footprint_distance_m
+            > args.grasp_part_projection_margin_m
+            for plan in support_plans
+        )
+    )
+    diagnostic_kind = (
+        "support-part-supported-grasp-clear"
+        if grasp_projection_clear
+        else "support-part-supported-reviewed-overlap"
+    )
     world_prim.SetCustomDataByKey(
-        "panda_handover:diagnostic_scene", "support-part-supported-grasp-clear"
+        "panda_handover:diagnostic_scene", diagnostic_kind
     )
     world_prim.SetCustomDataByKey(
         "panda_handover:diagnostic_support_prim", args.support_prim
@@ -403,11 +429,11 @@ try:
                 rtol=0.0,
             )
         ),
-        "support_footprint_excludes_saved_head_projection": bool(
-            all(
-                plan.minimum_head_to_support_footprint_distance_m
-                > args.grasp_part_projection_margin_m
-                for plan in support_plans
+        "support_grasp_part_contact_policy_satisfied": bool(
+            grasp_projection_clear
+            or (
+                support_layout is not None
+                and args.allow_reviewed_grasp_part_overlap
             )
         ),
         "support_is_static_collision_geometry": bool(
@@ -466,6 +492,11 @@ try:
             "support_layout_schema": (
                 support_layout.get("schema") if support_layout is not None else None
             ),
+            "grasp_part_support_overlap_policy": (
+                "allow-reviewed-and-defer-to-candidate-collision-check"
+                if args.allow_reviewed_grasp_part_overlap
+                else "reject-at-scene-authoring"
+            ),
             "geometry_implementation_names": {
                 "head_points": "grasp_part",
                 "handle_points": "support_part",
@@ -495,6 +526,16 @@ try:
             "support_aabb_world_m": support_aabb.tolist(),
         },
         "automatic_checks": checks,
+        "diagnostics": {
+            "support_footprint_excludes_saved_grasp_part_projection": (
+                grasp_projection_clear
+            ),
+            "minimum_grasp_part_to_support_footprint_clearance_m": min(
+                plan.minimum_head_to_support_footprint_distance_m
+                for plan in support_plans
+            ),
+            "diagnostic_scene_kind": diagnostic_kind,
+        },
         "source_scene_modified": False,
         "candidate_or_planner_parameters_changed": False,
         "support_layout_source_sha256": (
@@ -504,10 +545,10 @@ try:
         ),
         "manual_review_required": True,
         "next_gate": (
-            "Open the scene without playing physics, confirm the block is below "
-            f"the {args.support_part_label} and not the {args.grasp_part_label}, "
-            "then run a fresh capture and pipeline. The post-settle grasp-part "
-            "clearance must be visually reviewed."
+            "Open the scene without playing physics and confirm the reviewed "
+            "support contact. Then run a fresh capture and pipeline; static "
+            "collision filtering and cuRobo must reject candidates whose "
+            "gripper geometry collides with the support."
         ),
     }
     if len(support_plans) == 1:
