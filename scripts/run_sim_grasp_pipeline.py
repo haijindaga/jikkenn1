@@ -57,6 +57,15 @@ class PipelineStageError(RuntimeError):
     pass
 
 
+def automatic_handover_requested(args: argparse.Namespace) -> bool:
+    """Return whether either supported automatic-handover interface is active."""
+
+    return bool(
+        args.handover_receiver_position_robot_base_m is not None
+        or args.handover_region_json is not None
+    )
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -309,7 +318,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--handover-region-json cannot be combined with point handover arguments"
         )
-    automatic_handover = point_handover or region_handover
+    automatic_handover = automatic_handover_requested(args)
     if automatic_handover:
         if args.handover_goal_position_robot_base_m is not None:
             parser.error(
@@ -578,10 +587,7 @@ def build_stages(
     grasp_candidate_segmentation_role = (
         "grasp_part" if use_grasp_part else "whole_object"
     )
-    automatic_handover = bool(
-        args.handover_receiver_position_robot_base_m is not None
-        or args.handover_region_json is not None
-    )
+    automatic_handover = automatic_handover_requested(args)
 
     capture_command = [
         str(isaac_python),
@@ -895,6 +901,7 @@ def build_stages(
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
+    automatic_handover = automatic_handover_requested(args)
     project_root = Path(__file__).resolve().parents[1]
     paths = pipeline_paths(args.output)
     scene_usd = args.scene_usd.expanduser().resolve()

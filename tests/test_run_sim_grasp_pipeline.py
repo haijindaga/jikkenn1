@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -454,6 +455,57 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         self.assertEqual(
             replay[replay.index("--grasp-retention-mode") + 1], "physics"
         )
+
+    def test_main_writes_region_policy_without_scope_error(self):
+        region = PROJECT / "config" / "handover_regions" / "mug_neo_behind.json"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scene = root / "scene.usda"
+            scene.write_text("#usda 1.0\n", encoding="utf-8")
+            output = root / "output"
+            completed_report = root / "graspgenx_check.json"
+            completed_report.write_text(
+                json.dumps({"status": "success"}), encoding="utf-8"
+            )
+            fake_stages = {
+                "graspgenx_inference": MODULE.Stage(
+                    "graspgenx_inference",
+                    (sys.executable, "unused.py"),
+                    completed_report,
+                )
+            }
+            with mock.patch.object(MODULE, "build_stages", return_value=fake_stages):
+                result = MODULE.main(
+                    [
+                        "--scene-usd",
+                        str(scene),
+                        "--target-object",
+                        "mug",
+                        "--ollama-model",
+                        "gemma3:12b",
+                        "--output",
+                        str(output),
+                        "--graspgenx-root",
+                        str(root),
+                        "--graspgenx-python",
+                        sys.executable,
+                        "--handover-region-json",
+                        str(region),
+                        "--resume",
+                        "--headless",
+                        "--no-show-results",
+                    ]
+                )
+            self.assertEqual(result, 0)
+            manifest = json.loads(
+                (output / "pipeline_status.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "success")
+            self.assertEqual(manifest["policy"]["handover_region_json"], str(region))
+            self.assertEqual(
+                manifest["policy"]["handover_region_samples_per_axis"], 3
+            )
+            self.assertEqual(manifest["policy"]["grasp_retention_mode"], "physics")
 
     def test_semantic_orientation_cost_requires_automatic_handover(self):
         with self.assertRaises(SystemExit):
