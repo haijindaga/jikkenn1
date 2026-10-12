@@ -180,6 +180,12 @@ def write_manifest(path: Path, manifest: dict) -> None:
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
+def optional_mapping(value: object) -> dict:
+    """Treat absent optional report sections as empty mappings."""
+
+    return value if isinstance(value, dict) else {}
+
+
 def _finite_metric(value: object, *, name: str, source_index: int) -> float:
     if value is None or not np.isfinite(value):
         raise RuntimeError(
@@ -470,11 +476,14 @@ def main() -> int:
         maximum_transport_orientation_deviation_rad = None
         if accepted and report_path is not None:
             plan_report = json.loads(Path(report_path).read_text(encoding="utf-8"))
-            transport_report = plan_report.get("result", {}).get("transport", {})
-            orientation_validation = transport_report.get(
-                "orientation_validation", {}
+            result_report = optional_mapping(plan_report.get("result"))
+            transport_report = optional_mapping(result_report.get("transport"))
+            orientation_validation = optional_mapping(
+                transport_report.get("orientation_validation")
             )
-            soft_cost_total = orientation_validation.get("soft_cost", {}).get("total")
+            soft_cost_total = optional_mapping(
+                orientation_validation.get("soft_cost")
+            ).get("total")
             if soft_cost_total is not None:
                 semantic_cost = _finite_metric(
                     soft_cost_total,
@@ -482,10 +491,10 @@ def main() -> int:
                     source_index=source_index,
                 )
             if automatic_handover:
-                goal_report = transport_report.get("goal", {})
-                selected_direction = goal_report.get(
-                    "selected_handover_goal_metadata",
-                    goal_report.get("selected_receive_direction_priority", {}),
+                goal_report = optional_mapping(transport_report.get("goal"))
+                selected_direction = optional_mapping(
+                    goal_report.get("selected_handover_goal_metadata")
+                    or goal_report.get("selected_receive_direction_priority")
                 )
                 direction_error_rad = _finite_metric(
                     selected_direction.get("alignment_error_rad"),

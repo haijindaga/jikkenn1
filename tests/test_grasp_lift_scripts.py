@@ -426,6 +426,10 @@ class GraspLiftScriptTests(unittest.TestCase):
         )
         self.assertIn('"--semantic-orientation-cost"', planner_runner)
         self.assertIn('"semantic_orientation_cost"', planner_runner)
+        self.assertIn(
+            'transport_report = optional_mapping(result_report.get("transport"))',
+            planner_runner,
+        )
         self.assertIn('"--exclude-source-candidate-index"', planner_runner)
         self.assertIn(
             '"excluded_previously_evaluated_source_candidate_indices"',
@@ -447,6 +451,22 @@ class GraspLiftScriptTests(unittest.TestCase):
             status, path = namespace["read_plan_status"](trial)
         self.assertEqual(status, "handover_transport_planning_failed")
         self.assertEqual(path, str(report))
+
+    def test_non_handover_success_accepts_null_transport_report(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_null_transport_test",
+        )
+        plan_report = {"status": "success", "result": {"transport": None}}
+        result_report = namespace["optional_mapping"](plan_report.get("result"))
+        transport_report = namespace["optional_mapping"](
+            result_report.get("transport")
+        )
+        orientation_validation = namespace["optional_mapping"](
+            transport_report.get("orientation_validation")
+        )
+        self.assertEqual(transport_report, {})
+        self.assertEqual(orientation_validation, {})
 
     def test_joint_handover_trial_selection_is_lexicographic_without_weights(self):
         namespace = runpy.run_path(
