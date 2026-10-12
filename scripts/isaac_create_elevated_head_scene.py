@@ -77,6 +77,14 @@ def parse_args() -> argparse.Namespace:
         default="handle-axis-rail",
         help="geometry rule used to place support inside the saved support part",
     )
+    parser.add_argument(
+        "--support-layout-json",
+        type=Path,
+        help=(
+            "reviewed jikkenn1-support-layout-v1 JSON exported by the Windows "
+            "scene editor; replaces automatic support footprint selection"
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -84,6 +92,8 @@ def parse_args() -> argparse.Namespace:
     args.reference_capture = args.reference_capture.expanduser().resolve()
     args.reference_segmentation = args.reference_segmentation.expanduser().resolve()
     args.output = args.output.expanduser().resolve()
+    if args.support_layout_json is not None:
+        args.support_layout_json = args.support_layout_json.expanduser().resolve()
     if not args.base_scene.is_file():
         parser.error(f"base scene does not exist: {args.base_scene}")
     if args.output.suffix.lower() not in {".usd", ".usda", ".usdc"}:
@@ -91,7 +101,13 @@ def parse_args() -> argparse.Namespace:
     if args.output == args.base_scene:
         parser.error("--output must differ from --base-scene")
     if args.output.exists() and not args.overwrite:
-        parser.error(f"output already exists: {args.output}; use --overwrite intentionally")
+        parser.error(
+            f"output already exists: {args.output}; use --overwrite intentionally"
+        )
+    if args.support_layout_json is not None and not args.support_layout_json.is_file():
+        parser.error(
+            f"--support-layout-json does not exist: {args.support_layout_json}"
+        )
     for value, label in (
         (args.target_clearance_m, "--target-clearance-m"),
         (args.support_width_m, "--support-width-m"),
@@ -157,6 +173,7 @@ from panda_handover.support_fixture import (
     plan_handle_support,
     plan_part_support_dual_patches,
     plan_part_support_patch,
+    plan_reviewed_support_layout,
 )
 
 
@@ -217,7 +234,19 @@ try:
         np.load(handle_mask_path, allow_pickle=False),
         T_world_camera,
     )
-    if args.support_geometry_policy == "handle-axis-rail":
+    support_layout = None
+    if args.support_layout_json is not None:
+        support_layout = json.loads(
+            args.support_layout_json.read_text(encoding="utf-8")
+        )
+        support_plans = plan_reviewed_support_layout(
+            support_layout,
+            grasp_points_world,
+            support_points_world,
+            grasp_projection_margin_m=args.grasp_part_projection_margin_m,
+        )
+        target_clearance_m = support_plans[0].target_lift_m
+    elif args.support_geometry_policy == "handle-axis-rail":
         support_plans = (
             plan_handle_support(
                 grasp_points_world,
@@ -227,6 +256,7 @@ try:
                 target_lift_m=args.target_clearance_m,
             ),
         )
+        target_clearance_m = args.target_clearance_m
     elif args.support_geometry_policy == "part-mask-patch":
         support_plans = (
             plan_part_support_patch(
@@ -237,6 +267,7 @@ try:
                 target_lift_m=args.target_clearance_m,
             ),
         )
+        target_clearance_m = args.target_clearance_m
     else:
         support_plans = plan_part_support_dual_patches(
             grasp_points_world,
@@ -245,6 +276,7 @@ try:
             grasp_projection_margin_m=args.grasp_part_projection_margin_m,
             target_lift_m=args.target_clearance_m,
         )
+        target_clearance_m = args.target_clearance_m
 
     base_hash_before = _sha256(args.base_scene)
     stage = Usd.Stage.Open(str(args.base_scene))
@@ -296,11 +328,11 @@ try:
     translation, _, _, _, _ = target_xform.GetXformVectors(Usd.TimeCode.Default())
     target_translation_before = np.asarray(translation, dtype=np.float64)
     target_translation_after = target_translation_before.copy()
-    target_translation_after[2] += args.target_clearance_m
+    target_translation_after[2] += target_clearance_m
     if not target_xform.SetTranslate(Gf.Vec3d(*target_translation_after.tolist())):
         raise RuntimeError("failed to translate target wrapper")
 
-    support_height_m = args.target_clearance_m
+    support_height_m = target_clearance_m
     support_root = (
         UsdGeom.Xform.Define(stage, args.support_prim)
         if len(support_plans) > 1
@@ -355,7 +387,7 @@ try:
         "target_raised_by_requested_amount": bool(
             np.isclose(
                 target_aabb_after[2] - target_aabb_before[2],
-                args.target_clearance_m,
+                target_clearance_m,
                 atol=1e-5,
                 rtol=0.0,
             )
@@ -366,7 +398,7 @@ try:
         "support_top_matches_target_lift": bool(
             np.isclose(
                 support_aabb[5],
-                table_top_z_m + args.target_clearance_m,
+                table_top_z_m + target_clearance_m,
                 atol=1e-5,
                 rtol=0.0,
             )
@@ -418,7 +450,22 @@ try:
                 f"{args.support_part_label} used only to locate support"
             ),
             "support_mask_role": args.support_mask_role,
-            "support_geometry_policy": args.support_geometry_policy,
+            "support_geometry_policy": (
+                "reviewed-layout-json"
+                if support_layout is not None
+                else args.support_geometry_policy
+            ),
+            "automatic_support_geometry_policy_argument": (
+                args.support_geometry_policy
+            ),
+            "support_layout_json": (
+                str(args.support_layout_json)
+                if args.support_layout_json is not None
+                else None
+            ),
+            "support_layout_schema": (
+                support_layout.get("schema") if support_layout is not None else None
+            ),
             "geometry_implementation_names": {
                 "head_points": "grasp_part",
                 "handle_points": "support_part",
@@ -438,7 +485,10 @@ try:
                 [plan.support_length_m, plan.support_width_m, support_height_m]
                 for plan in support_plans
             ],
-            "requested_support_width_m": args.support_width_m,
+            "requested_support_width_m": (
+                None if support_layout is not None else args.support_width_m
+            ),
+            "target_clearance_m": target_clearance_m,
             "support_yaw_degrees": [
                 plan.support_yaw_deg for plan in support_plans
             ],
@@ -447,6 +497,11 @@ try:
         "automatic_checks": checks,
         "source_scene_modified": False,
         "candidate_or_planner_parameters_changed": False,
+        "support_layout_source_sha256": (
+            _sha256(args.support_layout_json)
+            if args.support_layout_json is not None
+            else None
+        ),
         "manual_review_required": True,
         "next_gate": (
             "Open the scene without playing physics, confirm the block is below "

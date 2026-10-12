@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>jikkenn1 Scene Layout Editor</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10151d; --panel:#18212d; --line:#344255; --text:#edf3f8; --muted:#9eb0c3; --accent:#62c4ff; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,"Yu Gothic UI",sans-serif; overflow:hidden; }
+    header { height:52px; display:flex; align-items:center; gap:10px; padding:8px 14px; background:#121b26; border-bottom:1px solid var(--line); }
+    header strong { margin-right:auto; font-size:16px; }
+    button, select, input, textarea { color:var(--text); background:#111923; border:1px solid #41536a; border-radius:6px; padding:7px 9px; }
+    button { cursor:pointer; } button:hover { border-color:var(--accent); }
+    main { height:calc(100vh - 52px); display:grid; grid-template-columns:minmax(520px,1fr) 340px; }
+    #viewportWrap { position:relative; min-width:0; background:linear-gradient(#17202b,#0c1219); }
+    canvas { width:100%; height:100%; display:block; cursor:grab; }
+    canvas.dragging { cursor:grabbing; }
+    #hud { position:absolute; left:12px; top:12px; padding:8px 10px; border-radius:7px; background:#0b1119d9; color:#cdd8e4; pointer-events:none; white-space:pre-line; }
+    #axis { position:absolute; left:12px; bottom:12px; padding:7px 9px; border-radius:7px; background:#0b1119d9; color:#b9c7d6; pointer-events:none; }
+    aside { overflow:auto; padding:14px; background:var(--panel); border-left:1px solid var(--line); }
+    section { margin:0 0 16px; padding:12px; border:1px solid var(--line); border-radius:9px; background:#141d28; }
+    h2 { margin:0 0 10px; font-size:14px; }
+    .row { display:grid; grid-template-columns:78px 1fr; gap:8px; align-items:center; margin:7px 0; }
+    .triple { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
+    label { color:#c6d2df; }
+    input[type=number] { min-width:0; width:100%; }
+    input[type=checkbox] { width:auto; }
+    textarea { width:100%; min-height:82px; resize:vertical; font:12px/1.35 ui-monospace,Consolas,monospace; }
+    .muted { color:var(--muted); font-size:12px; }
+    .buttons { display:flex; flex-wrap:wrap; gap:7px; }
+    .legend { display:grid; grid-template-columns:auto 1fr; gap:5px 8px; align-items:center; }
+    .swatch { width:13px; height:13px; border-radius:3px; }
+    #status { min-height:20px; color:#8fd7a7; }
+    @media (max-width:900px) { main { grid-template-columns:1fr; grid-template-rows:55vh 45vh; } aside { border-left:0; border-top:1px solid var(--line); } }
+  </style>
+</head>
+<body>
+<header>
+  <strong>jikkenn1 Scene Layout Editor — robot-base frame / metres / Z-up</strong>
+  <button data-view="default">3D</button><button data-view="top">上</button><button data-view="front">正面</button><button data-view="side">横</button>
+  <button id="resetView">表示リセット</button>
+</header>
+<main>
+  <div id="viewportWrap">
+    <canvas id="view"></canvas>
+    <div id="hud"></div>
+    <div id="axis">X=<span style="color:#ff7373">赤</span>　Y=<span style="color:#71df8a">緑</span>　Z=<span style="color:#6ca9ff">青</span></div>
+  </div>
+  <aside>
+    <section>
+      <h2>操作</h2>
+      <div class="muted">空所ドラッグ: 視点回転／ホイール: 拡大縮小<br>物体ドラッグ: XY移動／Shift+ドラッグ: Z移動<br>これは配置確認用で、物理・IK・衝突判定は行いません。</div>
+    </section>
+    <section>
+      <h2>選択物</h2>
+      <div class="row"><label for="entity">対象</label><select id="entity"></select></div>
+      <div class="row"><label>表示</label><input id="visible" type="checkbox" checked></div>
+      <div class="row"><label>位置 XYZ</label><div class="triple"><input id="px" type="number" step="0.01"><input id="py" type="number" step="0.01"><input id="pz" type="number" step="0.01"></div></div>
+      <div class="row"><label>大きさ XYZ</label><div class="triple"><input id="sx" type="number" min="0.001" step="0.01"><input id="sy" type="number" min="0.001" step="0.01"><input id="sz" type="number" min="0.001" step="0.01"></div></div>
+      <div class="row"><label>Yaw [deg]</label><input id="yaw" type="number" step="5"></div>
+      <div class="row"><label>形状</label><select id="shape"><option value="box">box</option><option value="cup">cup</option><option value="hammer">hammer</option><option value="scissors">scissors</option><option value="point">point</option><option value="human">human</option><option value="robot">robot</option></select></div>
+      <div class="buttons"><button id="nudgeX">X +1cm</button><button id="nudgeY">Y +1cm</button><button id="nudgeZ">Z +1cm</button></div>
+    </section>
+    <section>
+      <h2>把持用の台</h2>
+      <div class="muted">既存の <code>*.usda.check.json</code> を読み込むと、実測マスクから作った台を初期値にできます。ここでは位置・長さ・幅・高さ・Yawだけを調整し、Linux側で部位点群との重なりを再検証します。</div>
+      <div class="buttons" style="margin-top:8px"><button id="hammerPreset">ハンマー1台</button><button id="scissorsPreset">ハサミ2台</button><button id="addSupport">台を追加</button><button id="duplicateSupport">台を複製</button><button id="removeSupport">選択台を削除</button></div>
+      <div class="buttons" style="margin-top:8px"><button id="downloadSupportJson">台JSON保存</button></div>
+      <textarea id="supportCommand" readonly></textarea>
+    </section>
+    <section>
+      <h2>受け渡し設定</h2>
+      <div class="row"><label>人方向 XYZ</label><div class="triple"><input id="dx" type="number" step="0.1"><input id="dy" type="number" step="0.1"><input id="dz" type="number" step="0.1"></div></div>
+      <textarea id="command" readonly></textarea>
+      <div class="buttons"><button id="copyCommand">Linux引数をコピー</button></div>
+    </section>
+    <section>
+      <h2>保存・読み込み</h2>
+      <div class="buttons"><button id="downloadJson">JSON保存</button><button id="downloadPng">画像保存</button><button id="resetScene">初期配置</button></div>
+      <div class="row"><label>JSON読込</label><input id="fileInput" type="file" accept=".json,application/json"></div>
+      <textarea id="paste" placeholder="pipeline_status.json / scene_layout.json / 保存JSONを貼り付け"></textarea>
+      <div class="buttons"><button id="applyPaste">貼付JSONを反映</button></div>
+      <div id="status"></div>
+    </section>
+    <section>
+      <h2>凡例</h2>
+      <div class="legend">
+        <span class="swatch" style="background:#4e8bc8"></span><span>ロボット（模式図）</span>
+        <span class="swatch" style="background:#9a6b3e"></span><span>机</span>
+        <span class="swatch" style="background:#f3b84a"></span><span>対象物</span>
+        <span class="swatch" style="background:#d96064"></span><span>障害物</span>
+        <span class="swatch" style="background:#35b8d4"></span><span>把持用の台（静的衝突形状）</span>
+        <span class="swatch" style="background:#df57dc"></span><span>受け渡し点・方向</span>
+      </div>
+    </section>
+  </aside>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const canvas = $('view'), ctx = canvas.getContext('2d');
+  const defaults = {
+    version: 1,
+    frame: 'robot_base', units: 'metres', up_axis: 'Z',
+    humanDirection: [-1, 0, 0],
+    entities: {
+      robot:    {label:'Panda（模式図）', shape:'robot', pos:[0,0,0], size:[0.16,0.16,0.32], yaw:0, color:'#4e8bc8', visible:true},
+      table:    {label:'机', shape:'box', pos:[0.50,0,-0.025], size:[0.80,1.00,0.05], yaw:0, color:'#9a6b3e', visible:true},
+      target:   {label:'対象物（マグカップ）', shape:'cup', pos:[0.50,0.20,0.06], size:[0.12,0.09,0.12], yaw:180, color:'#f3b84a', visible:true},
+      obstacle: {label:'障害物', shape:'box', pos:[0.50,-0.20,0.05], size:[0.10,0.10,0.10], yaw:0, color:'#d96064', visible:true},
+      support_1:{label:'把持用の台 1', shape:'box', role:'support', pos:[0.40,0.16,0.03], size:[0.08,0.03,0.06], yaw:0, color:'#35b8d4', visible:false},
+      support_2:{label:'把持用の台 2', shape:'box', role:'support', pos:[0.44,0.20,0.03], size:[0.04,0.03,0.06], yaw:0, color:'#35b8d4', visible:false},
+      handover: {label:'受け渡し点', shape:'point', pos:[-0.30,0,0.50], size:[0.05,0.05,0.05], yaw:0, color:'#df57dc', visible:true},
+      receiver: {label:'受取者（模式図）', shape:'human', pos:[-0.72,0,0], size:[0.45,0.28,1.68], yaw:0, color:'#77859a', visible:true}
+    }
+  };
+  const clone = x => JSON.parse(JSON.stringify(x));
+  let scene = loadLocal() || clone(defaults);
+  let selected = 'target';
+  let camera = {yaw:-0.82, pitch:0.58, zoom:1, target:[0.25,0,0.25]};
+  let pointer = null;
+
+  const entitySelect = $('entity');
+  function refreshEntitySelect(){
+    const previous=selected;entitySelect.textContent='';
+    Object.entries(scene.entities).forEach(([key,e])=>{const o=document.createElement('option');o.value=key;o.textContent=e.label;entitySelect.appendChild(o);});
+    selected=scene.entities[previous]?previous:Object.keys(scene.entities)[0];entitySelect.value=selected;
+  }
+  refreshEntitySelect();
+
+  function resize() {
+    const dpr=Math.min(devicePixelRatio||1,2), r=canvas.getBoundingClientRect();
+    canvas.width=Math.max(1,Math.round(r.width*dpr)); canvas.height=Math.max(1,Math.round(r.height*dpr));
+    ctx.setTransform(dpr,0,0,dpr,0,0); render();
+  }
+  new ResizeObserver(resize).observe(canvas);
+
+  const add=(a,b)=>a.map((v,i)=>v+b[i]);
+  const sub=(a,b)=>a.map((v,i)=>v-b[i]);
+  const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const mul=(a,s)=>a.map(v=>v*s);
+  const norm=a=>{const n=Math.hypot(...a)||1; return a.map(v=>v/n)};
+  function basis() {
+    const cy=Math.cos(camera.yaw), sy=Math.sin(camera.yaw), cp=Math.cos(camera.pitch), sp=Math.sin(camera.pitch);
+    return {right:[-sy,cy,0], up:[-sp*cy,-sp*sy,cp], depth:[cp*cy,cp*sy,sp]};
+  }
+  function metrics(){const r=canvas.getBoundingClientRect(); return {w:r.width,h:r.height,scale:Math.min(r.width,r.height)*0.62*camera.zoom};}
+  function project(p) {
+    const b=basis(), m=metrics(), q=sub(p,camera.target);
+    return [m.w/2+dot(q,b.right)*m.scale,m.h/2-dot(q,b.up)*m.scale,dot(q,b.depth)];
+  }
+  function rotateZ(p,yaw){const c=Math.cos(yaw),s=Math.sin(yaw); return [c*p[0]-s*p[1],s*p[0]+c*p[1],p[2]];}
+  function rgba(hex,a){const n=parseInt(hex.slice(1),16); return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`;}
+  function line3(a,b,color,width=1,dash=[]) {const A=project(a),B=project(b); ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.beginPath();ctx.moveTo(A[0],A[1]);ctx.lineTo(B[0],B[1]);ctx.stroke();ctx.restore();}
+  function text3(p,text,color='#dbe6f1') {const s=project(p);ctx.save();ctx.font='12px system-ui';ctx.fillStyle='#071019cc';ctx.fillRect(s[0]+6,s[1]-15,ctx.measureText(text).width+8,18);ctx.fillStyle=color;ctx.fillText(text,s[0]+10,s[1]-2);ctx.restore();}
+  function sphere3(p,r,color,outline=false){const s=project(p),m=metrics();ctx.beginPath();ctx.arc(s[0],s[1],Math.max(4,r*m.scale),0,Math.PI*2);ctx.fillStyle=rgba(color,.88);ctx.fill();if(outline){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();}}
+  function boxGeometry(e){
+    const h=e.size.map(v=>v/2), y=e.yaw*Math.PI/180;
+    const local=[[-h[0],-h[1],-h[2]],[h[0],-h[1],-h[2]],[h[0],h[1],-h[2]],[-h[0],h[1],-h[2]],[-h[0],-h[1],h[2]],[h[0],-h[1],h[2]],[h[0],h[1],h[2]],[-h[0],h[1],h[2]]];
+    const v=local.map(p=>add(rotateZ(p,y),e.pos));
+    const faces=[[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]];
+    return faces.map((ids,i)=>({pts:ids.map(k=>v[k]),depth:ids.reduce((s,k)=>s+project(v[k])[2],0)/4,shade:[.55,.95,.72,.82,.66,.62][i]}));
+  }
+  function drawBox(e,key){
+    boxGeometry(e).sort((a,b)=>a.depth-b.depth).forEach(f=>{const q=f.pts.map(project);ctx.beginPath();ctx.moveTo(q[0][0],q[0][1]);q.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));ctx.closePath();ctx.fillStyle=rgba(e.color,f.shade);ctx.fill();ctx.strokeStyle=key===selected?'#fff':'#263443';ctx.lineWidth=key===selected?2:1;ctx.stroke();});
+  }
+  function circleRing(center,rx,ry,z,color,width=3,start=0,end=Math.PI*2){let prev=null;for(let i=0;i<=36;i++){const t=start+(end-start)*i/36,p=[center[0]+Math.cos(t)*rx,center[1]+Math.sin(t)*ry,z];if(prev)line3(prev,p,color,width);prev=p;}}
+  function drawCup(e,key){
+    const [x,y,z]=e.pos,[sx,sy,sz]=e.size, bottom=z-sz/2,top=z+sz/2;
+    for(let i=0;i<16;i++){const t=2*Math.PI*i/16;line3([x+Math.cos(t)*sx*.33,y+Math.sin(t)*sy*.42,bottom],[x+Math.cos(t)*sx*.42,y+Math.sin(t)*sy*.48,top],rgba(e.color,.75),2);}
+    circleRing([x,y,z],sx*.42,sy*.48,top,e.color,3);circleRing([x,y,z],sx*.33,sy*.42,bottom,rgba(e.color,.7),2);
+    const yaw=e.yaw*Math.PI/180, side=[Math.cos(yaw),Math.sin(yaw),0], out=add(e.pos,mul(side,sx*.45)); let prev=null;
+    for(let i=0;i<=18;i++){const t=-Math.PI/2+Math.PI*i/18, p=add(out,[side[0]*Math.cos(t)*sx*.38,side[1]*Math.cos(t)*sx*.38,Math.sin(t)*sz*.32]);if(prev)line3(prev,p,e.color,5);prev=p;}
+    if(key===selected)sphere3(e.pos,.012,'#ffffff');
+  }
+  function drawHammer(e,key){
+    const y=e.yaw*Math.PI/180,axis=[Math.cos(y),Math.sin(y),0],perp=[-axis[1],axis[0],0];
+    const a=add(e.pos,mul(axis,-e.size[0]*.42)),b=add(e.pos,mul(axis,e.size[0]*.35));line3(a,b,e.color,9);
+    line3(add(b,mul(perp,-e.size[1]*.45)),add(b,mul(perp,e.size[1]*.45)),e.color,18);if(key===selected)sphere3(e.pos,.012,'#fff');
+  }
+  function drawScissors(e,key){
+    const y=e.yaw*Math.PI/180,axis=[Math.cos(y),Math.sin(y),0],perp=[-axis[1],axis[0],0];
+    [-1,1].forEach(s=>{const c=add(add(e.pos,mul(axis,-e.size[0]*.25)),mul(perp,s*e.size[1]*.18));sphere3(c,e.size[1]*.16,e.color);line3(c,add(add(e.pos,mul(axis,e.size[0]*.48)),mul(perp,-s*e.size[1]*.12)),e.color,4);});
+    if(key===selected)sphere3(e.pos,.012,'#fff');
+  }
+  function drawRobot(e,key){
+    const p=e.pos, pts=[[0,0,0],[0,0,.32],[.18,.02,.49],[.34,-.06,.43],[.47,.02,.28],[.55,.08,.23]].map(v=>add(v,p));
+    drawBox({...e,pos:add(p,[0,0,.08]),size:[.18,.18,.16],shape:'box'},key);
+    for(let i=0;i<pts.length-1;i++){line3(pts[i],pts[i+1],e.color,12);sphere3(pts[i],.025,e.color);} sphere3(pts.at(-1),.03,'#84b9ea');
+    line3(add(pts.at(-1),[0,-.055,0]),add(pts.at(-1),[.08,-.055,0]),'#9bc9f3',5);line3(add(pts.at(-1),[0,.055,0]),add(pts.at(-1),[.08,.055,0]),'#9bc9f3',5);
+  }
+  function drawHuman(e,key){
+    const base=e.pos,h=e.size[2], torso=add(base,[0,0,h*.56]),head=add(base,[0,0,h*.88]);
+    sphere3(head,h*.08,e.color,key===selected);line3(add(base,[0,0,h*.1]),torso,e.color,12);line3(torso,add(torso,[0,e.size[0]*.55,-h*.22]),e.color,8);line3(torso,add(torso,[0,-e.size[0]*.55,-h*.22]),e.color,8);line3(add(base,[0,0,h*.1]),add(base,[0,e.size[1]*.35,0]),e.color,8);line3(add(base,[0,0,h*.1]),add(base,[0,-e.size[1]*.35,0]),e.color,8);
+  }
+  function arrow3(a,b,color){line3(a,b,color,4);const d=norm(sub(b,a)),side=norm([-d[1],d[0],0]);line3(b,add(add(b,mul(d,-.06)),mul(side,.035)),color,4);line3(b,add(add(b,mul(d,-.06)),mul(side,-.035)),color,4);}
+  function drawGrid(){
+    for(let i=-10;i<=10;i++){const v=i*.1,major=i%5===0;line3([-1,v,0],[1,v,0],major?'#334355':'#24303e',major?1.2:.7);line3([v,-1,0],[v,1,0],major?'#334355':'#24303e',major?1.2:.7);}
+    line3([0,0,0],[.25,0,0],'#ff7373',3);line3([0,0,0],[0,.25,0],'#71df8a',3);line3([0,0,0],[0,0,.25],'#6ca9ff',3);
+  }
+  function render(){
+    const r=canvas.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);drawGrid();
+    const entries=Object.entries(scene.entities).filter(([,e])=>e.visible).sort((a,b)=>project(a[1].pos)[2]-project(b[1].pos)[2]);
+    for(const [key,e] of entries){
+      if(e.shape==='box')drawBox(e,key); else if(e.shape==='cup')drawCup(e,key); else if(e.shape==='hammer')drawHammer(e,key); else if(e.shape==='scissors')drawScissors(e,key); else if(e.shape==='robot')drawRobot(e,key); else if(e.shape==='human')drawHuman(e,key); else sphere3(e.pos,e.size[0]/2,e.color,key===selected);
+      text3(add(e.pos,[0,0,e.size[2]/2+.04]),e.label,key===selected?'#fff':'#c7d4e0');
+    }
+    const hp=scene.entities.handover.pos,dir=norm(scene.humanDirection);arrow3(hp,add(hp,mul(dir,.28)),'#df57dc');
+    const e=scene.entities[selected];$('hud').textContent=`選択: ${e.label}\n位置: ${e.pos.map(v=>v.toFixed(3)).join(', ')} m\n大きさ: ${e.size.map(v=>v.toFixed(3)).join(', ')} m`;
+  }
+  function syncControls(){
+    const e=scene.entities[selected];entitySelect.value=selected;$('visible').checked=e.visible;
+    ['px','py','pz'].forEach((id,i)=>$(id).value=e.pos[i]);['sx','sy','sz'].forEach((id,i)=>$(id).value=e.size[i]);$('yaw').value=e.yaw;$('shape').value=e.shape;
+    $('pz').disabled=e.role==='support';$('shape').disabled=e.role==='support';
+    ['dx','dy','dz'].forEach((id,i)=>$(id).value=scene.humanDirection[i]);
+    $('command').value=`--handover-receiver-position-robot-base-m ${scene.entities.handover.pos.map(v=>Number(v).toFixed(3)).join(' ')} \\\n--handover-human-direction-robot-base ${scene.humanDirection.map(v=>Number(v).toFixed(3)).join(' ')}`;
+    $('supportCommand').value='--support-layout-json config/support_layouts/<saved-name>.json';
+    saveLocal();render();
+  }
+  function applyControls(){
+    const e=scene.entities[selected];e.visible=$('visible').checked;e.pos=[$('px'),$('py'),$('pz')].map(x=>Number(x.value)||0);e.size=[$('sx'),$('sy'),$('sz')].map(x=>Math.max(.001,Number(x.value)||.001));e.yaw=Number($('yaw').value)||0;e.shape=e.role==='support'?'box':$('shape').value;if(e.role==='support'){const table=scene.entities.table;e.pos[2]=table.pos[2]+table.size[2]/2+e.size[2]/2;}scene.humanDirection=[$('dx'),$('dy'),$('dz')].map(x=>Number(x.value)||0);syncControls();
+  }
+  entitySelect.onchange=()=>{selected=entitySelect.value;syncControls()};
+  ['visible','px','py','pz','sx','sy','sz','yaw','shape','dx','dy','dz'].forEach(id=>$(id).addEventListener('change',applyControls));
+  $('nudgeX').onclick=()=>nudge(0);$('nudgeY').onclick=()=>nudge(1);$('nudgeZ').onclick=()=>nudge(2);
+  function nudge(i){scene.entities[selected].pos[i]+=.01;syncControls();}
+  $('hammerPreset').onclick=()=>applySupportPreset('hammer');
+  $('scissorsPreset').onclick=()=>applySupportPreset('scissors');
+  $('addSupport').onclick=()=>addSupport();
+  $('duplicateSupport').onclick=()=>duplicateSupport();
+  $('removeSupport').onclick=()=>removeSupport();
+
+  function supportEntries(){return Object.entries(scene.entities).filter(([,e])=>e.role==='support');}
+  function tableTopZ(){const table=scene.entities.table;return Number(table.pos[2])+Number(table.size[2])/2;}
+  function nextSupportKey(){let i=1;while(scene.entities[`support_${i}`])i++;return `support_${i}`;}
+  function supportEntity(label,pos,size,yaw){return {label,shape:'box',role:'support',pos,size,yaw,color:'#35b8d4',visible:true};}
+  function addSupport(source=null){
+    const key=nextSupportKey(),base=source||supportEntries().at(-1)?.[1]||supportEntity('',[scene.entities.target.pos[0],scene.entities.target.pos[1],.03],[.05,.03,.06],scene.entities.target.yaw);
+    const e=clone(base);e.label=`把持用の台 ${supportEntries().length+1}`;e.role='support';e.shape='box';e.color='#35b8d4';e.visible=true;e.pos=[e.pos[0]+.02,e.pos[1]+.02,tableTopZ()+e.size[2]/2];scene.entities[key]=e;selected=key;refreshEntitySelect();syncControls();
+  }
+  function duplicateSupport(){const e=scene.entities[selected];if(e?.role!=='support'){setStatus('複製する台を選択してください',true);return;}addSupport(e);setStatus('選択した台を複製しました');}
+  function removeSupport(){if(scene.entities[selected]?.role!=='support'){setStatus('削除する台を選択してください',true);return;}delete scene.entities[selected];selected='target';refreshEntitySelect();syncControls();setStatus('選択した台を削除しました');}
+  function clearSupports(){for(const [key,e] of supportEntries())delete scene.entities[key];}
+  function applySupportPreset(kind){
+    clearSupports();const target=scene.entities.target,y=target.yaw*Math.PI/180,axis=[Math.cos(y),Math.sin(y),0],perp=[-axis[1],axis[0],0],height=.06,z=tableTopZ()+height/2;
+    if(kind==='hammer'){
+      target.shape='hammer';target.label='対象物（ハンマー）';
+      const p=add(target.pos,mul(axis,-target.size[0]*.24));scene.entities.support_1=supportEntity('把持用の台 1',[p[0],p[1],z],[Math.max(.04,target.size[0]*.28),Math.max(.02,target.size[1]*.28),height],target.yaw);
+    }else{
+      target.shape='scissors';target.label='対象物（ハサミ）';const back=add(target.pos,mul(axis,-target.size[0]*.24));
+      [-1,1].forEach((sign,i)=>{const p=add(back,mul(perp,sign*target.size[1]*.18));scene.entities[`support_${i+1}`]=supportEntity(`把持用の台 ${i+1}`,[p[0],p[1],z],[Math.max(.025,target.size[0]*.16),Math.max(.018,target.size[1]*.16),height],target.yaw);});
+    }
+    selected='support_1';refreshEntitySelect();syncControls();setStatus(`${kind==='hammer'?'ハンマー':'ハサミ'}用の編集開始位置を作成しました。Linux側の部位点群検証を通してから使用してください。`);
+  }
+
+  canvas.addEventListener('pointerdown',ev=>{
+    canvas.setPointerCapture(ev.pointerId);const hit=hitEntity(ev.offsetX,ev.offsetY);if(hit){selected=hit;pointer={mode:ev.shiftKey?'moveZ':'moveXY',x:ev.clientX,y:ev.clientY};syncControls();}else pointer={mode:'orbit',x:ev.clientX,y:ev.clientY};canvas.classList.add('dragging');
+  });
+  canvas.addEventListener('pointermove',ev=>{
+    if(!pointer)return;const dx=ev.clientX-pointer.x,dy=ev.clientY-pointer.y;pointer.x=ev.clientX;pointer.y=ev.clientY;
+    if(pointer.mode==='orbit'){camera.yaw-=dx*.008;camera.pitch=Math.max(.08,Math.min(1.52,camera.pitch+dy*.006));render();return;}
+    const e=scene.entities[selected],m=metrics();if(pointer.mode==='moveZ'){if(e.role==='support'){setStatus('台の高さは「大きさ Z」で変更してください',true);return;}e.pos[2]=Math.max(-.5,e.pos[2]-dy/m.scale);syncControls();return;}
+    const b=basis(),a=b.right[0],bb=b.right[1],c=-b.up[0],d=-b.up[1],det=a*d-bb*c;if(Math.abs(det)>.04){const u=dx/m.scale,v=dy/m.scale;e.pos[0]+=(d*u-bb*v)/det;e.pos[1]+=(-c*u+a*v)/det;syncControls();}
+  });
+  canvas.addEventListener('pointerup',()=>{pointer=null;canvas.classList.remove('dragging')});
+  canvas.addEventListener('wheel',ev=>{ev.preventDefault();camera.zoom=Math.max(.3,Math.min(4,camera.zoom*Math.exp(-ev.deltaY*.001)));render()},{passive:false});
+  function hitEntity(x,y){let best=null,dist=30;for(const [k,e] of Object.entries(scene.entities)){if(!e.visible)continue;const p=project(e.pos),d=Math.hypot(x-p[0],y-p[1]);if(d<dist){best=k;dist=d;}}return best;}
+
+  document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+  function setView(name){const views={default:[-.82,.58],top:[-Math.PI/2,1.50],front:[-Math.PI/2,.08],side:[0,.08]};[camera.yaw,camera.pitch]=views[name];render();}
+  $('resetView').onclick=()=>{camera={yaw:-.82,pitch:.58,zoom:1,target:[.25,0,.25]};render()};
+  $('resetScene').onclick=()=>{if(confirm('初期配置に戻しますか？')){scene=clone(defaults);selected='target';syncControls();setStatus('初期配置に戻しました')}};
+  $('downloadJson').onclick=()=>download('scene-layout-review.json',JSON.stringify(scene,null,2),'application/json');
+  $('downloadSupportJson').onclick=()=>{try{download('support-layout-review.json',JSON.stringify(buildSupportLayout(),null,2),'application/json');setStatus('台レイアウトJSONを保存しました')}catch(err){setStatus(err.message,true)}};
+  $('downloadPng').onclick=()=>{const a=document.createElement('a');a.download='scene-layout.png';a.href=canvas.toDataURL('image/png');a.click();};
+  $('copyCommand').onclick=async()=>{try{await navigator.clipboard.writeText($('command').value);setStatus('Linux引数をコピーしました')}catch{ $('command').select();document.execCommand('copy');setStatus('Linux引数をコピーしました') }};
+  $('fileInput').onchange=async ev=>{const f=ev.target.files[0];if(f)try{importJson(JSON.parse(await f.text()));setStatus(`${f.name} を反映しました`)}catch(err){setStatus(`読込失敗: ${err.message}`,true)}};
+  $('applyPaste').onclick=()=>{try{importJson(JSON.parse($('paste').value));setStatus('貼付JSONを反映しました')}catch(err){setStatus(`読込失敗: ${err.message}`,true)}};
+  function importJson(data){
+    if(data.schema==='jikkenn1-support-layout-v1'){applySupportLayout(data);setStatus('台レイアウトを反映しました');return;}
+    if(data.entities){scene=normaliseScene(data);selected=scene.entities[selected]?selected:Object.keys(scene.entities)[0];refreshEntitySelect();syncControls();return;}
+    const authored=findKey(data,'authored');
+    if(authored&&Array.isArray(authored.support_centers_world_m)&&Array.isArray(authored.support_sizes_m)){
+      applyAuthoredSupports(authored);setStatus('生成レポートの台と対象物境界を反映しました');return;
+    }
+    const receiver=findKey(data,'handover_receiver_position_robot_base_m');if(Array.isArray(receiver)&&receiver.length===3)scene.entities.handover.pos=receiver.map(Number);
+    const direction=findKey(data,'handover_human_direction_robot_base');if(Array.isArray(direction)&&direction.length===3)scene.humanDirection=direction.map(Number);
+    const table=findBox(data,['table','tabletop']);if(table){if(table.center)scene.entities.table.pos=table.center;if(table.size)scene.entities.table.size=table.size;}
+    const target=findBox(data,['target','object']);if(target){if(target.center)scene.entities.target.pos=target.center;if(target.size)scene.entities.target.size=target.size;}
+    syncControls();
+  }
+  function normaliseScene(data){const out=clone(defaults);out.humanDirection=Array.isArray(data.humanDirection)?data.humanDirection.map(Number):out.humanDirection;for(const [k,v] of Object.entries(data.entities||{})){if(v&&typeof v==='object'){out.entities[k]=Object.assign(out.entities[k]||{},v);}}return out;}
+  function buildSupportLayout(){
+    const supports=supportEntries().filter(([,e])=>e.visible);if(!supports.length)throw new Error('表示中の台がありません');
+    const heights=supports.map(([,e])=>Number(e.size[2]));if(heights.some(v=>!Number.isFinite(v)||v<=0))throw new Error('台の高さは正の数にしてください');
+    if(Math.max(...heights)-Math.min(...heights)>1e-6)throw new Error('複数の台は同じ高さにしてください');
+    return {schema:'jikkenn1-support-layout-v1',frame:'world',units:'metres',up_axis:'Z',object_label:scene.entities.target.label,supports:supports.map(([key,e])=>({name:key,center_xy_world_m:[Number(e.pos[0]),Number(e.pos[1])],size_xy_m:[Number(e.size[0]),Number(e.size[1])],height_m:Number(e.size[2]),yaw_deg:Number(e.yaw)||0}))};
+  }
+  function applySupportLayout(data){
+    if(data.frame!=='world'||data.units!=='metres'||data.up_axis!=='Z'||!Array.isArray(data.supports)||!data.supports.length)throw new Error('対応していない台JSONです');
+    clearSupports();data.supports.forEach((s,i)=>{const h=Number(s.height_m),c=s.center_xy_world_m.map(Number),z=tableTopZ()+h/2;scene.entities[`support_${i+1}`]=supportEntity(`把持用の台 ${i+1}`,[c[0],c[1],z],[Number(s.size_xy_m[0]),Number(s.size_xy_m[1]),h],Number(s.yaw_deg)||0);});selected='support_1';refreshEntitySelect();syncControls();
+  }
+  function applyAuthoredSupports(authored){
+    clearSupports();const yaws=authored.support_yaw_degrees||[],top=Number(authored.table_top_z_m);if(Number.isFinite(top)){scene.entities.table.pos[2]=top-scene.entities.table.size[2]/2;}authored.support_centers_world_m.forEach((c,i)=>{const size=authored.support_sizes_m[i],h=Number(size[2]);scene.entities[`support_${i+1}`]=supportEntity(`把持用の台 ${i+1}`,[Number(c[0]),Number(c[1]),tableTopZ()+h/2],[Number(size[0]),Number(size[1]),h],Number(yaws[i])||0);});
+    const aabb=authored.target_aabb_after_m||authored.target_aabb_before_m;if(Array.isArray(aabb)&&aabb.length===6){scene.entities.target.pos=[(aabb[0]+aabb[3])/2,(aabb[1]+aabb[4])/2,(aabb[2]+aabb[5])/2];scene.entities.target.size=[aabb[3]-aabb[0],aabb[4]-aabb[1],aabb[5]-aabb[2]];}
+    selected='support_1';refreshEntitySelect();syncControls();
+  }
+  function findKey(o,key){if(!o||typeof o!=='object')return null;if(Object.prototype.hasOwnProperty.call(o,key))return o[key];for(const v of Object.values(o)){const r=findKey(v,key);if(r!==null)return r;}return null;}
+  function findBox(data,names){for(const name of names){const x=findKey(data,name);if(x&&typeof x==='object'){const center=x.center||x.position||x.center_world_m||x.center_robot_base_m;const size=x.size||x.dimensions||x.size_m;if(Array.isArray(center)||Array.isArray(size))return {center:Array.isArray(center)?center.map(Number):null,size:Array.isArray(size)?size.map(Number):null};}}return null;}
+  function download(name,text,type){const a=document.createElement('a');a.download=name;a.href=URL.createObjectURL(new Blob([text],{type}));a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
+  function saveLocal(){try{localStorage.setItem('jikkenn1-scene-layout',JSON.stringify(scene))}catch{}}
+  function loadLocal(){try{const x=JSON.parse(localStorage.getItem('jikkenn1-scene-layout'));return x&&x.entities?normaliseScene(x):null}catch{return null}}
+  function setStatus(msg,error=false){$('status').textContent=msg;$('status').style.color=error?'#ff8d8d':'#8fd7a7';}
+  syncControls();resize();
+})();
+</script>
+</body>
+</html>

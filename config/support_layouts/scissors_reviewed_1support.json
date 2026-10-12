@@ -1,0 +1,22 @@
+{
+  "schema": "jikkenn1-support-layout-v1",
+  "frame": "world",
+  "units": "metres",
+  "up_axis": "Z",
+  "object_label": "scissors",
+  "supports": [
+    {
+      "name": "support_1",
+      "center_xy_world_m": [
+        0.41254534408273486,
+        0.08389655317220655
+      ],
+      "size_xy_m": [
+        0.061,
+        0.061
+      ],
+      "height_m": 0.06,
+      "yaw_deg": 180.0
+    }
+  ]
+}

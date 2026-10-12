@@ -354,3 +354,136 @@ def plan_part_support_dual_patches(
     ):
         raise ValueError("derived dual support patches are not spatially distinct")
     return plans
+
+
+def plan_reviewed_support_layout(
+    layout: dict[str, object],
+    grasp_points_world: np.ndarray,
+    support_points_world: np.ndarray,
+    *,
+    grasp_projection_margin_m: float,
+) -> tuple[ElevatedHeadSupportPlan, ...]:
+    """Validate user-reviewed cuboids against the saved segmented 3-D parts.
+
+    The Windows editor is deliberately only a geometry editor.  This function
+    is the acceptance gate: every authored support must cover observed points
+    from the support part, remain outside the grasp-part projection (including
+    the common margin), and use one common height so the translated object can
+    rest on all supports.
+    """
+
+    if not isinstance(layout, dict):
+        raise ValueError("support layout must be a JSON object")
+    if layout.get("schema") != "jikkenn1-support-layout-v1":
+        raise ValueError("support layout schema must be jikkenn1-support-layout-v1")
+    if layout.get("frame") != "world":
+        raise ValueError("support layout frame must be world")
+    if layout.get("units") != "metres" or layout.get("up_axis") != "Z":
+        raise ValueError("support layout must use metres and Z-up")
+    supports = layout.get("supports")
+    if not isinstance(supports, list) or not 1 <= len(supports) <= 4:
+        raise ValueError("support layout must contain between one and four supports")
+    if (
+        not np.isfinite(grasp_projection_margin_m)
+        or grasp_projection_margin_m < 0.0
+    ):
+        raise ValueError("grasp_projection_margin_m must be finite and non-negative")
+
+    grasp = np.asarray(grasp_points_world, dtype=np.float64)
+    support_part = np.asarray(support_points_world, dtype=np.float64)
+    for label, points in (("grasp", grasp), ("support", support_part)):
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) < 3:
+            raise ValueError(f"{label} points must have shape (N,3), N>=3")
+        if not np.all(np.isfinite(points)):
+            raise ValueError(f"{label} points contain non-finite values")
+
+    grasp_xy = grasp[:, :2]
+    support_xy = support_part[:, :2]
+    grasp_center = np.median(grasp_xy, axis=0)
+    support_center = np.median(support_xy, axis=0)
+    plans: list[ElevatedHeadSupportPlan] = []
+    heights: list[float] = []
+
+    for index, item in enumerate(supports, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"support {index} must be a JSON object")
+        try:
+            center = np.asarray(item.get("center_xy_world_m"), dtype=np.float64)
+            size = np.asarray(item.get("size_xy_m"), dtype=np.float64)
+            height = float(item.get("height_m"))
+            yaw_deg = float(item.get("yaw_deg", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"support {index} center, size, height, and yaw must be numbers"
+            ) from exc
+        if center.shape != (2,) or not np.all(np.isfinite(center)):
+            raise ValueError(f"support {index} center_xy_world_m must be finite XY")
+        if size.shape != (2,) or not np.all(np.isfinite(size)) or np.any(size <= 0.0):
+            raise ValueError(f"support {index} size_xy_m must be finite and positive")
+        if not np.isfinite(height) or height <= 0.0:
+            raise ValueError(f"support {index} height_m must be positive and finite")
+        if not np.isfinite(yaw_deg):
+            raise ValueError(f"support {index} yaw_deg must be finite")
+
+        yaw_rad = np.deg2rad(yaw_deg)
+        axis = np.array((np.cos(yaw_rad), np.sin(yaw_rad)), dtype=np.float64)
+        lateral = np.array((-axis[1], axis[0]), dtype=np.float64)
+
+        support_relative = support_xy - center[None, :]
+        support_axial = np.abs(support_relative @ axis)
+        support_lateral = np.abs(support_relative @ lateral)
+        covered_support_count = int(
+            np.count_nonzero(
+                (support_axial <= 0.5 * size[0])
+                & (support_lateral <= 0.5 * size[1])
+            )
+        )
+        if covered_support_count < 3:
+            raise ValueError(
+                f"support {index} covers only {covered_support_count} observed "
+                "support-part points; at least three are required"
+            )
+
+        grasp_relative = grasp_xy - center[None, :]
+        grasp_axial = np.abs(grasp_relative @ axis)
+        grasp_lateral = np.abs(grasp_relative @ lateral)
+        outside_axial = np.maximum(grasp_axial - 0.5 * size[0], 0.0)
+        outside_lateral = np.maximum(grasp_lateral - 0.5 * size[1], 0.0)
+        footprint_distances = np.hypot(outside_axial, outside_lateral)
+        minimum_clearance = float(np.min(footprint_distances))
+        if minimum_clearance <= grasp_projection_margin_m:
+            raise ValueError(
+                f"support {index} is only {minimum_clearance:.6g} m from the "
+                "grasp-part projection; it must exceed the common margin "
+                f"{grasp_projection_margin_m:.6g} m"
+            )
+
+        nearest_grasp = float(
+            np.min(np.linalg.norm(grasp_xy - center[None, :], axis=1))
+        )
+        plans.append(
+            ElevatedHeadSupportPlan(
+                support_center_xy_world_m=(float(center[0]), float(center[1])),
+                support_axis_xy_world=(float(axis[0]), float(axis[1])),
+                support_yaw_deg=float(yaw_deg),
+                support_length_m=float(size[0]),
+                head_center_xy_world_m=(
+                    float(grasp_center[0]),
+                    float(grasp_center[1]),
+                ),
+                handle_center_xy_world_m=(
+                    float(support_center[0]),
+                    float(support_center[1]),
+                ),
+                support_width_m=float(size[1]),
+                head_projection_margin_m=float(grasp_projection_margin_m),
+                nearest_head_projection_distance_m=nearest_grasp,
+                minimum_head_to_support_footprint_distance_m=minimum_clearance,
+                target_lift_m=height,
+            )
+        )
+        heights.append(height)
+
+    if not np.allclose(heights, heights[0], atol=1e-6, rtol=0.0):
+        raise ValueError("all supports must have the same height")
+    return tuple(plans)

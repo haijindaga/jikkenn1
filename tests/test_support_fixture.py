@@ -8,6 +8,7 @@ from panda_handover.support_fixture import (
     plan_handle_support,
     plan_part_support_dual_patches,
     plan_part_support_patch,
+    plan_reviewed_support_layout,
 )
 
 
@@ -28,14 +29,15 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertIn('"--grasp-mask-role"', source)
         self.assertIn('"--support-mask-role"', source)
         self.assertIn('"--support-geometry-policy"', source)
+        self.assertIn('"--support-layout-json"', source)
+        self.assertIn("plan_reviewed_support_layout", source)
         self.assertIn('"part-mask-dual-patch"', source)
         self.assertIn('/ args.grasp_mask_role', source)
         self.assertIn('/ args.support_mask_role', source)
         self.assertIn('"grasp_mask_role": args.grasp_mask_role', source)
         self.assertIn('"support_mask_role": args.support_mask_role', source)
-        self.assertIn(
-            '"support_geometry_policy": args.support_geometry_policy', source
-        )
+        self.assertIn('"reviewed-layout-json"', source)
+        self.assertIn('"automatic_support_geometry_policy_argument"', source)
         self.assertIn("traceback.print_exc()", source)
         self.assertIn("UsdPhysics.CollisionAPI.Apply", source)
         self.assertIn('"panda_handover:diagnostic_support_prim"', source)
@@ -254,6 +256,123 @@ class SupportFixtureTests(unittest.TestCase):
         self.assertGreater(
             plan.minimum_head_to_support_footprint_distance_m, 0.005
         )
+    def test_reviewed_layout_accepts_two_support_part_boxes(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.002, 0.03], [0.00, 0.0, 0.03], [0.00, 0.002, 0.03]]
+        )
+        support = np.array(
+            [
+                [0.05, -0.025, 0.02],
+                [0.055, -0.025, 0.02],
+                [0.06, -0.025, 0.02],
+                [0.05, 0.025, 0.02],
+                [0.055, 0.025, 0.02],
+                [0.06, 0.025, 0.02],
+            ]
+        )
+        layout = {
+            "schema": "jikkenn1-support-layout-v1",
+            "frame": "world",
+            "units": "metres",
+            "up_axis": "Z",
+            "supports": [
+                {
+                    "center_xy_world_m": [0.055, -0.025],
+                    "size_xy_m": [0.02, 0.02],
+                    "height_m": 0.06,
+                    "yaw_deg": 0.0,
+                },
+                {
+                    "center_xy_world_m": [0.055, 0.025],
+                    "size_xy_m": [0.02, 0.02],
+                    "height_m": 0.06,
+                    "yaw_deg": 0.0,
+                },
+            ],
+        }
+        plans = plan_reviewed_support_layout(
+            layout,
+            grasp,
+            support,
+            grasp_projection_margin_m=0.005,
+        )
+        self.assertEqual(len(plans), 2)
+        self.assertTrue(all(plan.target_lift_m == 0.06 for plan in plans))
+        self.assertTrue(
+            all(
+                plan.minimum_head_to_support_footprint_distance_m > 0.005
+                for plan in plans
+            )
+        )
+
+    def test_reviewed_layout_rejects_grasp_overlap(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.002, 0.03], [0.00, 0.0, 0.03], [0.00, 0.002, 0.03]]
+        )
+        support = np.array(
+            [[0.00, -0.002, 0.02], [0.00, 0.0, 0.02], [0.00, 0.002, 0.02]]
+        )
+        layout = {
+            "schema": "jikkenn1-support-layout-v1",
+            "frame": "world",
+            "units": "metres",
+            "up_axis": "Z",
+            "supports": [
+                {
+                    "center_xy_world_m": [0.0, 0.0],
+                    "size_xy_m": [0.02, 0.02],
+                    "height_m": 0.06,
+                    "yaw_deg": 0.0,
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "grasp-part projection"):
+            plan_reviewed_support_layout(
+                layout,
+                grasp,
+                support,
+                grasp_projection_margin_m=0.005,
+            )
+
+    def test_reviewed_layout_requires_common_height(self) -> None:
+        grasp = np.array(
+            [[0.00, -0.002, 0.03], [0.00, 0.0, 0.03], [0.00, 0.002, 0.03]]
+        )
+        support = np.array(
+            [
+                [0.05, -0.025, 0.02],
+                [0.055, -0.025, 0.02],
+                [0.06, -0.025, 0.02],
+                [0.05, 0.025, 0.02],
+                [0.055, 0.025, 0.02],
+                [0.06, 0.025, 0.02],
+            ]
+        )
+        layout = {
+            "schema": "jikkenn1-support-layout-v1",
+            "frame": "world",
+            "units": "metres",
+            "up_axis": "Z",
+            "supports": [
+                {
+                    "center_xy_world_m": [0.055, -0.025],
+                    "size_xy_m": [0.02, 0.02],
+                    "height_m": 0.06,
+                },
+                {
+                    "center_xy_world_m": [0.055, 0.025],
+                    "size_xy_m": [0.02, 0.02],
+                    "height_m": 0.05,
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "same height"):
+            plan_reviewed_support_layout(
+                layout,
+                grasp,
+                support,
+                grasp_projection_margin_m=0.005,
+            )
 
 
 if __name__ == "__main__":

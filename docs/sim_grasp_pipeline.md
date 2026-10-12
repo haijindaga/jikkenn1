@@ -174,6 +174,44 @@ blade margin. The requested and authored widths are both saved in the report.
 Hammer artifacts keep the default mapping and rail policy
 (`grasp_part` is clear, `receive_part` locates the support).
 
+### Reviewing support geometry on Windows
+
+`tools/scene_layout_editor_windows.html` can also edit the hammer or scissors
+support cuboids without starting Isaac Sim. Open the HTML file on Windows and
+load the `*.usda.check.json` written by the command above. The editor imports
+the exact authored support centres, sizes, yaw angles, and target bounds. The
+`ハンマー1台` and `ハサミ2台` buttons are only starting layouts for visual
+editing; they are not accepted as experiment geometry by themselves.
+
+Move a support in XY by dragging it, edit its length/width/height and yaw in
+the numeric fields, and use `台JSON保存` to write a
+`jikkenn1-support-layout-v1` file. Supports are always seated on the tabletop;
+their Z position is derived from their common height. Copy the reviewed JSON
+back to Linux, then author a new diagnostic scene with the same capture and
+segmentation evidence:
+
+```bash
+python scripts/isaac_create_elevated_head_scene.py \
+  --base-scene scenes/scissors_01.usda \
+  --reference-capture outputs/scissors_vlm_e2e_v1/capture/camera_0 \
+  --reference-segmentation outputs/scissors_vlm_e2e_v1/capture/sam3 \
+  --output scenes/scissors_handles_supported_reviewed_v1.usda \
+  --object-label scissors \
+  --grasp-part-label "scissors blades" \
+  --support-part-label "scissors handles" \
+  --grasp-mask-role receive_part \
+  --support-mask-role grasp_part \
+  --support-layout-json config/support_layouts/scissors_reviewed.json
+```
+
+The scene authoring command does not trust the browser preview. It rejects a
+box unless its footprint contains at least three saved support-part 3-D points,
+stays outside the saved grasp-part projection by the common margin, uses metre
+world coordinates with Z-up, and has the same height as every other support.
+Thus Windows editing changes only the reviewed fixture geometry; grasp
+candidates, collision thresholds, planner settings, and robot controls remain
+unchanged.
+
 After visually confirming the support placement, run a fresh zero-depth
 baseline so that support geometry is the only experimental change:
 
