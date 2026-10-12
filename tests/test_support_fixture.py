@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from panda_handover.support_fixture import (
+    build_support_review_overlay,
     masked_points_world,
     plan_handle_support,
     plan_part_support_dual_patches,
@@ -13,6 +14,18 @@ from panda_handover.support_fixture import (
 
 
 class SupportFixtureTests(unittest.TestCase):
+    def test_support_review_exporter_reuses_segmented_world_points(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "export_support_review_overlay.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("masked_points_world", source)
+        self.assertIn("build_support_review_overlay", source)
+        self.assertIn('"--grasp-mask-role"', source)
+        self.assertIn('"--support-mask-role"', source)
+        self.assertNotIn("from isaacsim", source)
+
     def test_scene_builder_preserves_source_and_authors_static_support(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
@@ -81,6 +94,42 @@ class SupportFixtureTests(unittest.TestCase):
             result,
             [[1.0, 2.0, 4.0], [1.1, 2.0, 4.0], [1.2, 2.0, 4.0]],
         )
+
+    def test_review_overlay_is_compact_deterministic_and_world_framed(self) -> None:
+        grasp = np.column_stack(
+            (np.linspace(0.0, 0.1, 10), np.zeros(10), np.full(10, 0.03))
+        )
+        support = np.column_stack(
+            (np.linspace(0.2, 0.3, 12), np.full(12, 0.02), np.full(12, 0.02))
+        )
+        first = build_support_review_overlay(
+            grasp,
+            support,
+            grasp_part_label="scissors blades",
+            support_part_label="scissors handles",
+            max_points_per_part=5,
+        )
+        second = build_support_review_overlay(
+            grasp,
+            support,
+            grasp_part_label="scissors blades",
+            support_part_label="scissors handles",
+            max_points_per_part=5,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema"], "jikkenn1-support-review-overlay-v1")
+        self.assertEqual(first["frame"], "world")
+        self.assertTrue(first["acceptance_uses_complete_points"])
+        self.assertEqual(
+            first["parts"]["grasp_part"]["source_point_count"], 10
+        )
+        self.assertEqual(
+            first["parts"]["grasp_part"]["display_point_count"], 5
+        )
+        self.assertEqual(
+            first["parts"]["support_part"]["display_point_count"], 5
+        )
+        self.assertEqual(len(first["parts"]["support_part"]["points_world_m"]), 5)
 
     def test_support_is_on_handle_and_clear_of_head_projection(self) -> None:
         head = np.array(

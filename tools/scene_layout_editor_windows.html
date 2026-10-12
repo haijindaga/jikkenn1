@@ -64,7 +64,9 @@
     </section>
     <section>
       <h2>把持用の台</h2>
-      <div class="muted">既存の <code>*.usda.check.json</code> を読み込むと、実測マスクから作った台を初期値にできます。ここでは位置・長さ・幅・高さ・Yawだけを調整し、Linux側で部位点群との重なりを再検証します。</div>
+      <div class="muted">Linuxで出力した <code>jikkenn1-support-review-overlay-v1</code> JSONを読み込むと、SAM3部位マスクに対応する実測3D点を同じワールド座標で表示します。ここでは位置・長さ・幅・高さ・Yawだけを調整し、Linux側の全点で再検証します。</div>
+      <div class="row"><label>実測点群</label><input id="overlayVisible" type="checkbox" checked></div>
+      <div id="overlaySummary" class="muted">実測部位点群は未読込です。</div>
       <div class="buttons" style="margin-top:8px"><button id="hammerPreset">ハンマー1台</button><button id="scissorsPreset">ハサミ2台</button><button id="addSupport">台を追加</button><button id="duplicateSupport">台を複製</button><button id="removeSupport">選択台を削除</button></div>
       <div class="buttons" style="margin-top:8px"><button id="downloadSupportJson">台JSON保存</button></div>
       <textarea id="supportCommand" readonly></textarea>
@@ -77,7 +79,7 @@
     </section>
     <section>
       <h2>保存・読み込み</h2>
-      <div class="buttons"><button id="downloadJson">JSON保存</button><button id="downloadPng">画像保存</button><button id="resetScene">初期配置</button></div>
+      <div class="buttons"><button id="downloadJson">シーン全体JSON保存</button><button id="downloadPng">画像保存</button><button id="resetScene">初期配置</button></div>
       <div class="row"><label>JSON読込</label><input id="fileInput" type="file" accept=".json,application/json"></div>
       <textarea id="paste" placeholder="pipeline_status.json / scene_layout.json / 保存JSONを貼り付け"></textarea>
       <div class="buttons"><button id="applyPaste">貼付JSONを反映</button></div>
@@ -91,6 +93,8 @@
         <span class="swatch" style="background:#f3b84a"></span><span>対象物</span>
         <span class="swatch" style="background:#d96064"></span><span>障害物</span>
         <span class="swatch" style="background:#35b8d4"></span><span>把持用の台（静的衝突形状）</span>
+        <span class="swatch" style="background:#ff6b6b"></span><span>実測 grasp-part 点群（台から除外）</span>
+        <span class="swatch" style="background:#7be495"></span><span>実測 support-part 点群（台を置く側）</span>
         <span class="swatch" style="background:#df57dc"></span><span>受け渡し点・方向</span>
       </div>
     </section>
@@ -105,6 +109,7 @@
     version: 1,
     frame: 'robot_base', units: 'metres', up_axis: 'Z',
     humanDirection: [-1, 0, 0],
+    reviewOverlay: null,
     entities: {
       robot:    {label:'Panda（模式図）', shape:'robot', pos:[0,0,0], size:[0.16,0.16,0.32], yaw:0, color:'#4e8bc8', visible:true},
       table:    {label:'机', shape:'box', pos:[0.50,0,-0.025], size:[0.80,1.00,0.05], yaw:0, color:'#9a6b3e', visible:true},
@@ -156,6 +161,16 @@
   function line3(a,b,color,width=1,dash=[]) {const A=project(a),B=project(b); ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.beginPath();ctx.moveTo(A[0],A[1]);ctx.lineTo(B[0],B[1]);ctx.stroke();ctx.restore();}
   function text3(p,text,color='#dbe6f1') {const s=project(p);ctx.save();ctx.font='12px system-ui';ctx.fillStyle='#071019cc';ctx.fillRect(s[0]+6,s[1]-15,ctx.measureText(text).width+8,18);ctx.fillStyle=color;ctx.fillText(text,s[0]+10,s[1]-2);ctx.restore();}
   function sphere3(p,r,color,outline=false){const s=project(p),m=metrics();ctx.beginPath();ctx.arc(s[0],s[1],Math.max(4,r*m.scale),0,Math.PI*2);ctx.fillStyle=rgba(color,.88);ctx.fill();if(outline){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();}}
+  function drawReviewOverlay(){
+    const overlay=scene.reviewOverlay;if(!overlay?.visible||!overlay.parts)return;
+    const styles={grasp_part:['#ff6b6b',2.2],support_part:['#7be495',2.2]};
+    for(const role of ['grasp_part','support_part']){
+      const part=overlay.parts[role],style=styles[role];if(!part||!Array.isArray(part.points_world_m))continue;
+      ctx.save();ctx.fillStyle=rgba(style[0],.82);
+      for(const point of part.points_world_m){if(!Array.isArray(point)||point.length!==3)continue;const p=project(point);ctx.beginPath();ctx.arc(p[0],p[1],style[1],0,Math.PI*2);ctx.fill();}
+      ctx.restore();
+    }
+  }
   function boxGeometry(e){
     const h=e.size.map(v=>v/2), y=e.yaw*Math.PI/180;
     const local=[[-h[0],-h[1],-h[2]],[h[0],-h[1],-h[2]],[h[0],h[1],-h[2]],[-h[0],h[1],-h[2]],[-h[0],-h[1],h[2]],[h[0],-h[1],h[2]],[h[0],h[1],h[2]],[-h[0],h[1],h[2]]];
@@ -202,6 +217,7 @@
   }
   function render(){
     const r=canvas.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);drawGrid();
+    drawReviewOverlay();
     const entries=Object.entries(scene.entities).filter(([,e])=>e.visible).sort((a,b)=>project(a[1].pos)[2]-project(b[1].pos)[2]);
     for(const [key,e] of entries){
       if(e.shape==='box')drawBox(e,key); else if(e.shape==='cup')drawCup(e,key); else if(e.shape==='hammer')drawHammer(e,key); else if(e.shape==='scissors')drawScissors(e,key); else if(e.shape==='robot')drawRobot(e,key); else if(e.shape==='human')drawHuman(e,key); else sphere3(e.pos,e.size[0]/2,e.color,key===selected);
@@ -217,6 +233,11 @@
     ['dx','dy','dz'].forEach((id,i)=>$(id).value=scene.humanDirection[i]);
     $('command').value=`--handover-receiver-position-robot-base-m ${scene.entities.handover.pos.map(v=>Number(v).toFixed(3)).join(' ')} \\\n--handover-human-direction-robot-base ${scene.humanDirection.map(v=>Number(v).toFixed(3)).join(' ')}`;
     $('supportCommand').value='--support-layout-json config/support_layouts/<saved-name>.json';
+    const overlay=scene.reviewOverlay;$('overlayVisible').checked=Boolean(overlay?.visible);
+    if(overlay?.parts){
+      const g=overlay.parts.grasp_part,s=overlay.parts.support_part;
+      $('overlaySummary').textContent=`${g.label}: ${g.display_point_count}/${g.source_point_count}点表示　${s.label}: ${s.display_point_count}/${s.source_point_count}点表示\n表示は間引き点、Linux検証は全点を使用します。`;
+    }else $('overlaySummary').textContent='実測部位点群は未読込です。';
     saveLocal();render();
   }
   function applyControls(){
@@ -231,6 +252,7 @@
   $('addSupport').onclick=()=>addSupport();
   $('duplicateSupport').onclick=()=>duplicateSupport();
   $('removeSupport').onclick=()=>removeSupport();
+  $('overlayVisible').onchange=()=>{if(scene.reviewOverlay){scene.reviewOverlay.visible=$('overlayVisible').checked;syncControls();}else $('overlayVisible').checked=false;};
 
   function supportEntries(){return Object.entries(scene.entities).filter(([,e])=>e.role==='support');}
   function tableTopZ(){const table=scene.entities.table;return Number(table.pos[2])+Number(table.size[2])/2;}
@@ -279,6 +301,7 @@
   $('fileInput').onchange=async ev=>{const f=ev.target.files[0];if(f)try{importJson(JSON.parse(await f.text()));setStatus(`${f.name} を反映しました`)}catch(err){setStatus(`読込失敗: ${err.message}`,true)}};
   $('applyPaste').onclick=()=>{try{importJson(JSON.parse($('paste').value));setStatus('貼付JSONを反映しました')}catch(err){setStatus(`読込失敗: ${err.message}`,true)}};
   function importJson(data){
+    if(data.schema==='jikkenn1-support-review-overlay-v1'){applySupportReviewOverlay(data);setStatus('実測部位点群を反映しました');return;}
     if(data.schema==='jikkenn1-support-layout-v1'){applySupportLayout(data);setStatus('台レイアウトを反映しました');return;}
     if(data.entities){scene=normaliseScene(data);selected=scene.entities[selected]?selected:Object.keys(scene.entities)[0];refreshEntitySelect();syncControls();return;}
     const authored=findKey(data,'authored');
@@ -291,12 +314,24 @@
     const target=findBox(data,['target','object']);if(target){if(target.center)scene.entities.target.pos=target.center;if(target.size)scene.entities.target.size=target.size;}
     syncControls();
   }
-  function normaliseScene(data){const out=clone(defaults);out.humanDirection=Array.isArray(data.humanDirection)?data.humanDirection.map(Number):out.humanDirection;for(const [k,v] of Object.entries(data.entities||{})){if(v&&typeof v==='object'){out.entities[k]=Object.assign(out.entities[k]||{},v);}}return out;}
+  function normaliseScene(data){const out=clone(defaults);out.humanDirection=Array.isArray(data.humanDirection)?data.humanDirection.map(Number):out.humanDirection;out.reviewOverlay=data.reviewOverlay&&typeof data.reviewOverlay==='object'?clone(data.reviewOverlay):null;for(const [k,v] of Object.entries(data.entities||{})){if(v&&typeof v==='object'){out.entities[k]=Object.assign(out.entities[k]||{},v);}}return out;}
   function buildSupportLayout(){
     const supports=supportEntries().filter(([,e])=>e.visible);if(!supports.length)throw new Error('表示中の台がありません');
     const heights=supports.map(([,e])=>Number(e.size[2]));if(heights.some(v=>!Number.isFinite(v)||v<=0))throw new Error('台の高さは正の数にしてください');
     if(Math.max(...heights)-Math.min(...heights)>1e-6)throw new Error('複数の台は同じ高さにしてください');
-    return {schema:'jikkenn1-support-layout-v1',frame:'world',units:'metres',up_axis:'Z',object_label:scene.entities.target.label,supports:supports.map(([key,e])=>({name:key,center_xy_world_m:[Number(e.pos[0]),Number(e.pos[1])],size_xy_m:[Number(e.size[0]),Number(e.size[1])],height_m:Number(e.size[2]),yaw_deg:Number(e.yaw)||0}))};
+    const layout={schema:'jikkenn1-support-layout-v1',frame:'world',units:'metres',up_axis:'Z',object_label:scene.entities.target.label,supports:supports.map(([key,e])=>({name:key,center_xy_world_m:[Number(e.pos[0]),Number(e.pos[1])],size_xy_m:[Number(e.size[0]),Number(e.size[1])],height_m:Number(e.size[2]),yaw_deg:Number(e.yaw)||0}))};
+    if(scene.reviewOverlay?.inputs)layout.review_evidence=clone(scene.reviewOverlay.inputs);
+    return layout;
+  }
+  function applySupportReviewOverlay(data){
+    if(data.frame!=='world'||data.units!=='metres'||data.up_axis!=='Z'||!data.parts)throw new Error('対応していない実測点群JSONです');
+    for(const role of ['grasp_part','support_part']){
+      const part=data.parts[role];if(!part||!Array.isArray(part.points_world_m)||part.points_world_m.length<3)throw new Error(`${role} の表示点が不足しています`);
+      if(part.points_world_m.some(p=>!Array.isArray(p)||p.length!==3||p.some(v=>!Number.isFinite(Number(v)))))throw new Error(`${role} に不正な座標があります`);
+    }
+    scene.reviewOverlay=clone(data);scene.reviewOverlay.visible=true;
+    if(Array.isArray(data.bounds_world_m)&&data.bounds_world_m.length===6){const b=data.bounds_world_m.map(Number);camera.target=[(b[0]+b[3])/2,(b[1]+b[4])/2,(b[2]+b[5])/2];}
+    syncControls();
   }
   function applySupportLayout(data){
     if(data.frame!=='world'||data.units!=='metres'||data.up_axis!=='Z'||!Array.isArray(data.supports)||!data.supports.length)throw new Error('対応していない台JSONです');

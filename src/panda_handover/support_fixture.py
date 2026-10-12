@@ -53,6 +53,83 @@ def masked_points_world(
     return world
 
 
+def build_support_review_overlay(
+    grasp_points_world: np.ndarray,
+    support_points_world: np.ndarray,
+    *,
+    grasp_part_label: str,
+    support_part_label: str,
+    max_points_per_part: int = 2000,
+) -> dict[str, object]:
+    """Build a compact, deterministic browser overlay from segmented 3-D parts.
+
+    The complete point sets remain the authority for Linux-side acceptance.
+    This payload only downsamples them for an inspectable Windows preview in
+    the same metre, Z-up world frame used by support-layout validation.
+    """
+
+    if not isinstance(max_points_per_part, int) or max_points_per_part < 3:
+        raise ValueError("max_points_per_part must be an integer of at least three")
+
+    def encode(label: str, raw_points: np.ndarray) -> dict[str, object]:
+        points = np.asarray(raw_points, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) < 3:
+            raise ValueError(f"{label} points must have shape (N,3), N>=3")
+        if not np.all(np.isfinite(points)):
+            raise ValueError(f"{label} points contain non-finite values")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("part labels must be non-empty strings")
+
+        if len(points) <= max_points_per_part:
+            sampled = points
+        else:
+            # masked_points_world preserves image order. Evenly spaced samples
+            # therefore retain coverage across the observed mask without a
+            # random seed or an object-specific spatial heuristic.
+            indices = np.linspace(
+                0,
+                len(points) - 1,
+                num=max_points_per_part,
+                dtype=np.int64,
+            )
+            sampled = points[indices]
+
+        minimum = np.min(points, axis=0)
+        maximum = np.max(points, axis=0)
+        return {
+            "label": label,
+            "source_point_count": int(len(points)),
+            "display_point_count": int(len(sampled)),
+            "points_world_m": sampled.tolist(),
+            "bounds_world_m": [*minimum.tolist(), *maximum.tolist()],
+            "median_world_m": np.median(points, axis=0).tolist(),
+        }
+
+    grasp = encode(grasp_part_label, grasp_points_world)
+    support = encode(support_part_label, support_points_world)
+    all_minimum = np.minimum(
+        np.asarray(grasp["bounds_world_m"][:3]),
+        np.asarray(support["bounds_world_m"][:3]),
+    )
+    all_maximum = np.maximum(
+        np.asarray(grasp["bounds_world_m"][3:]),
+        np.asarray(support["bounds_world_m"][3:]),
+    )
+    return {
+        "schema": "jikkenn1-support-review-overlay-v1",
+        "frame": "world",
+        "units": "metres",
+        "up_axis": "Z",
+        "display_only": True,
+        "acceptance_uses_complete_points": True,
+        "parts": {
+            "grasp_part": grasp,
+            "support_part": support,
+        },
+        "bounds_world_m": [*all_minimum.tolist(), *all_maximum.tolist()],
+    }
+
+
 def plan_handle_support(
     head_points_world: np.ndarray,
     handle_points_world: np.ndarray,

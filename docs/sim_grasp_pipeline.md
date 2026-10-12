@@ -177,9 +177,29 @@ Hammer artifacts keep the default mapping and rail policy
 ### Reviewing support geometry on Windows
 
 `tools/scene_layout_editor_windows.html` can also edit the hammer or scissors
-support cuboids without starting Isaac Sim. Open the HTML file on Windows and
-load the `*.usda.check.json` written by the command above. The editor imports
-the exact authored support centres, sizes, yaw angles, and target bounds. The
+support cuboids without starting Isaac Sim. First export the saved SAM3 part
+masks as a compact browser overlay. This reuses the same calibrated RGB-D
+points and world transform used by the Linux acceptance gate; it does not run
+segmentation or reconstruction again:
+
+```bash
+python scripts/export_support_review_overlay.py \
+  --capture outputs/scissors_vlm_e2e_v1/capture/camera_0 \
+  --segmentation outputs/scissors_vlm_e2e_v1/capture/sam3 \
+  --grasp-mask-role receive_part \
+  --support-mask-role grasp_part \
+  --grasp-part-label "scissors blades" \
+  --support-part-label "scissors handles" \
+  --output config/support_layouts/scissors_parts_review_overlay.json
+```
+
+Open the HTML file on Windows and load the resulting
+`jikkenn1-support-review-overlay-v1` JSON. The editor shows the grasp-clear
+part in red and the support part in green in the same metre, Z-up world frame.
+Only a deterministic display sample is embedded in the JSON; scene acceptance
+continues to use every valid segmented point on Linux. A `*.usda.check.json`
+can still be loaded to import exact authored support centres, sizes, yaw
+angles, and target bounds. The
 `ハンマー1台` and `ハサミ2台` buttons are only starting layouts for visual
 editing; they are not accepted as experiment geometry by themselves.
 
