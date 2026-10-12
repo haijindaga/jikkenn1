@@ -4,10 +4,14 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "create_receiver_overlay.py"
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from panda_handover.receiver_overlay import validate_visual_receiver_overlay
 
 
 def load_module():
@@ -70,6 +74,11 @@ class ReceiverOverlayTests(unittest.TestCase):
             self.assertFalse(report["composition"]["base_scene_modified"])
             self.assertFalse(report["composition"]["asset_rescaled"])
             self.assertFalse(report["composition"]["physics_apis_modified"])
+            self.assertTrue(
+                report["safety"][
+                    "runtime_replay_requires_receiver_physics_and_collision_disabled"
+                ]
+            )
 
             text = output.read_text(encoding="utf-8")
             self.assertIn("subLayers", text)
@@ -83,6 +92,38 @@ class ReceiverOverlayTests(unittest.TestCase):
                 output.with_suffix(".usda.check.json").read_text(encoding="utf-8")
             )
             self.assertEqual(saved_report["status"], "success")
+            validation = validate_visual_receiver_overlay(
+                replay_scene=output,
+                recorded_scene=base,
+                receiver_prim="/World/Receiver",
+            )
+            self.assertEqual(
+                validation["mode"], "validated-visual-only-receiver-overlay"
+            )
+
+            other_base = root / "other.usda"
+            other_base.write_text("#usda 1.0\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "base scene does not match"):
+                validate_visual_receiver_overlay(
+                    replay_scene=output,
+                    recorded_scene=other_base,
+                    receiver_prim="/World/Receiver",
+                )
+
+            with self.assertRaisesRegex(ValueError, "require"):
+                validate_visual_receiver_overlay(
+                    replay_scene=output,
+                    recorded_scene=base,
+                    receiver_prim="/World/SomeoneElse",
+                )
+
+            base.write_text("#usda 1.0\n# changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed after"):
+                validate_visual_receiver_overlay(
+                    replay_scene=output,
+                    recorded_scene=base,
+                    receiver_prim="/World/Receiver",
+                )
 
     def test_existing_output_is_not_overwritten_implicitly(self):
         module = load_module()

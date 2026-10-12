@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -16,19 +15,12 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.receiver_overlay import sha256_file
 
 
 DEFAULT_EVIDENCE = (
     repo_root / "config" / "receiver_assets" / "isaac_sim_5_1_1x_neo.json"
 )
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def usd_number(value: float) -> str:
@@ -159,6 +151,7 @@ def create_overlay(
             "method": "OpenUSD subLayer plus reference",
             "base_scene": str(base_scene),
             "base_scene_sha256": sha256_file(base_scene),
+            "overlay_scene_sha256": sha256_file(output),
             "base_reference": base_reference,
             "receiver_evidence": str(evidence_path),
             "receiver_evidence_sha256": sha256_file(evidence_path),
@@ -181,7 +174,8 @@ def create_overlay(
         },
         "safety": {
             "presentation_only": True,
-            "timeline_must_remain_stopped": True,
+            "timeline_must_remain_stopped_without_runtime_visual_only_guard": True,
+            "runtime_replay_requires_receiver_physics_and_collision_disabled": True,
             "human_collision_model_present": False,
             "safe_for_physical_replay": False,
         },

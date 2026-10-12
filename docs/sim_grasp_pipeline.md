@@ -288,7 +288,13 @@ facing direction. The receiver Z is not chosen by eye: the checked-in evidence
 records the measured official NEO lower bound as `-0.8406724618970056 m`, and
 the generator applies `root_z = floor_z - measured_lower_bound_z`. The source
 asset is not rescaled, its physics is not edited, and the resulting overlay is
-not authorized for physical replay or human-safety evaluation.
+not a human collision model and does not support human-safety evaluation. It
+may be shown during a simulation replay only with
+`--visual-only-receiver-prim /World/Receiver`. In that case the replay first
+requires the adjacent generator report, verifies the recorded base-scene and
+overlay SHA-256 values, and then disables and verifies every physics and
+collision API below the receiver prim at runtime. A different USD without this
+exact provenance still fails the normal scene-identity gate.
 
 For the reviewed scissors scene with Ollama part discovery, choose an installed
 vision model explicitly:

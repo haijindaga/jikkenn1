@@ -392,6 +392,9 @@ class GraspLiftScriptTests(unittest.TestCase):
         replay_runner = (
             PROJECT / "scripts" / "isaac_replay_grasp_lift_trials.py"
         ).read_text(encoding="utf-8")
+        direct_replay = (
+            PROJECT / "scripts" / "isaac_replay_grasp_lift.py"
+        ).read_text(encoding="utf-8")
         self.assertIn('default=5', planner_runner)
         self.assertIn('"--source-candidate-index"', planner_runner)
         self.assertIn('"candidate_specific_parameter_tuning": False', planner_runner)
@@ -403,6 +406,11 @@ class GraspLiftScriptTests(unittest.TestCase):
         self.assertIn('"--finger-drive-scale"', replay_runner)
         self.assertIn('"--visual-only-receiver-prim"', replay_runner)
         self.assertIn('"visual_only_receiver_prim"', replay_runner)
+        self.assertIn("validate_visual_receiver_overlay", direct_replay)
+        self.assertIn(
+            '"replay_scene_matches_capture_or_is_validated_visual_overlay"',
+            direct_replay,
+        )
         self.assertIn('"--fingertip-friction-coefficient"', replay_runner)
         self.assertIn(
             '"finger_drive_diagnostic_scale_for_every_candidate"', replay_runner

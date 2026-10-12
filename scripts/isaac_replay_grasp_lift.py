@@ -25,6 +25,7 @@ from panda_handover.physics_baselines import (
     drive_value_matches_float_storage,
     resolve_finger_drive_values,
 )
+from panda_handover.receiver_overlay import validate_visual_receiver_overlay
 from panda_handover.trajectory_replay import (
     load_grasp_lift_replay,
     sample_positions_at_physics_rate,
@@ -276,6 +277,7 @@ if (
         "transport phase in the cuRobo plan"
     )
 scene_usd = None
+replay_scene_validation = None
 if args.scene_usd is not None:
     scene_usd = args.scene_usd.expanduser().resolve()
     if not scene_usd.is_file():
@@ -300,10 +302,22 @@ if args.scene_usd is not None:
     if not recorded_scene_value:
         raise ValueError("capture scene report has no authored scene_usd path")
     recorded_scene = Path(recorded_scene_value).expanduser().resolve()
-    if recorded_scene != scene_usd:
-        raise ValueError(
-            "replay scene does not match the scene recorded by capture: "
-            f"{scene_usd} != {recorded_scene}"
+    if recorded_scene == scene_usd:
+        replay_scene_validation = {
+            "mode": "exact-capture-scene",
+            "recorded_scene": str(recorded_scene),
+            "replay_scene": str(scene_usd),
+        }
+    else:
+        if args.visual_only_receiver_prim is None:
+            raise ValueError(
+                "replay scene does not match the scene recorded by capture: "
+                f"{scene_usd} != {recorded_scene}"
+            )
+        replay_scene_validation = validate_visual_receiver_overlay(
+            replay_scene=scene_usd,
+            recorded_scene=recorded_scene,
+            receiver_prim=args.visual_only_receiver_prim,
         )
 
 from isaacsim import SimulationApp
@@ -2535,6 +2549,7 @@ try:
                 args.camera_prim if scene_usd is not None else "/World/replay_camera"
             ),
             "visual_only_receiver": visual_only_receiver_report,
+            "replay_scene_validation": replay_scene_validation,
         },
         "replay": {
             "physics_backend": replay_physics_report,
@@ -2692,7 +2707,18 @@ try:
             "lift_lost_from_peak_to_final_m": lift_lost_from_peak_to_final_m,
         },
         "automatic_checks": {
-            "replay_scene_matches_capture": True,
+            "replay_scene_matches_capture": bool(
+                replay_scene_validation is None
+                or replay_scene_validation["mode"] == "exact-capture-scene"
+            ),
+            "replay_scene_matches_capture_or_is_validated_visual_overlay": bool(
+                replay_scene_validation is None
+                or replay_scene_validation["mode"]
+                in {
+                    "exact-capture-scene",
+                    "validated-visual-only-receiver-overlay",
+                }
+            ),
             "target_is_physics_ready": bool(
                 scene_usd is None or all(target_physics_apis.values())
             ),
