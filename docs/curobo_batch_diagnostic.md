@@ -53,6 +53,11 @@ python scripts/compare_curobo_batch_sequential.py \
 ```
 
 Even `feasibility_equivalent` does not authorize replacing the normal path.
+The comparison uses the sequential candidate's recorded stage status, so a
+candidate that completed grasp/lift but later failed handover still counts as
+a grasp/lift success. It does not incorrectly compare batch grasp/lift against
+the sequential end-to-end `planner_feasible` field.
+
 Trajectory equality, full collision post-validation, attached-object transport,
 receive direction, tilt, handover region, and final lexicographic selection
 remain separate gates.

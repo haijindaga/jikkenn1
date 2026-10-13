@@ -32,8 +32,16 @@ class BatchPlanningTests(unittest.TestCase):
                 {"source_candidate_index": 9, "batch_grasp_lift_success": False},
             ],
             [
-                {"source_candidate_index": 7, "planner_feasible": True},
-                {"source_candidate_index": 9, "planner_feasible": False},
+                {
+                    "source_candidate_index": 7,
+                    "plan_status": "success",
+                    "planner_feasible": True,
+                },
+                {
+                    "source_candidate_index": 9,
+                    "plan_status": "planning_failed",
+                    "planner_feasible": False,
+                },
             ],
         )
         self.assertEqual(report["status"], "feasibility_equivalent")
@@ -43,10 +51,45 @@ class BatchPlanningTests(unittest.TestCase):
     def test_comparison_fails_visible_on_mismatch(self):
         report = compare_batch_to_sequential(
             [{"source_candidate_index": 7, "batch_grasp_lift_success": False}],
-            [{"source_candidate_index": 7, "planner_feasible": True}],
+            [
+                {
+                    "source_candidate_index": 7,
+                    "plan_status": "success",
+                    "planner_feasible": True,
+                }
+            ],
         )
         self.assertEqual(report["status"], "feasibility_mismatch")
         self.assertEqual(len(report["mismatches"]), 1)
+
+    def test_handover_failure_still_counts_as_sequential_grasp_lift_success(self):
+        report = compare_batch_to_sequential(
+            [{"source_candidate_index": 21, "batch_grasp_lift_success": True}],
+            [
+                {
+                    "source_candidate_index": 21,
+                    "plan_status": "handover_transport_planning_failed",
+                    "planner_feasible": False,
+                }
+            ],
+        )
+        self.assertEqual(report["status"], "feasibility_equivalent")
+        candidate = report["candidates"][0]
+        self.assertTrue(candidate["sequential_grasp_lift_success"])
+        self.assertFalse(candidate["sequential_full_plan_feasible"])
+
+    def test_unknown_sequential_status_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "unclassified"):
+            compare_batch_to_sequential(
+                [{"source_candidate_index": 1, "batch_grasp_lift_success": True}],
+                [
+                    {
+                        "source_candidate_index": 1,
+                        "plan_status": "missing_report",
+                        "planner_feasible": False,
+                    }
+                ],
+            )
 
     def test_batch_route_is_diagnostic_and_does_not_replace_baseline(self):
         batch_source = (

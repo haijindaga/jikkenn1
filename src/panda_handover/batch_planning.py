@@ -10,6 +10,19 @@ from collections.abc import Iterator, Sequence
 from typing import Any
 
 
+SEQUENTIAL_GRASP_LIFT_SUCCESS_STATUSES = frozenset(
+    {
+        "success",
+        "handover_receive_direction_incompatible",
+        "handover_transport_planning_failed",
+        "handover_orientation_constraint_failed",
+    }
+)
+SEQUENTIAL_GRASP_LIFT_FAILURE_STATUSES = frozenset(
+    {"preflight_failed", "planning_failed"}
+)
+
+
 def candidate_chunks(candidate_count: int, batch_size: int) -> Iterator[range]:
     """Yield deterministic score-ordered slices without dropping candidates."""
 
@@ -65,11 +78,24 @@ def compare_batch_to_sequential(
     mismatches = []
     for source in common:
         batch_ok = bool(batch[source]["batch_grasp_lift_success"])
-        sequential_ok = bool(sequential[source]["planner_feasible"])
+        plan_status = str(sequential[source].get("plan_status", ""))
+        if plan_status in SEQUENTIAL_GRASP_LIFT_SUCCESS_STATUSES:
+            sequential_ok = True
+        elif plan_status in SEQUENTIAL_GRASP_LIFT_FAILURE_STATUSES:
+            sequential_ok = False
+        else:
+            raise ValueError(
+                f"candidate {source} has unclassified sequential plan status "
+                f"{plan_status!r}"
+            )
         row = {
             "source_candidate_index": source,
             "batch_grasp_lift_success": batch_ok,
-            "sequential_full_plan_feasible": sequential_ok,
+            "sequential_plan_status": plan_status,
+            "sequential_grasp_lift_success": sequential_ok,
+            "sequential_full_plan_feasible": bool(
+                sequential[source]["planner_feasible"]
+            ),
             "feasibility_matches": batch_ok == sequential_ok,
         }
         rows.append(row)
