@@ -8,6 +8,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
 from panda_handover.batch_planning import (
+    batch_prefilter_eligible_sources,
     candidate_chunks,
     compare_batch_to_sequential,
     pad_candidate_indices,
@@ -36,6 +37,65 @@ class BatchPlanningTests(unittest.TestCase):
             pad_candidate_indices([], 16)
         with self.assertRaises(ValueError):
             pad_candidate_indices([0, 1, 2], 2)
+
+    def test_batch_prefilter_requires_both_pose_and_grasp_lift_gates(self):
+        report = {
+            "status": "success",
+            "safety": {
+                "diagnosis_only": True,
+                "replayable_trajectory_saved": False,
+            },
+            "candidates": [
+                {
+                    "original_goalset_rank": 0,
+                    "source_candidate_index": 21,
+                    "strict_issue_663_preflight_success": True,
+                    "batch_grasp_lift_success": True,
+                },
+                {
+                    "original_goalset_rank": 1,
+                    "source_candidate_index": 44,
+                    "strict_issue_663_preflight_success": False,
+                    "batch_grasp_lift_success": True,
+                },
+                {
+                    "original_goalset_rank": 2,
+                    "source_candidate_index": 57,
+                    "strict_issue_663_preflight_success": True,
+                    "batch_grasp_lift_success": False,
+                },
+            ],
+        }
+        self.assertEqual(batch_prefilter_eligible_sources(report), [21])
+
+    def test_batch_prefilter_rejects_non_diagnostic_or_gapped_report(self):
+        with self.assertRaisesRegex(ValueError, "diagnosis-only"):
+            batch_prefilter_eligible_sources(
+                {
+                    "status": "success",
+                    "safety": {
+                        "diagnosis_only": False,
+                        "replayable_trajectory_saved": False,
+                    },
+                    "candidates": [{}],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            batch_prefilter_eligible_sources(
+                {
+                    "status": "success",
+                    "safety": {
+                        "diagnosis_only": True,
+                        "replayable_trajectory_saved": False,
+                    },
+                    "candidates": [
+                        {
+                            "original_goalset_rank": 2,
+                            "source_candidate_index": 21,
+                        }
+                    ],
+                }
+            )
 
     def test_comparison_never_claims_full_pipeline_equivalence(self):
         report = compare_batch_to_sequential(

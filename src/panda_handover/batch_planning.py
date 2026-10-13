@@ -66,6 +66,41 @@ def reduce_batch_success(value: Any, active_count: int) -> list[bool]:
     return [bool(item) for item in active]
 
 
+def batch_prefilter_eligible_sources(report: dict[str, Any]) -> list[int]:
+    """Return score-ordered candidates that passed both reviewed batch gates.
+
+    The batch route is only a prefilter.  A candidate must pass the Issue #663
+    pose preflight and the official batch grasp/lift planner before the trusted
+    sequential planner is allowed to spend a fresh process on its complete
+    attached-object handover plan.
+    """
+
+    if report.get("status") != "success":
+        raise ValueError("batch prefilter report did not complete successfully")
+    safety = report.get("safety")
+    if not isinstance(safety, dict) or safety.get("diagnosis_only") is not True:
+        raise ValueError("batch prefilter report is not a diagnosis-only result")
+    if safety.get("replayable_trajectory_saved") is not False:
+        raise ValueError("batch prefilter must not claim a replayable trajectory")
+    candidates = report.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("batch prefilter report has no candidates")
+
+    ordered = sorted(candidates, key=lambda item: int(item["original_goalset_rank"]))
+    ranks = [int(item["original_goalset_rank"]) for item in ordered]
+    if ranks != list(range(len(ordered))):
+        raise ValueError("batch prefilter ranks must be contiguous from zero")
+    sources = [int(item["source_candidate_index"]) for item in ordered]
+    if len(set(sources)) != len(sources):
+        raise ValueError("batch prefilter source candidate indices must be unique")
+    return [
+        source
+        for source, item in zip(sources, ordered, strict=True)
+        if bool(item.get("strict_issue_663_preflight_success"))
+        and bool(item.get("batch_grasp_lift_success"))
+    ]
+
+
 def compare_batch_to_sequential(
     batch_candidates: Sequence[dict[str, Any]],
     sequential_attempts: Sequence[dict[str, Any]],

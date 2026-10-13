@@ -24,6 +24,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segmentation", type=Path, required=True)
     parser.add_argument("--pregrasp-plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--batch-prefilter-report",
+        type=Path,
+        help=(
+            "Optional diagnosis-only GPU batch report. Only candidates that "
+            "passed both its strict pose preflight and grasp/lift gate receive "
+            "the unchanged complete sequential handover planner."
+        ),
+    )
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
         "--maximum-candidates",
@@ -210,6 +219,33 @@ def load_transport_orientation_policy(path: Path) -> str:
     return load_handover_parts_report(path).transport_orientation_policy
 
 
+def load_batch_prefilter_sources(
+    path: Path,
+    *,
+    pregrasp_plan: Path,
+    grasp_depth_offset_m: float,
+) -> list[int]:
+    """Validate batch provenance and return its score-ordered eligible sources."""
+
+    from panda_handover.batch_planning import batch_prefilter_eligible_sources
+
+    report = json.loads(path.read_text(encoding="utf-8"))
+    inputs = optional_mapping(report.get("inputs"))
+    reported_pregrasp = inputs.get("pregrasp_plan")
+    if not isinstance(reported_pregrasp, str) or (
+        Path(reported_pregrasp).expanduser().resolve()
+        != pregrasp_plan.expanduser().resolve()
+    ):
+        raise ValueError("batch prefilter pregrasp provenance does not match")
+    parameters = optional_mapping(report.get("parameters"))
+    reported_depth = parameters.get("grasp_depth_offset_m")
+    if reported_depth is None or not np.isclose(
+        float(reported_depth), grasp_depth_offset_m, atol=1e-9, rtol=0.0
+    ):
+        raise ValueError("batch prefilter grasp-depth policy does not match")
+    return batch_prefilter_eligible_sources(report)
+
+
 def select_physical_trial_attempts(
     attempts: list[dict],
     *,
@@ -262,12 +298,47 @@ def main() -> int:
         raise ValueError("pre-grasp source candidate indices must be unique")
     all_source_indices = source_indices
     total_candidate_pool_count = int(len(source_indices))
+    original_goalset_ranks = np.arange(total_candidate_pool_count, dtype=np.int64)
     if args.maximum_candidates is not None:
         search_stop = min(args.maximum_candidates, total_candidate_pool_count)
         source_indices = source_indices[:search_stop]
         scores = scores[:search_stop]
+        original_goalset_ranks = original_goalset_ranks[:search_stop]
     evaluated_prefix_count = int(len(source_indices))
     candidate_pool_truncated = evaluated_prefix_count < total_candidate_pool_count
+    batch_prefilter_eligible_count = None
+    batch_prefilter_rejected_count = None
+    if args.batch_prefilter_report is not None:
+        eligible_sources = load_batch_prefilter_sources(
+            args.batch_prefilter_report,
+            pregrasp_plan=args.pregrasp_plan,
+            grasp_depth_offset_m=args.grasp_depth_offset_m,
+        )
+        report_sources = set(eligible_sources)
+        batch_report = json.loads(
+            args.batch_prefilter_report.read_text(encoding="utf-8")
+        )
+        covered_sources = [
+            int(item["source_candidate_index"])
+            for item in sorted(
+                batch_report["candidates"],
+                key=lambda item: int(item["original_goalset_rank"]),
+            )
+        ]
+        expected_sources = [int(value) for value in source_indices]
+        if covered_sources != expected_sources:
+            raise ValueError(
+                "batch prefilter candidate order/coverage does not match the "
+                "requested score-ordered planning scope"
+            )
+        selected = np.asarray(
+            [int(value) in report_sources for value in source_indices], dtype=bool
+        )
+        batch_prefilter_eligible_count = int(np.count_nonzero(selected))
+        batch_prefilter_rejected_count = int(len(selected) - np.count_nonzero(selected))
+        source_indices = source_indices[selected]
+        scores = scores[selected]
+        original_goalset_ranks = original_goalset_ranks[selected]
 
     transport_orientation_policy = None
     if args.transport_orientation_policy_report is not None:
@@ -297,6 +368,11 @@ def main() -> int:
             "capture": str(args.capture),
             "segmentation": str(args.segmentation),
             "pregrasp_plan": str(args.pregrasp_plan),
+            "batch_prefilter_report": (
+                str(args.batch_prefilter_report)
+                if args.batch_prefilter_report is not None
+                else None
+            ),
         },
         "policy": {
             "candidate_order": "pregrasp score order",
@@ -385,10 +461,19 @@ def main() -> int:
             ),
             "selection_uses_weighted_sum": False,
             "selection_uses_candidate_specific_thresholds": False,
+            "batch_prefilter_enabled": args.batch_prefilter_report is not None,
+            "batch_prefilter_policy": (
+                "strict Issue #663 pose preflight AND official batch grasp/lift "
+                "success; complete handover constraints remain sequential"
+                if args.batch_prefilter_report is not None
+                else None
+            ),
         },
         "candidate_pool_count": total_candidate_pool_count,
         "evaluated_candidate_prefix_count": evaluated_prefix_count,
         "candidate_pool_truncated": candidate_pool_truncated,
+        "batch_prefilter_eligible_count": batch_prefilter_eligible_count,
+        "batch_prefilter_rejected_count": batch_prefilter_rejected_count,
         "attempts": [],
         "successful_plan_directories": [],
     }
@@ -396,11 +481,12 @@ def main() -> int:
 
     planner_script = Path(__file__).with_name("curobo_plan_grasp_lift.py")
     planner_feasible_plans = 0
-    for original_rank, (source_index, score) in enumerate(
-        zip(source_indices, scores, strict=True)
+    for original_rank, source_index, score in zip(
+        original_goalset_ranks, source_indices, scores, strict=True
     ):
         if not automatic_handover and planner_feasible_plans >= args.max_physical_trials:
             break
+        original_rank = int(original_rank)
         source_index = int(source_index)
         if source_index in args.exclude_source_candidate_index:
             continue

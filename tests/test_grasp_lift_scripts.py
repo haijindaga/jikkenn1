@@ -604,6 +604,57 @@ class GraspLiftScriptTests(unittest.TestCase):
             policy = namespace["load_transport_orientation_policy"](report)
         self.assertEqual(policy, "preserve_gravity_tilt")
 
+    def test_trial_runner_accepts_only_matching_batch_prefilter_provenance(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_batch_prefilter_test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pregrasp = root / "pregrasp"
+            pregrasp.mkdir()
+            report = root / "batch.json"
+            report.write_text(
+                json.dumps(
+                    {
+                        "status": "success",
+                        "inputs": {"pregrasp_plan": str(pregrasp)},
+                        "parameters": {"grasp_depth_offset_m": 0.01},
+                        "safety": {
+                            "diagnosis_only": True,
+                            "replayable_trajectory_saved": False,
+                        },
+                        "candidates": [
+                            {
+                                "original_goalset_rank": 0,
+                                "source_candidate_index": 21,
+                                "strict_issue_663_preflight_success": True,
+                                "batch_grasp_lift_success": True,
+                            },
+                            {
+                                "original_goalset_rank": 1,
+                                "source_candidate_index": 44,
+                                "strict_issue_663_preflight_success": False,
+                                "batch_grasp_lift_success": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selected = namespace["load_batch_prefilter_sources"](
+                report,
+                pregrasp_plan=pregrasp,
+                grasp_depth_offset_m=0.01,
+            )
+            self.assertEqual(selected, [21])
+            with self.assertRaisesRegex(ValueError, "grasp-depth"):
+                namespace["load_batch_prefilter_sources"](
+                    report,
+                    pregrasp_plan=pregrasp,
+                    grasp_depth_offset_m=0.02,
+                )
+
     def test_negative_radius_curobo_padding_is_not_a_failed_sphere(self):
         namespace = runpy.run_path(
             str(PROJECT / "scripts" / "curobo_plan_grasp_lift.py"),

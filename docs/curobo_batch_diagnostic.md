@@ -85,3 +85,27 @@ pool size and the evaluated prefix size.  A selected plan is therefore the
 best feasible plan within that prefix, not a claim of global optimality over
 the unsearched candidates.  Omitting the option preserves the previous search
 scope.
+
+## Opt-in batch-prefiltered handover pipeline
+
+For the mug only, the batch grasp/lift result can now be used as a conservative
+prefilter before the unchanged complete handover planner. A candidate proceeds
+only when both its strict Issue #663 pose preflight and official batch
+grasp/lift result succeed. Survivors still run the normal per-candidate
+attached-object transport, receive-direction, tilt, handover-region, trajectory
+save, and physics-replay gates. The batch result itself is never replayed.
+
+The opt-in route writes separate directories:
+
+- `curobo_batch_grasp_lift_prefilter`
+- `curobo_grasp_lift_trials_batch_prefiltered`
+- `isaac_grasp_lift_trials_batch_prefiltered`
+
+Use `--batch-grasp-lift-prefilter-size 8`. For the first controlled test, also
+use `--maximum-grasp-lift-candidates 8`. The normal pipeline is unchanged when
+the batch option is omitted.
+
+This route intentionally refuses `--allow-reviewed-support-contact-preflight`.
+The current batch planner does not reproduce that narrow simulation-only
+exception, so supported hammer and scissors experiments remain on the reviewed
+sequential route.

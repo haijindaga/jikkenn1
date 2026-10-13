@@ -312,6 +312,10 @@ def main() -> int:
                         "grasp_success": grasp_success[local_rank],
                         "lift_success": lift_success[local_rank],
                         "batch_grasp_lift_success": overall_success[local_rank],
+                        "batch_prefilter_eligible": bool(
+                            preflight_success[local_rank]
+                            and overall_success[local_rank]
+                        ),
                     }
                 )
     finally:
@@ -366,6 +370,9 @@ def main() -> int:
             ),
             "batch_grasp_lift_success_count": sum(
                 item["batch_grasp_lift_success"] for item in candidates
+            ),
+            "batch_prefilter_eligible_count": sum(
+                item["batch_prefilter_eligible"] for item in candidates
             ),
         },
         "safety": {

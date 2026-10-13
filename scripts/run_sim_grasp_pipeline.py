@@ -38,8 +38,11 @@ class PipelinePaths:
     filtered_candidates: Path
     handover_candidates: Path
     pregrasp: Path
+    batch_prefilter: Path
     plan_trials: Path
     replay_trials: Path
+    batch_plan_trials: Path
+    batch_replay_trials: Path
     manifest: Path
     server_log: Path
     result_report: Path
@@ -119,6 +122,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help=(
             "Optional fixed pregrasp-score prefix for full grasp/lift/handover "
             "planning; omitted preserves the reviewed search scope"
+        ),
+    )
+    parser.add_argument(
+        "--batch-grasp-lift-prefilter-size",
+        type=int,
+        help=(
+            "Opt-in simulation-only GPU batch prefilter size. The batch route "
+            "screens strict grasp/lift feasibility only; every survivor still "
+            "runs the unchanged complete handover planner and physics replay."
         ),
     )
     parser.add_argument("--max-physical-trials", type=int, default=5)
@@ -291,6 +303,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         and args.maximum_grasp_lift_candidates <= 0
     ):
         parser.error("--maximum-grasp-lift-candidates must be positive")
+    if (
+        args.batch_grasp_lift_prefilter_size is not None
+        and args.batch_grasp_lift_prefilter_size <= 0
+    ):
+        parser.error("--batch-grasp-lift-prefilter-size must be positive")
     if not math.isfinite(args.grasp_depth_offset_m) or args.grasp_depth_offset_m < 0.0:
         parser.error("--grasp-depth-offset-m must be finite and non-negative")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
@@ -405,6 +422,15 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
             "do not combine fingertip friction and finger-drive diagnostics in "
             "one controlled run"
         )
+    if (
+        args.batch_grasp_lift_prefilter_size is not None
+        and args.allow_reviewed_support_contact_preflight
+    ):
+        parser.error(
+            "the GPU batch prefilter does not implement the reviewed support-"
+            "contact exception; use the unchanged sequential route for supported "
+            "hammer/scissors trials"
+        )
     return args
 
 
@@ -422,8 +448,11 @@ def pipeline_paths(root: Path) -> PipelinePaths:
         filtered_candidates=root / "graspgenx_candidates_filtered",
         handover_candidates=root / "graspgenx_candidates_handover_ranked",
         pregrasp=root / "curobo_pregrasp",
+        batch_prefilter=root / "curobo_batch_grasp_lift_prefilter",
         plan_trials=root / "curobo_grasp_lift_trials",
         replay_trials=root / "isaac_grasp_lift_trials",
+        batch_plan_trials=root / "curobo_grasp_lift_trials_batch_prefiltered",
+        batch_replay_trials=root / "isaac_grasp_lift_trials_batch_prefiltered",
         manifest=root / "pipeline_status.json",
         server_log=root / "graspgenx_server.log",
         result_report=root / "results.html",
@@ -601,6 +630,13 @@ def build_stages(
         "grasp_part" if use_grasp_part else "whole_object"
     )
     automatic_handover = automatic_handover_requested(args)
+    batch_prefilter_enabled = args.batch_grasp_lift_prefilter_size is not None
+    effective_plan_trials = (
+        paths.batch_plan_trials if batch_prefilter_enabled else paths.plan_trials
+    )
+    effective_replay_trials = (
+        paths.batch_replay_trials if batch_prefilter_enabled else paths.replay_trials
+    )
 
     capture_command = [
         str(isaac_python),
@@ -732,6 +768,29 @@ def build_stages(
         "--max-candidates",
         str(args.max_pregrasp_candidates),
     ]
+    batch_prefilter_command = None
+    if batch_prefilter_enabled:
+        batch_prefilter_command = [
+            str(graspgenx_python),
+            str(script / "curobo_batch_grasp_lift_diagnostic.py"),
+            "--capture",
+            str(paths.capture),
+            "--pregrasp-plan",
+            str(paths.pregrasp),
+            "--output",
+            str(paths.batch_prefilter),
+            "--batch-size",
+            str(args.batch_grasp_lift_prefilter_size),
+            "--grasp-depth-offset-m",
+            str(args.grasp_depth_offset_m),
+        ]
+        if args.maximum_grasp_lift_candidates is not None:
+            batch_prefilter_command.extend(
+                [
+                    "--maximum-candidates",
+                    str(args.maximum_grasp_lift_candidates),
+                ]
+            )
     plan_trials_command = [
         str(graspgenx_python),
         str(script / "curobo_plan_grasp_lift_trials.py"),
@@ -742,12 +801,19 @@ def build_stages(
         "--pregrasp-plan",
         str(paths.pregrasp),
         "--output",
-        str(paths.plan_trials),
+        str(effective_plan_trials),
         "--max-physical-trials",
         str(args.max_physical_trials),
         "--grasp-depth-offset-m",
         str(args.grasp_depth_offset_m),
     ]
+    if batch_prefilter_enabled:
+        plan_trials_command.extend(
+            [
+                "--batch-prefilter-report",
+                str(paths.batch_prefilter / "batch_grasp_lift_diagnostic.json"),
+            ]
+        )
     if args.maximum_grasp_lift_candidates is not None:
         plan_trials_command.extend(
             [
@@ -814,11 +880,11 @@ def build_stages(
         "--capture",
         str(paths.capture),
         "--plan-trials",
-        str(paths.plan_trials),
+        str(effective_plan_trials),
         "--scene-usd",
         str(scene_usd),
         "--output",
-        str(paths.replay_trials),
+        str(effective_replay_trials),
         "--max-physical-trials",
         str(args.max_physical_trials),
         "--finger-drive-preset",
@@ -886,13 +952,13 @@ def build_stages(
         "curobo_grasp_lift_trials": Stage(
             "curobo_grasp_lift_trials",
             tuple(plan_trials_command),
-            paths.plan_trials / "grasp_lift_trial_plans.json",
+            effective_plan_trials / "grasp_lift_trial_plans.json",
             ("plans_ready",),
         ),
         "isaac_physical_trials": Stage(
             "isaac_physical_trials",
             tuple(replay_command),
-            paths.replay_trials / "grasp_lift_physical_trials.json",
+            effective_replay_trials / "grasp_lift_physical_trials.json",
         ),
     }
     if vlm_command is not None:
@@ -914,6 +980,17 @@ def build_stages(
                     "handover_aware_rerank",
                     tuple(handover_rerank_command),
                     paths.handover_candidates / "handover_rerank_check.json",
+                )
+        stages = ordered
+    if batch_prefilter_command is not None:
+        ordered = {}
+        for name, stage in stages.items():
+            ordered[name] = stage
+            if name == "curobo_pregrasp":
+                ordered["curobo_batch_grasp_lift_prefilter"] = Stage(
+                    "curobo_batch_grasp_lift_prefilter",
+                    tuple(batch_prefilter_command),
+                    paths.batch_prefilter / "batch_grasp_lift_diagnostic.json",
                 )
         stages = ordered
     return stages
@@ -972,6 +1049,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             "max_physical_trials": args.max_physical_trials,
             "maximum_grasp_lift_candidates": (
                 args.maximum_grasp_lift_candidates
+            ),
+            "batch_grasp_lift_prefilter_size": (
+                args.batch_grasp_lift_prefilter_size
+            ),
+            "batch_grasp_lift_prefilter_policy": (
+                "GPU batch strict pose-preflight and grasp/lift screening; "
+                "unchanged sequential attached-object handover planning for survivors"
+                if args.batch_grasp_lift_prefilter_size is not None
+                else None
             ),
             "grasp_depth_offset_m": args.grasp_depth_offset_m,
             "grasp_depth_axis": "GraspGenX canonical tool +Z",
@@ -1174,6 +1260,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "static_collision_filter",
             "handover_aware_rerank",
             "curobo_pregrasp",
+            "curobo_batch_grasp_lift_prefilter",
             "curobo_grasp_lift_trials",
             "isaac_physical_trials",
         ):
@@ -1216,9 +1303,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"pipeline failed: {exc}", file=sys.stderr, flush=True)
     else:
         manifest["status"] = "success"
+        physical_stage = stages.get("isaac_physical_trials")
+        default_physical_report = (
+            paths.batch_replay_trials
+            if args.batch_grasp_lift_prefilter_size is not None
+            else paths.replay_trials
+        ) / "grasp_lift_physical_trials.json"
         manifest["result"] = {
             "physical_trial_report": str(
-                paths.replay_trials / "grasp_lift_physical_trials.json"
+                physical_stage.report
+                if physical_stage is not None
+                else default_physical_report
             )
         }
         print("RGB-D-to-grasp simulation pipeline succeeded", flush=True)

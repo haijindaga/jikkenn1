@@ -131,6 +131,72 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         planner = bounded_stages["curobo_grasp_lift_trials"].command
         self.assertEqual(planner[planner.index("--maximum-candidates") + 1], "8")
 
+    def test_opt_in_batch_prefilter_keeps_complete_handover_and_replay_stages(self):
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--target-object",
+                "mug",
+                "--ollama-model",
+                "gemma3:12b",
+                "--output",
+                str(PROJECT / "outputs" / "batch-prefilter"),
+                "--handover-region-json",
+                str(PROJECT / "config/handover_regions/mug_neo_behind.json"),
+                "--batch-grasp-lift-prefilter-size",
+                "8",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        names = list(stages)
+        self.assertEqual(
+            names[names.index("curobo_pregrasp") + 1],
+            "curobo_batch_grasp_lift_prefilter",
+        )
+        batch = stages["curobo_batch_grasp_lift_prefilter"].command
+        self.assertEqual(batch[batch.index("--batch-size") + 1], "8")
+        planner = stages["curobo_grasp_lift_trials"].command
+        self.assertEqual(
+            planner[planner.index("--batch-prefilter-report") + 1],
+            str(paths.batch_prefilter / "batch_grasp_lift_diagnostic.json"),
+        )
+        self.assertEqual(
+            stages["curobo_grasp_lift_trials"].report.parent,
+            paths.batch_plan_trials,
+        )
+        self.assertEqual(
+            stages["isaac_physical_trials"].report.parent,
+            paths.batch_replay_trials,
+        )
+        self.assertEqual(
+            planner[planner.index("--handover-region-json") + 1],
+            str(PROJECT / "config/handover_regions/mug_neo_behind.json"),
+        )
+
+    def test_batch_prefilter_refuses_support_contact_exception(self):
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "hammer",
+                    "--output",
+                    "outputs/e2e",
+                    "--batch-grasp-lift-prefilter-size",
+                    "8",
+                    "--allow-reviewed-support-contact-preflight",
+                ]
+            )
+
     def test_vlm_mode_inserts_ollama_before_sam3(self) -> None:
         args = MODULE.parse_args(
             [
