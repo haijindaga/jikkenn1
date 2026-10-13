@@ -25,6 +25,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pregrasp-plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-physical-trials", type=int, default=5)
+    parser.add_argument(
+        "--maximum-candidates",
+        type=int,
+        help=(
+            "Optional fixed prefix of the pregrasp score order to evaluate. "
+            "Omit to preserve the reviewed all-candidate automatic-handover search."
+        ),
+    )
     parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--robot", default="franka.yml")
     parser.add_argument("--device", default="cuda:0")
@@ -100,6 +108,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if args.maximum_candidates is not None and args.maximum_candidates <= 0:
+        parser.error("--maximum-candidates must be positive")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
     if (
@@ -250,6 +260,14 @@ def main() -> int:
         raise ValueError("pre-grasp candidate indices and scores are empty or mismatched")
     if len(np.unique(source_indices)) != len(source_indices):
         raise ValueError("pre-grasp source candidate indices must be unique")
+    all_source_indices = source_indices
+    total_candidate_pool_count = int(len(source_indices))
+    if args.maximum_candidates is not None:
+        search_stop = min(args.maximum_candidates, total_candidate_pool_count)
+        source_indices = source_indices[:search_stop]
+        scores = scores[:search_stop]
+    evaluated_prefix_count = int(len(source_indices))
+    candidate_pool_truncated = evaluated_prefix_count < total_candidate_pool_count
 
     transport_orientation_policy = None
     if args.transport_orientation_policy_report is not None:
@@ -352,14 +370,25 @@ def main() -> int:
                 constrained_orientation_selection
             ),
             "candidate_search_scope": (
-                "all eligible pregrasp candidates"
+                f"fixed score-ordered prefix of {evaluated_prefix_count} candidates"
+                if args.maximum_candidates is not None
+                else "all eligible pregrasp candidates"
                 if automatic_handover
                 else "until the requested physical-trial count is available"
+            ),
+            "maximum_candidates": args.maximum_candidates,
+            "candidate_prefix_changes_constraints_or_thresholds": False,
+            "selection_optimality_scope": (
+                "evaluated score-ordered prefix only"
+                if candidate_pool_truncated
+                else "complete pregrasp candidate pool"
             ),
             "selection_uses_weighted_sum": False,
             "selection_uses_candidate_specific_thresholds": False,
         },
-        "candidate_pool_count": int(len(source_indices)),
+        "candidate_pool_count": total_candidate_pool_count,
+        "evaluated_candidate_prefix_count": evaluated_prefix_count,
+        "candidate_pool_truncated": candidate_pool_truncated,
         "attempts": [],
         "successful_plan_directories": [],
     }
@@ -571,9 +600,23 @@ def main() -> int:
             ~np.isin(source_indices, args.exclude_source_candidate_index)
         )
     )
-    manifest["eligible_candidate_pool_count"] = eligible_candidate_count
-    manifest["candidate_pool_exhausted"] = (
+    total_eligible_candidate_count = int(
+        total_candidate_pool_count
+        - np.count_nonzero(
+            np.isin(
+                all_source_indices,
+                args.exclude_source_candidate_index,
+            )
+        )
+    )
+    manifest["eligible_candidate_pool_count"] = total_eligible_candidate_count
+    manifest["eligible_candidate_prefix_count"] = eligible_candidate_count
+    manifest["evaluated_candidate_prefix_exhausted"] = (
         len(manifest["attempts"]) == eligible_candidate_count
+    )
+    manifest["candidate_pool_exhausted"] = (
+        not candidate_pool_truncated
+        and len(manifest["attempts"]) == total_eligible_candidate_count
     )
     write_manifest(manifest_path, manifest)
     print(json.dumps(manifest, indent=2), flush=True)

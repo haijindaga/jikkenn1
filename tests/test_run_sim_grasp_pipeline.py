@@ -86,6 +86,51 @@ class RunSimGraspPipelineTests(unittest.TestCase):
             infer[infer.index("--segmentation-role") + 1], "whole_object"
         )
 
+    def test_fixed_grasp_lift_prefix_is_forwarded_without_changing_defaults(self):
+        default_args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "mug",
+                "--output",
+                str(PROJECT / "outputs" / "default"),
+            ]
+        )
+        default_stages = MODULE.build_stages(
+            default_args,
+            project_root=PROJECT,
+            paths=MODULE.pipeline_paths(default_args.output),
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        self.assertNotIn(
+            "--maximum-candidates",
+            default_stages["curobo_grasp_lift_trials"].command,
+        )
+
+        bounded_args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "mug",
+                "--output",
+                str(PROJECT / "outputs" / "bounded"),
+                "--maximum-grasp-lift-candidates",
+                "8",
+            ]
+        )
+        bounded_stages = MODULE.build_stages(
+            bounded_args,
+            project_root=PROJECT,
+            paths=MODULE.pipeline_paths(bounded_args.output),
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        planner = bounded_stages["curobo_grasp_lift_trials"].command
+        self.assertEqual(planner[planner.index("--maximum-candidates") + 1], "8")
+
     def test_vlm_mode_inserts_ollama_before_sam3(self) -> None:
         args = MODULE.parse_args(
             [

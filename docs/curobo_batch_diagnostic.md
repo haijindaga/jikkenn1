@@ -67,3 +67,21 @@ the sequential end-to-end `planner_feasible` field.
 Trajectory equality, full collision post-validation, attached-object transport,
 receive direction, tilt, handover region, and final lexicographic selection
 remain separate gates.
+
+## Bounded full-handover run
+
+The batch diagnostic above is not a replacement for the complete handover
+planner.  To test the unchanged grasp/lift/attached-object transport path on a
+fixed score-ordered prefix, use the normal pipeline option below:
+
+```bash
+--maximum-grasp-lift-candidates 8
+```
+
+This evaluates at most the first eight candidates in the pregrasp score order.
+It does not change any IK, collision, receive-direction, tilt, handover-region,
+or physics-replay threshold.  The manifest records both the complete candidate
+pool size and the evaluated prefix size.  A selected plan is therefore the
+best feasible plan within that prefix, not a claim of global optimality over
+the unsearched candidates.  Omitting the option preserves the previous search
+scope.

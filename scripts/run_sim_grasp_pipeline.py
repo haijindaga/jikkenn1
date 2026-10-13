@@ -113,6 +113,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Minimum gripper clearance from the segmented human receive part",
     )
     parser.add_argument("--max-pregrasp-candidates", type=int, default=100)
+    parser.add_argument(
+        "--maximum-grasp-lift-candidates",
+        type=int,
+        help=(
+            "Optional fixed pregrasp-score prefix for full grasp/lift/handover "
+            "planning; omitted preserves the reviewed search scope"
+        ),
+    )
     parser.add_argument("--max-physical-trials", type=int, default=5)
     parser.add_argument(
         "--grasp-depth-offset-m",
@@ -278,6 +286,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--topk cannot exceed --num-grasps")
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if (
+        args.maximum_grasp_lift_candidates is not None
+        and args.maximum_grasp_lift_candidates <= 0
+    ):
+        parser.error("--maximum-grasp-lift-candidates must be positive")
     if not math.isfinite(args.grasp_depth_offset_m) or args.grasp_depth_offset_m < 0.0:
         parser.error("--grasp-depth-offset-m must be finite and non-negative")
     if not math.isfinite(args.finger_drive_scale) or args.finger_drive_scale <= 0.0:
@@ -735,6 +748,13 @@ def build_stages(
         "--grasp-depth-offset-m",
         str(args.grasp_depth_offset_m),
     ]
+    if args.maximum_grasp_lift_candidates is not None:
+        plan_trials_command.extend(
+            [
+                "--maximum-candidates",
+                str(args.maximum_grasp_lift_candidates),
+            ]
+        )
     if args.allow_reviewed_support_contact_preflight:
         plan_trials_command.append("--allow-reviewed-support-contact-preflight")
     if args.handover_goal_position_robot_base_m is not None:
@@ -950,6 +970,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             "collision_threshold_m": args.collision_threshold,
             "max_pregrasp_candidates": args.max_pregrasp_candidates,
             "max_physical_trials": args.max_physical_trials,
+            "maximum_grasp_lift_candidates": (
+                args.maximum_grasp_lift_candidates
+            ),
             "grasp_depth_offset_m": args.grasp_depth_offset_m,
             "grasp_depth_axis": "GraspGenX canonical tool +Z",
             "grasp_depth_policy": "same explicit offset for every candidate",

@@ -3,6 +3,7 @@ import json
 import runpy
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -459,6 +460,32 @@ class GraspLiftScriptTests(unittest.TestCase):
             status, path = namespace["read_plan_status"](trial)
         self.assertEqual(status, "handover_transport_planning_failed")
         self.assertEqual(path, str(report))
+
+    def test_trial_runner_accepts_a_fixed_positive_candidate_prefix(self):
+        namespace = runpy.run_path(
+            str(PROJECT / "scripts" / "curobo_plan_grasp_lift_trials.py"),
+            run_name="curobo_plan_grasp_lift_trials_prefix_test",
+        )
+        required = [
+            "curobo_plan_grasp_lift_trials.py",
+            "--capture",
+            "capture",
+            "--segmentation",
+            "segmentation",
+            "--pregrasp-plan",
+            "pregrasp",
+            "--output",
+            "output",
+            "--maximum-candidates",
+            "8",
+        ]
+        with mock.patch("sys.argv", required):
+            args = namespace["parse_args"]()
+        self.assertEqual(args.maximum_candidates, 8)
+
+        required[-1] = "0"
+        with mock.patch("sys.argv", required), self.assertRaises(SystemExit):
+            namespace["parse_args"]()
 
     def test_non_handover_success_accepts_null_transport_report(self):
         namespace = runpy.run_path(
