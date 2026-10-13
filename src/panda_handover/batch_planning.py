@@ -34,6 +34,22 @@ def candidate_chunks(candidate_count: int, batch_size: int) -> Iterator[range]:
         yield range(start, min(start + batch_size, candidate_count))
 
 
+def pad_candidate_indices(indices: Sequence[int], batch_size: int) -> list[int]:
+    """Pad a final chunk to cuRobo's fixed configured batch dimension.
+
+    Padded entries duplicate the final real candidate and are discarded from
+    all reported results.  This changes only tensor shape, never the real
+    candidate order, thresholds, or acceptance decisions.
+    """
+
+    values = [int(value) for value in indices]
+    if not values:
+        raise ValueError("candidate index chunk must not be empty")
+    if batch_size <= 0 or len(values) > batch_size:
+        raise ValueError("batch_size must cover the candidate index chunk")
+    return values + [values[-1]] * (batch_size - len(values))
+
+
 def reduce_batch_success(value: Any, active_count: int) -> list[bool]:
     """Reduce all non-batch dimensions of a tensor/array-like success field."""
 

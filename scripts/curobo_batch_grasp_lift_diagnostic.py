@@ -128,7 +128,10 @@ def main() -> int:
         check=True,
     )
 
-    from panda_handover.batch_planning import candidate_chunks
+    from panda_handover.batch_planning import (
+        candidate_chunks,
+        pad_candidate_indices,
+    )
     from panda_handover.curobo_bridge import select_named_joint_positions
     from panda_handover.curobo_planning import (
         load_singleview_observed_pointcloud,
@@ -216,7 +219,16 @@ def main() -> int:
         ):
             indices = np.asarray(list(index_range), dtype=np.int64)
             active_count = len(indices)
-            batch_transforms = transforms[indices]
+            # The pinned cuRobo goal registry allocates a fixed leading batch
+            # dimension during warmup.  Despite max_batch_size's API wording,
+            # changing that dimension on the final partial chunk fails in
+            # JointState.copy_.  Duplicate the last real candidate solely to
+            # preserve tensor shape, then discard all padded result rows.
+            padded_indices = np.asarray(
+                pad_candidate_indices(indices.tolist(), configured_batch_size),
+                dtype=np.int64,
+            )
+            batch_transforms = transforms[padded_indices]
             quaternions = rotation_matrix_to_quaternion_wxyz(
                 batch_transforms[:, :3, :3]
             ).astype(np.float32, copy=False)
@@ -231,7 +243,7 @@ def main() -> int:
             )
             current_state = JointState.from_position(
                 torch.from_numpy(start_positions).to(device_cfg.device)[None, :].repeat(
-                    active_count, 1
+                    configured_batch_size, 1
                 ),
                 joint_names=planner.joint_names,
             )
@@ -277,6 +289,10 @@ def main() -> int:
                     "original_goalset_ranks": indices.astype(int).tolist(),
                     "active_candidate_count": active_count,
                     "configured_batch_size": configured_batch_size,
+                    "padding_count": configured_batch_size - active_count,
+                    "padding_policy": (
+                        "duplicate final real candidate; discard padded results"
+                    ),
                     "preflight_wall_time_s": preflight_elapsed,
                     "grasp_lift_wall_time_s": grasp_elapsed,
                     "planner_status": str(getattr(result, "status", "no result")),
@@ -332,6 +348,10 @@ def main() -> int:
             "candidate_specific_parameter_tuning": False,
             "shared_collision_world": True,
             "planner_reused_across_chunks": True,
+            "partial_final_batch_policy": (
+                "duplicate final real candidate to fixed cuRobo batch size; "
+                "discard padded result rows"
+            ),
         },
         "timing": {
             "process_wall_time_s": time.monotonic() - process_started,

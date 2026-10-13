@@ -10,6 +10,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from panda_handover.batch_planning import (
     candidate_chunks,
     compare_batch_to_sequential,
+    pad_candidate_indices,
     reduce_batch_success,
 )
 
@@ -24,6 +25,17 @@ class BatchPlanningTests(unittest.TestCase):
             [[False, True], [False, False], [True, False], [True, True]]
         )
         self.assertEqual(reduce_batch_success(values, 3), [True, False, True])
+
+    def test_partial_final_batch_is_padded_without_reordering_real_candidates(self):
+        self.assertEqual(pad_candidate_indices([32, 33], 16)[:2], [32, 33])
+        self.assertEqual(len(pad_candidate_indices([32, 33], 16)), 16)
+        self.assertEqual(set(pad_candidate_indices([32, 33], 16)[2:]), {33})
+
+    def test_padding_rejects_empty_or_oversized_chunks(self):
+        with self.assertRaises(ValueError):
+            pad_candidate_indices([], 16)
+        with self.assertRaises(ValueError):
+            pad_candidate_indices([0, 1, 2], 2)
 
     def test_comparison_never_claims_full_pipeline_equivalence(self):
         report = compare_batch_to_sequential(

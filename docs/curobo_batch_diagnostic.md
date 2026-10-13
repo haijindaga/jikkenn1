@@ -8,6 +8,12 @@ submits score-ordered grasp candidates in fixed-size batches. `--batch-size`
 is only a GPU resource cap: it does not change candidate scores, constraints,
 or thresholds.
 
+The pinned cuRobo goal registry fixes its leading batch dimension during
+warmup. If the final chunk is smaller than `--batch-size`, the diagnostic
+duplicates its final real candidate to fill the tensor, then discards every
+padded result row. This is shape padding only; it does not add, remove, or
+reorder real candidate decisions.
+
 The first gate covers strict Issue #663 preflight and approach/grasp/lift
 feasibility. It does **not** yet save replayable trajectories, apply the
 reviewed support-contact fallback, or batch the attached-object handover.
