@@ -55,6 +55,12 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         self.assertEqual(
             stages["capture_rgbd"].command[0], str(Path("/envs/isaac/bin/python"))
         )
+        capture = stages["capture_rgbd"].command
+        resolution_index = capture.index("--resolution")
+        self.assertEqual(
+            capture[resolution_index + 1 : resolution_index + 3],
+            ("640", "480"),
+        )
         self.assertEqual(
             stages["isaac_physical_trials"].command[0],
             str(Path("/envs/isaac/bin/python")),
@@ -84,6 +90,35 @@ class RunSimGraspPipelineTests(unittest.TestCase):
         )
         self.assertEqual(
             infer[infer.index("--segmentation-role") + 1], "whole_object"
+        )
+
+    def test_capture_resolution_is_forwarded(self):
+        args = MODULE.parse_args(
+            [
+                "--scene-usd",
+                str(PROJECT / "scene.usda"),
+                "--prompt",
+                "scissors",
+                "--output",
+                str(PROJECT / "outputs" / "hires"),
+                "--capture-resolution",
+                "1280",
+                "960",
+            ]
+        )
+        paths = MODULE.pipeline_paths(args.output)
+        stages = MODULE.build_stages(
+            args,
+            project_root=PROJECT,
+            paths=paths,
+            isaac_python=Path("/envs/isaac/bin/python"),
+            graspgenx_python=Path("/graspgenx/.venv/bin/python"),
+        )
+        capture = stages["capture_rgbd"].command
+        resolution_index = capture.index("--resolution")
+        self.assertEqual(
+            capture[resolution_index + 1 : resolution_index + 3],
+            ("1280", "960"),
         )
 
     def test_fixed_grasp_lift_prefix_is_forwarded_without_changing_defaults(self):

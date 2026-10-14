@@ -99,6 +99,17 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ollama-timeout-s", type=float, default=180.0)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--capture-resolution",
+        type=int,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        default=(640, 480),
+        help=(
+            "RGB-D capture resolution passed to Isaac Sim; default 640 480 "
+            "preserves existing runs"
+        ),
+    )
+    parser.add_argument(
         "--graspgenx-root",
         type=Path,
         default=Path("/home/suzutaro/GraspGenX"),
@@ -298,6 +309,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         parser.error("--topk cannot exceed --num-grasps")
     if args.max_physical_trials <= 0:
         parser.error("--max-physical-trials must be positive")
+    if any(value <= 0 for value in args.capture_resolution):
+        parser.error("--capture-resolution values must be positive")
     if (
         args.maximum_grasp_lift_candidates is not None
         and args.maximum_grasp_lift_candidates <= 0
@@ -645,6 +658,9 @@ def build_stages(
         str(scene_usd),
         "--output",
         str(paths.capture_root),
+        "--resolution",
+        str(args.capture_resolution[0]),
+        str(args.capture_resolution[1]),
     ]
     if args.headless:
         capture_command.append("--headless")
@@ -1033,6 +1049,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "simulation_only": True,
         "inputs": {
             "scene_usd": str(scene_usd),
+            "capture_resolution": list(args.capture_resolution),
             "prompt": args.prompt,
             "target_object": args.target_object,
             "task_instruction": args.task_instruction,
