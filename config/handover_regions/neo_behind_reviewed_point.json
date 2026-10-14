@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "frame": "robot_base",
+  "units": "metres",
+  "up_axis": "Z",
+  "humanDirection": [
+    -1.0,
+    0.0,
+    0.0
+  ],
+  "review": {
+    "source": "Windows scene-layout editor",
+    "policy": "single reviewed handover point",
+    "candidate_specific_tuning": false
+  },
+  "entities": {
+    "handover": {
+      "label": "受け渡し点",
+      "shape": "point",
+      "pos": [
+        -0.29,
+        0.06,
+        0.15
+      ],
+      "size": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw": 0.0,
+      "color": "#df57dc",
+      "visible": true
+    }
+  }
+}
