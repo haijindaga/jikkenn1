@@ -667,6 +667,26 @@ class RunSimGraspPipelineTests(unittest.TestCase):
                 ]
             )
 
+    def test_semantic_orientation_cost_rejects_manual_part_prompts(self):
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(
+                [
+                    "--scene-usd",
+                    "scene.usda",
+                    "--prompt",
+                    "scissors",
+                    "--grasp-part-prompt",
+                    "scissors blades",
+                    "--receive-part-prompt",
+                    "scissors handles",
+                    "--output",
+                    "outputs/e2e",
+                    "--handover-region-json",
+                    "config/handover_regions/neo_behind_reviewed_point.json",
+                    "--semantic-orientation-cost",
+                ]
+            )
+
     def test_handover_solver_iteration_diagnostic_is_forwarded(self) -> None:
         args = MODULE.parse_args(
             [

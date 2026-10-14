@@ -393,6 +393,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         and not automatic_handover
     ):
         parser.error("--semantic-orientation-cost requires automatic handover")
+    if args.semantic_orientation_cost and args.target_object is None:
+        parser.error(
+            "--semantic-orientation-cost requires --target-object because the "
+            "orientation policy must come from the VLM report; manual part "
+            "prompts use the free transport-orientation policy"
+        )
     if args.grasp_retention_mode is None:
         args.grasp_retention_mode = "physics"
     solver_iteration_values = (
