@@ -15,6 +15,7 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.scene_layout import DEFAULT_TABLETOP_LAYOUT
+from panda_handover.handover_overlay import handover_region_overlay_spec
 from panda_handover.replay_physics import (
     configure_replay_physics,
     replay_physics_state,
@@ -91,6 +92,20 @@ def parse_args() -> argparse.Namespace:
             "simulation and collision are disabled below this prim so a visual "
             "receiver such as 1X NEO remains fixed while the replay timeline runs."
         ),
+    )
+    parser.add_argument(
+        "--show-handover-region",
+        action="store_true",
+        help=(
+            "Presentation-only: draw the box recorded in the successful plan's "
+            "handover_region_json as a translucent, non-physical overlay"
+        ),
+    )
+    parser.add_argument(
+        "--handover-region-opacity",
+        type=float,
+        default=0.18,
+        help="Opacity of --show-handover-region; must be in (0, 1]",
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
@@ -280,6 +295,10 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--visual-only-receiver-prim must be an absolute non-root prim path"
         )
+    if not math.isfinite(args.handover_region_opacity) or not (
+        0.0 < args.handover_region_opacity <= 1.0
+    ):
+        parser.error("--handover-region-opacity must be in (0, 1]")
     return args
 
 
@@ -291,6 +310,28 @@ requested_finger_drive_values = resolve_finger_drive_values(
     diagnostic_scale=args.finger_drive_scale,
 )
 replay = load_grasp_lift_replay(args.capture, args.plan)
+handover_region_visual_spec = None
+if args.show_handover_region:
+    region_value = replay.plan_report.get("parameters", {}).get("handover_region_json")
+    if not region_value:
+        raise ValueError(
+            "--show-handover-region requires a plan that records "
+            "parameters.handover_region_json"
+        )
+    region_path = Path(region_value).expanduser()
+    if not region_path.is_absolute():
+        region_path = repo_root / region_path
+    region_path = region_path.resolve()
+    if not region_path.is_file():
+        raise FileNotFoundError(
+            f"recorded handover-region JSON does not exist: {region_path}"
+        )
+    region_layout = json.loads(region_path.read_text(encoding="utf-8"))
+    handover_region_visual_spec = handover_region_overlay_spec(
+        region_layout,
+        source=region_path,
+        opacity=args.handover_region_opacity,
+    )
 if (
     args.grasp_retention_mode
     in {
@@ -374,6 +415,7 @@ try:
         PhysxSchema,
         Sdf,
         Usd,
+        UsdGeom,
         UsdPhysics,
         UsdShade,
     )
@@ -775,6 +817,81 @@ try:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
     stage = stage_utils.get_current_stage()
+    handover_region_overlay_report = {
+        "enabled": False,
+        "presentation_only": True,
+        "affects_physics": False,
+        "authored_scene_modified": False,
+    }
+    if handover_region_visual_spec is not None:
+        panda_root = stage.GetPrimAtPath(args.panda_prim)
+        if not panda_root.IsValid():
+            raise RuntimeError(
+                f"cannot place robot-base handover overlay; missing {args.panda_prim}"
+            )
+        overlay_root_path = "/World/presentation_handover_region"
+        overlay_box_path = f"{overlay_root_path}/Box"
+        original_edit_target = stage.GetEditTarget()
+        try:
+            # The overlay is session-only and has no physics APIs.  Its parent
+            # carries the robot-base transform, so reviewed robot-base metres
+            # remain valid even if the robot root is moved in the world.
+            stage.SetEditTarget(stage.GetSessionLayer())
+            overlay_root = UsdGeom.Xform.Define(stage, overlay_root_path)
+            base_to_world = UsdGeom.Xformable(panda_root).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default()
+            )
+            UsdGeom.Xformable(overlay_root).MakeMatrixXform().Set(base_to_world)
+
+            overlay_box = UsdGeom.Cube.Define(stage, overlay_box_path)
+            overlay_box.CreateSizeAttr(1.0)
+            common_api = UsdGeom.XformCommonAPI(overlay_box)
+            common_api.SetTranslate(
+                Gf.Vec3d(*handover_region_visual_spec.center_robot_base_m)
+            )
+            common_api.SetRotate(
+                Gf.Vec3f(0.0, 0.0, handover_region_visual_spec.yaw_degrees),
+                UsdGeom.XformCommonAPI.RotationOrderXYZ,
+            )
+            common_api.SetScale(Gf.Vec3f(*handover_region_visual_spec.size_m))
+            color = Gf.Vec3f(*handover_region_visual_spec.color_rgb)
+            overlay_box.GetDisplayColorAttr().Set([color])
+            overlay_box.GetDisplayOpacityAttr().Set(
+                [handover_region_visual_spec.opacity]
+            )
+            overlay_box.CreateDoubleSidedAttr(True)
+
+            material = UsdShade.Material.Define(
+                stage, f"{overlay_root_path}/Material"
+            )
+            shader = UsdShade.Shader.Define(
+                stage, f"{overlay_root_path}/Material/PreviewSurface"
+            )
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.45)
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(
+                handover_region_visual_spec.opacity
+            )
+            material.CreateSurfaceOutput().ConnectToSource(
+                shader.ConnectableAPI(), "surface"
+            )
+            UsdShade.MaterialBindingAPI.Apply(overlay_box.GetPrim()).Bind(material)
+        finally:
+            stage.SetEditTarget(original_edit_target)
+        for overlay_prim in Usd.PrimRange(stage.GetPrimAtPath(overlay_root_path)):
+            if overlay_prim.HasAPI(UsdPhysics.RigidBodyAPI) or overlay_prim.HasAPI(
+                UsdPhysics.CollisionAPI
+            ):
+                raise RuntimeError("presentation handover overlay acquired physics APIs")
+        handover_region_overlay_report = handover_region_visual_spec.to_report()
+        handover_region_overlay_report.update(
+            {
+                "prim_path": overlay_box_path,
+                "robot_prim": args.panda_prim,
+            }
+        )
+
     viewer_camera_report = {
         "enabled": False,
         "presentation_only": True,
@@ -2630,6 +2747,7 @@ try:
                 args.camera_prim if scene_usd is not None else "/World/replay_camera"
             ),
             "visual_only_receiver": visual_only_receiver_report,
+            "visual_handover_region": handover_region_overlay_report,
             "viewer_camera": viewer_camera_report,
             "replay_scene_validation": replay_scene_validation,
         },

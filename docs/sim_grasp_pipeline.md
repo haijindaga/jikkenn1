@@ -554,6 +554,14 @@ The coefficient is an intentionally nonphysical sensitivity test, not a rubber
 calibration or a real-robot setting. Compare it only with a standard-friction
 run using the same capture and candidate-plan manifest.
 
+For a presentation replay of a successful automatic handover, pass
+`--show-handover-region`. The replay reads the exact `handover_region_json`
+recorded in `grasp_lift_plan_check.json` and draws that reviewed box as a
+translucent visual overlay. The overlay is authored only in the USD session
+layer and has no rigid-body or collision APIs. Omit `--viewer-view side` and
+custom viewer-camera arguments to retain the original scene view. The optional
+`--handover-region-opacity` controls only display opacity and defaults to 0.18.
+
 For a controlled FixedJoint solver diagnostic, first replay the same saved
 candidate plans with the default solver settings, then use a new output name
 and repeat with `--solver-position-iterations 64` and
