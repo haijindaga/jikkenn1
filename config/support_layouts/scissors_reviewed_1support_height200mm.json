@@ -1,0 +1,34 @@
+{
+  "schema": "jikkenn1-support-layout-v1",
+  "frame": "world",
+  "units": "metres",
+  "up_axis": "Z",
+  "object_label": "scissors",
+  "supports": [
+    {
+      "name": "support_1",
+      "center_xy_world_m": [
+        0.5024448150613784,
+        0.15085665002418608
+      ],
+      "size_xy_m": [
+        0.111,
+        0.111
+      ],
+      "height_m": 0.2,
+      "yaw_deg": 180
+    }
+  ],
+  "review_evidence": {
+    "capture": "/home/suzutaro/projects/jikkenn1/outputs/scissors_vlm_e2e_v1/capture/camera_0",
+    "segmentation": "/home/suzutaro/projects/jikkenn1/outputs/scissors_vlm_e2e_v1/capture/sam3",
+    "grasp_mask_role": "receive_part",
+    "support_mask_role": "grasp_part"
+  },
+  "variant": {
+    "derived_from": "scissors_reviewed_1support.json",
+    "common_vertical_increase_m": 0.14,
+    "target_and_support_height_above_table_m": 0.2,
+    "changes": "support height and target world-Z translation only"
+  }
+}
