@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "frame": "robot_base",
+  "units": "metres",
+  "up_axis": "Z",
+  "humanDirection": [
+    -1.0,
+    0.0,
+    0.0
+  ],
+  "review": {
+    "source": "Windows scene-layout editor: scene-layout-review (6).json",
+    "policy": "reviewed handover box with center-first horizontal sampling",
+    "candidate_specific_tuning": false
+  },
+  "entities": {
+    "handover": {
+      "label": "受け渡し領域",
+      "shape": "box",
+      "pos": [
+        -0.29,
+        0.06,
+        0.15
+      ],
+      "size": [
+        0.25,
+        0.25,
+        0.3
+      ],
+      "yaw": 0.0,
+      "color": "#df57dc",
+      "visible": true
+    }
+  }
+}
