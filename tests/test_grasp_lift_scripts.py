@@ -376,6 +376,15 @@ class GraspLiftScriptTests(unittest.TestCase):
         )
         self.assertIn("retention_target_gravity_tilt_deviation_rad.npy", replay)
         self.assertIn('"pass_fail_applied": False', replay)
+        self.assertIn('"--viewer-view"', replay)
+        self.assertIn('choices=("scene", "side")', replay)
+        self.assertIn('"--viewer-camera-position"', replay)
+        self.assertIn('"--viewer-camera-target"', replay)
+        self.assertIn('viewer_camera_path = "/World/presentation_camera"', replay)
+        self.assertIn("stage.GetSessionLayer()", replay)
+        self.assertIn("set_active_viewport_camera(viewer_camera_path)", replay)
+        self.assertIn('"affects_rgbd_capture": False', replay)
+        self.assertIn('"affects_physics": False', replay)
 
     def test_first_lift_limitation_is_explicit_and_fail_visible(self):
         source = (PROJECT / "scripts" / "curobo_plan_grasp_lift.py").read_text(

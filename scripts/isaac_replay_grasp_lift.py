@@ -44,6 +44,8 @@ ATTACHMENT_TRANSLATION_TOLERANCE_M = 0.005
 ATTACHMENT_ORIENTATION_TOLERANCE_RAD = math.radians(5.0)
 FIXED_JOINT_MIN_FINGER_CLOSURE_TRAVEL_M = 0.001
 FIXED_JOINT_POST_CREATE_SETTLE_FRAMES = 5
+SIDE_VIEWER_CAMERA_POSITION_M = (-0.325, -3.0, 1.4)
+SIDE_VIEWER_CAMERA_TARGET_M = (-0.325, 0.0, 0.35)
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +61,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panda-prim", default="/World/Panda")
     parser.add_argument("--target-prim", default="/World/Objects/Target")
     parser.add_argument("--camera-prim", default="/World/camera_0")
+    parser.add_argument(
+        "--viewer-view",
+        choices=("scene", "side"),
+        default="scene",
+        help=(
+            "Presentation-only viewport preset. 'scene' preserves the existing "
+            "viewport behavior; 'side' activates a temporary side-on camera."
+        ),
+    )
+    parser.add_argument(
+        "--viewer-camera-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help="Optional presentation-only viewport camera position in world metres",
+    )
+    parser.add_argument(
+        "--viewer-camera-target",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help="Optional presentation-only viewport look-at target in world metres",
+    )
     parser.add_argument(
         "--visual-only-receiver-prim",
         help=(
@@ -171,6 +196,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.simulation_only:
         parser.error("--simulation-only is required")
+    if (args.viewer_camera_position is None) != (args.viewer_camera_target is None):
+        parser.error(
+            "--viewer-camera-position and --viewer-camera-target must be supplied together"
+        )
     if min(args.settle_frames, args.close_frames, args.hold_frames) < 0:
         parser.error("frame counts must be non-negative")
     if not (
@@ -333,6 +362,7 @@ try:
     from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
     from isaacsim.core.prims import RigidPrim, SingleArticulation, XFormPrim
     from isaacsim.core.utils.bounds import compute_aabb, create_bbox_cache
+    from isaacsim.core.utils.viewports import set_active_viewport_camera
     from isaacsim.core.utils.types import ArticulationAction
     from isaacsim.core.experimental.utils import stage as stage_utils
     from isaacsim.robot.manipulators.examples.franka import Franka
@@ -745,6 +775,57 @@ try:
         camera.set_world_pose(camera_position, camera_orientation, camera_axes="world")
 
     stage = stage_utils.get_current_stage()
+    viewer_camera_report = {
+        "enabled": False,
+        "presentation_only": True,
+        "affects_rgbd_capture": False,
+        "affects_physics": False,
+    }
+    custom_viewer_camera = args.viewer_camera_position is not None
+    if args.viewer_view == "side" or custom_viewer_camera:
+        viewer_position = np.asarray(
+            args.viewer_camera_position
+            if custom_viewer_camera
+            else SIDE_VIEWER_CAMERA_POSITION_M,
+            dtype=np.float64,
+        )
+        viewer_target = np.asarray(
+            args.viewer_camera_target
+            if custom_viewer_camera
+            else SIDE_VIEWER_CAMERA_TARGET_M,
+            dtype=np.float64,
+        )
+        viewer_orientation = look_at_quaternion_world(viewer_position, viewer_target)
+        viewer_camera_path = "/World/presentation_camera"
+        original_edit_target = stage.GetEditTarget()
+        try:
+            # Keep this camera in the anonymous session layer: it is visible in
+            # the replay viewport but never modifies the authored experiment USD.
+            stage.SetEditTarget(stage.GetSessionLayer())
+            viewer_camera = Camera(
+                prim_path=viewer_camera_path,
+                position=viewer_position,
+                orientation=viewer_orientation,
+            )
+            viewer_camera.set_world_pose(
+                viewer_position, viewer_orientation, camera_axes="world"
+            )
+        finally:
+            stage.SetEditTarget(original_edit_target)
+        set_active_viewport_camera(viewer_camera_path)
+        for _ in range(2):
+            simulation_app.update()
+        viewer_camera_report = {
+            "enabled": True,
+            "presentation_only": True,
+            "affects_rgbd_capture": False,
+            "affects_physics": False,
+            "preset": "custom" if custom_viewer_camera else args.viewer_view,
+            "prim_path": viewer_camera_path,
+            "position_world_m": viewer_position.tolist(),
+            "target_world_m": viewer_target.tolist(),
+            "authored_scene_modified": False,
+        }
 
     def usd_attribute_value(attribute):
         if not attribute:
@@ -2549,6 +2630,7 @@ try:
                 args.camera_prim if scene_usd is not None else "/World/replay_camera"
             ),
             "visual_only_receiver": visual_only_receiver_report,
+            "viewer_camera": viewer_camera_report,
             "replay_scene_validation": replay_scene_validation,
         },
         "replay": {
