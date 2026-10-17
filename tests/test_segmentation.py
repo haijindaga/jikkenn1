@@ -5,10 +5,12 @@ from pathlib import Path
 import numpy as np
 
 from panda_handover.segmentation import (
+    compose_handover_part_overlay,
     InstanceSegmentation,
     point_statistics,
     prompt_slug,
     save_prompt_overlap_report,
+    save_handover_part_overlay,
     save_segmentation_artifacts,
     select_masked_points,
     union_mask,
@@ -17,6 +19,38 @@ from panda_handover.segmentation import (
 
 
 class SegmentationTests(unittest.TestCase):
+    def test_combined_handover_overlay_preserves_resolution_and_reports_overlap(self):
+        rgb = np.full((2, 3, 3), 100, dtype=np.uint8)
+        grasp = np.array([[True, True, False], [False, False, False]])
+        receive = np.array([[False, True, False], [False, False, True]])
+        overlay, report = compose_handover_part_overlay(
+            rgb, grasp, receive, alpha=0.5
+        )
+        self.assertEqual(overlay.shape, rgb.shape)
+        self.assertEqual(report["image_width_px"], 3)
+        self.assertEqual(report["image_height_px"], 2)
+        self.assertEqual(report["grasp_part_pixels"], 2)
+        self.assertEqual(report["receive_part_pixels"], 2)
+        self.assertEqual(report["overlap_pixels"], 1)
+        self.assertFalse(report["raw_masks_forced_disjoint"])
+        self.assertTrue(np.array_equal(overlay[1, 0], rgb[1, 0]))
+
+    def test_save_combined_handover_overlay_writes_image_and_report(self):
+        rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+        grasp = np.array([[True, False], [False, False]])
+        receive = np.array([[False, False], [False, True]])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report = save_handover_part_overlay(
+                temporary_directory,
+                rgb=rgb,
+                grasp_part_mask=grasp,
+                receive_part_mask=receive,
+            )
+            output = Path(temporary_directory)
+            self.assertTrue((output / "handover_parts_overlay.png").is_file())
+            self.assertTrue((output / "handover_parts_overlay.json").is_file())
+            self.assertEqual(report["status"], "success")
+
     def test_instance_prediction_requires_original_resolution_masks(self):
         prediction = InstanceSegmentation(
             masks=np.zeros((1, 2, 3), dtype=bool),

@@ -11,6 +11,12 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 
+HANDOVER_PART_COLORS_RGB = {
+    "grasp_part": np.array([220.0, 50.0, 47.0], dtype=np.float32),
+    "receive_part": np.array([0.0, 114.0, 178.0], dtype=np.float32),
+}
+
+
 @dataclass(frozen=True)
 class InstanceSegmentation:
     """Original-resolution instance predictions from SAM3."""
@@ -138,6 +144,86 @@ def union_mask(prediction: InstanceSegmentation, image_shape: tuple[int, int]) -
     if prediction.masks.shape[0] == 0:
         return np.zeros(image_shape, dtype=bool)
     return np.any(prediction.masks, axis=0)
+
+
+def compose_handover_part_overlay(
+    rgb: np.ndarray,
+    grasp_part_mask: np.ndarray,
+    receive_part_mask: np.ndarray,
+    *,
+    alpha: float = 0.55,
+) -> tuple[np.ndarray, dict]:
+    """Overlay robot-grasp and human-receive masks in one inspectable image.
+
+    The raw SAM3 masks are not made disjoint. Pixels shared by both masks are
+    blended with both semantic colors, making overlap visible rather than
+    silently assigning it to one role.
+    """
+    rgb = np.asarray(rgb)
+    grasp = np.asarray(grasp_part_mask, dtype=bool)
+    receive = np.asarray(receive_part_mask, dtype=bool)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"rgb must have shape (H, W, 3), got {rgb.shape}")
+    if grasp.shape != rgb.shape[:2] or receive.shape != rgb.shape[:2]:
+        raise ValueError(
+            "part masks must match RGB image shape: "
+            f"rgb={rgb.shape[:2]}, grasp={grasp.shape}, receive={receive.shape}"
+        )
+    if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("alpha must be finite and in (0, 1]")
+
+    overlay = rgb.astype(np.float32, copy=True)
+    for role, mask in (("grasp_part", grasp), ("receive_part", receive)):
+        color = HANDOVER_PART_COLORS_RGB[role]
+        overlay[mask] = overlay[mask] * (1.0 - alpha) + color * alpha
+
+    intersection = grasp & receive
+    report = {
+        "image_width_px": int(rgb.shape[1]),
+        "image_height_px": int(rgb.shape[0]),
+        "alpha": float(alpha),
+        "colors_rgb": {
+            role: color.astype(int).tolist()
+            for role, color in HANDOVER_PART_COLORS_RGB.items()
+        },
+        "grasp_part_pixels": int(np.count_nonzero(grasp)),
+        "receive_part_pixels": int(np.count_nonzero(receive)),
+        "overlap_pixels": int(np.count_nonzero(intersection)),
+        "raw_masks_forced_disjoint": False,
+    }
+    return np.clip(overlay, 0, 255).astype(np.uint8), report
+
+
+def save_handover_part_overlay(
+    output: str | Path,
+    *,
+    rgb: np.ndarray,
+    grasp_part_mask: np.ndarray,
+    receive_part_mask: np.ndarray,
+    alpha: float = 0.55,
+) -> dict:
+    """Save the combined handover-part overlay and a reproducibility report."""
+    from PIL import Image
+
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    overlay, report = compose_handover_part_overlay(
+        rgb,
+        grasp_part_mask,
+        receive_part_mask,
+        alpha=alpha,
+    )
+    image_path = output / "handover_parts_overlay.png"
+    Image.fromarray(overlay, mode="RGB").save(image_path)
+    report = {
+        "status": "success",
+        "output": str(image_path.resolve()),
+        **report,
+    }
+    (output / "handover_parts_overlay.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return report
 
 
 def save_prompt_overlap_report(

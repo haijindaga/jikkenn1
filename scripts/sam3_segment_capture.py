@@ -16,8 +16,10 @@ sys.path.insert(0, str(repo_root / "src"))
 
 from panda_handover.segmentation import (
     infer_sam3_prompts,
+    save_handover_part_overlay,
     save_prompt_overlap_report,
     save_segmentation_artifacts,
+    union_mask,
 )
 from panda_handover.vlm_parts import load_handover_parts_report
 
@@ -101,6 +103,18 @@ def main() -> int:
         overlap = save_prompt_overlap_report(
             args.output, predictions, tuple(rgb.shape[:2])
         )
+        parts_overlay = None
+        if "grasp_part" in role_prompts and "receive_part" in role_prompts:
+            parts_overlay = save_handover_part_overlay(
+                args.output,
+                rgb=rgb,
+                grasp_part_mask=union_mask(
+                    predictions[role_prompts["grasp_part"]], tuple(rgb.shape[:2])
+                ),
+                receive_part_mask=union_mask(
+                    predictions[role_prompts["receive_part"]], tuple(rgb.shape[:2])
+                ),
+            )
         passed = all(report["automatic_checks_passed"] for report in reports.values())
         passed = passed and overlap["automatic_checks_passed"]
         report = {
@@ -111,6 +125,7 @@ def main() -> int:
             },
             "prompts": role_prompts,
             "prompt_directories": directories,
+            "handover_parts_overlay": parts_overlay,
             "automatic_checks_passed": passed,
             "manual_review_required": True,
         }
