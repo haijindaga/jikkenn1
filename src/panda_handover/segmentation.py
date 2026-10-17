@@ -13,7 +13,7 @@ import numpy as np
 
 HANDOVER_PART_COLORS_RGB = {
     "grasp_part": np.array([220.0, 50.0, 47.0], dtype=np.float32),
-    "receive_part": np.array([0.0, 114.0, 178.0], dtype=np.float32),
+    "receive_part": np.array([0.0, 158.0, 115.0], dtype=np.float32),
 }
 
 
