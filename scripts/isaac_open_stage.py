@@ -18,12 +18,27 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--stage", type=Path, required=True)
 parser.add_argument(
     "--view",
-    choices=("scene", "side", "capture"),
+    choices=("scene", "side", "oblique", "capture"),
     default="side",
     help=(
         "scene preserves the ordinary viewport, side creates a temporary upright "
-        "overview, and capture reuses the authored RGB-D camera"
+        "overview, oblique creates the usual receiver-right presentation view, "
+        "and capture reuses the authored RGB-D camera"
     ),
+)
+parser.add_argument(
+    "--viewer-camera-position",
+    type=float,
+    nargs=3,
+    metavar=("X", "Y", "Z"),
+    help="Optional presentation-only viewport camera position in world metres",
+)
+parser.add_argument(
+    "--viewer-camera-target",
+    type=float,
+    nargs=3,
+    metavar=("X", "Y", "Z"),
+    help="Optional presentation-only viewport look-at target in world metres",
 )
 parser.add_argument("--panda-prim", default="/World/Panda")
 parser.add_argument(
@@ -46,6 +61,10 @@ parser.add_argument(
     help="Opacity of --handover-region-json; must be in (0, 1]",
 )
 args = parser.parse_args()
+if (args.viewer_camera_position is None) != (args.viewer_camera_target is None):
+    parser.error(
+        "--viewer-camera-position and --viewer-camera-target must be supplied together"
+    )
 stage_path = args.stage.expanduser().resolve()
 if not stage_path.is_file():
     parser.error(f"stage does not exist: {stage_path}")
@@ -154,7 +173,8 @@ try:
         )
 
     active_camera_path = None
-    if args.view == "capture":
+    custom_viewer_camera = args.viewer_camera_position is not None
+    if args.view == "capture" and not custom_viewer_camera:
         camera_prim = stage.GetPrimAtPath(args.camera_prim)
         if not camera_prim.IsValid() or not camera_prim.IsA(UsdGeom.Camera):
             raise RuntimeError(
@@ -162,13 +182,21 @@ try:
                 f"{args.camera_prim}"
             )
         active_camera_path = args.camera_prim
-    elif args.view == "side":
-        # Side-on, Z-up presentation view.  Its X target is the midpoint of the
-        # table and reviewed receiver roots, so both fit laterally in frame.
+    elif args.view in {"side", "oblique"} or custom_viewer_camera:
+        # Presentation-only, Z-up views.  Positive world Y places the receiver
+        # at frame right.  The oblique preset also exposes the tabletop depth,
+        # which makes the reviewed handover volume easier to read.
         # Camera.set_world_pose(..., camera_axes="world") is the same tested
         # axis conversion used by the RGB-D capture pipeline.
-        eye = np.asarray((-0.325, -3.0, 1.4), dtype=np.float64)
-        target = np.asarray((-0.325, 0.0, 0.35), dtype=np.float64)
+        if custom_viewer_camera:
+            eye = np.asarray(args.viewer_camera_position, dtype=np.float64)
+            target = np.asarray(args.viewer_camera_target, dtype=np.float64)
+        elif args.view == "oblique":
+            eye = np.asarray((1.55, 2.60, 1.45), dtype=np.float64)
+            target = np.asarray((-0.20, 0.0, 0.35), dtype=np.float64)
+        else:
+            eye = np.asarray((-0.325, -3.0, 1.4), dtype=np.float64)
+            target = np.asarray((-0.325, 0.0, 0.35), dtype=np.float64)
         orientation = look_at_quaternion_world(eye, target)
         active_camera_path = "/ViewerCamera"
         original_edit_target = stage.GetEditTarget()
@@ -192,7 +220,13 @@ try:
     if active_camera_path is None:
         print("viewport camera: existing scene viewport (scene)", flush=True)
     else:
-        print(f"viewport camera: {active_camera_path} ({args.view})", flush=True)
+        camera_label = "custom" if custom_viewer_camera else args.view
+        print(f"viewport camera: {active_camera_path} ({camera_label})", flush=True)
+        if active_camera_path == "/ViewerCamera":
+            print(
+                f"viewer position: {eye.tolist()}, target: {target.tolist()}",
+                flush=True,
+            )
     print("Timeline is stopped. Close the Isaac Sim window when done.", flush=True)
     while simulation_app.is_running():
         simulation_app.update()

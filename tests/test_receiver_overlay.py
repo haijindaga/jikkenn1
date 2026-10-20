@@ -27,8 +27,12 @@ class ReceiverOverlayTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("set_camera_view(", script)
-        self.assertIn('choices=("scene", "side", "capture")', script)
+        self.assertIn('choices=("scene", "side", "oblique", "capture")', script)
         self.assertIn('default="side"', script)
+        self.assertIn('"--viewer-camera-position"', script)
+        self.assertIn('"--viewer-camera-target"', script)
+        self.assertIn('elif args.view == "oblique":', script)
+        self.assertIn("1.55, 2.60, 1.45", script)
         self.assertIn('active_camera_path = "/ViewerCamera"', script)
         self.assertIn('camera_axes="world"', script)
         self.assertIn("stage.GetSessionLayer()", script)
