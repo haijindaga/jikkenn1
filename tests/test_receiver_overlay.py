@@ -22,12 +22,12 @@ def load_module():
 
 
 class ReceiverOverlayTests(unittest.TestCase):
-    def test_stage_viewer_has_side_and_capture_views_without_saving(self):
+    def test_stage_viewer_has_static_region_and_views_without_saving(self):
         script = (REPO_ROOT / "scripts" / "isaac_open_stage.py").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("set_camera_view(", script)
-        self.assertIn('choices=("side", "capture")', script)
+        self.assertIn('choices=("scene", "side", "capture")', script)
         self.assertIn('default="side"', script)
         self.assertIn('active_camera_path = "/ViewerCamera"', script)
         self.assertIn('camera_axes="world"', script)
@@ -36,6 +36,11 @@ class ReceiverOverlayTests(unittest.TestCase):
         self.assertIn('"--camera-prim"', script)
         self.assertIn('default="/World/camera_0"', script)
         self.assertIn("camera_prim.IsA(UsdGeom.Camera)", script)
+        self.assertIn('"--handover-region-json"', script)
+        self.assertIn("handover_region_overlay_spec(", script)
+        self.assertIn('overlay_root_path = "/World/presentation_handover_region"', script)
+        self.assertIn("UsdPhysics.RigidBodyAPI", script)
+        self.assertIn("UsdPhysics.CollisionAPI", script)
         self.assertNotIn("save_stage", script)
 
     def test_overlay_uses_measured_neo_bounds_without_modifying_sources(self):
